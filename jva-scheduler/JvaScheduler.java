@@ -7,12 +7,12 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.concurrent.ThreadLocalRandom;
 
-public class ActionDemo extends JPanel {
+public class JvaScheduler extends JPanel {
   private LocalDateTime clickTime;
   private final JLabel label;
   private final Timer timer;
 
-  public ActionDemo() {
+  public JvaScheduler() {
     setLayout(new GridBagLayout());
     GridBagConstraints gbc = new GridBagConstraints();
     gbc.gridwidth = GridBagConstraints.REMAINDER;
@@ -89,7 +89,7 @@ public class ActionDemo extends JPanel {
 
           JFrame frame = new JFrame("Window");
           frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-          frame.add(new ActionDemo());
+          frame.add(new JvaScheduler());
           frame.pack();
           frame.setLocationRelativeTo(null);
           frame.setVisible(true);
