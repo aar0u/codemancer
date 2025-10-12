@@ -1,4 +1,4 @@
 set PATH=%JAVA_HOME%\bin
-javac ActionDemo.java
-jar cvfe ActionDemo.jar ActionDemo *.class
+javac JvaScheduler.java
+jar cvfe JvaScheduler.jar JvaScheduler *.class
 del *.class
