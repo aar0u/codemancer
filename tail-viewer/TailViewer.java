@@ -6,7 +6,10 @@ import java.awt.datatransfer.UnsupportedFlavorException;
 import java.awt.dnd.*;
 import java.awt.event.*;
 import java.io.*;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.List;
 import java.util.Optional;
@@ -19,7 +22,7 @@ public class TailViewer {
     private static final int DEFAULT_WINDOW_WIDTH = 800;
     private static final int DEFAULT_WINDOW_HEIGHT = 600;
     private static final int DEFAULT_MAX_LINES = 1000;
-    private static final int UPDATE_INTERVAL_MS = 500;
+    private static final int UPDATE_INTERVAL_MS = 1000;
     private static final String[] DEFAULT_KEYWORDS = {"ERROR"};
     private static final String DEFAULT_LOG_FILE = "sample.log";
 
@@ -254,7 +257,7 @@ public class TailViewer {
     }
 
     private void updateLogContent(boolean forceReload) {
-        if (paused) return;
+        if (paused || !new File(logFilePath).exists()) return;
 
         long startTime = System.currentTimeMillis();
         try {
@@ -349,7 +352,7 @@ public class TailViewer {
                 for (int k = 0; k < highlightKeywords.length; k++) highlightKeywords[k] = highlightKeywords[k].trim();
             }
         }
-
+        
         timer = new Timer();
         timer.schedule(new TimerTask() {
             @Override
@@ -367,6 +370,19 @@ public class TailViewer {
     }
 
     public static void main(String[] args) {
+        // Set java.home for GraalVM native image runtime (when java.class.path is null or blank)
+        String classPath = System.getProperty("java.class.path");
+        if (classPath == null || classPath.trim().isEmpty()) {
+            try {
+                String path = Paths.get(TailViewer.class.getProtectionDomain().getCodeSource().getLocation().toURI()).getParent().toString();
+                System.setProperty("java.home", path);
+                System.out.println("[INFO] Set java.home to: " + path);
+            } catch (Exception e) { 
+                System.setProperty("java.home", ".");
+                System.out.println("[INFO] Set java.home to: .");
+            }
+        }
+
         boolean cliMode = false;
         String logPath = DEFAULT_LOG_FILE;
 
