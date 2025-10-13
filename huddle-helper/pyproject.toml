@@ -1,0 +1,24 @@
+[project]
+name = "ar-utils"
+version = "0.1.0"
+description = "Default template for PDM package"
+authors = [
+    {name = "aaron", email = "1491157+aar0u@users.noreply.github.com"},
+]
+dependencies = [
+    "pyqt6>=6.9.1",
+    "PySide6>=6.10.0",
+]
+requires-python = "==3.12.*"
+readme = "README.md"
+license = {text = "MIT"}
+
+
+[tool.pdm]
+distribution = false
+
+[dependency-groups]
+dev = [
+    "nuitka>=2.7.16",
+    "pyinstaller>=6.16.0",
+]
