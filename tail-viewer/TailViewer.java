@@ -123,11 +123,10 @@ public class TailViewer {
                 for (int i = readSize - 1; i >= 0 && lines < numLines; i--) {
                     char c = (char) buffer[i];
                     if (c == '\n') {
-                        if (line.length() > 0) {
-                            result.add(0, line.toString());
-                            line.setLength(0);
-                            lines++;
-                        }
+                        // Always add the current line even if empty to preserve trailing empty lines
+                        result.add(0, line.toString());
+                        line.setLength(0);
+                        lines++;
                     } else if (c != '\r') {
                         line.insert(0, c);
                     }
