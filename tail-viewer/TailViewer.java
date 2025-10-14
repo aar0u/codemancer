@@ -1,21 +1,26 @@
 import javax.swing.*;
-import javax.swing.text.*;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.DefaultHighlighter;
+import javax.swing.text.Highlighter;
 import java.awt.*;
 import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.UnsupportedFlavorException;
-import java.awt.dnd.*;
-import java.awt.event.*;
-import java.io.*;
-import java.net.URISyntaxException;
+import java.awt.dnd.DnDConstants;
+import java.awt.dnd.DropTarget;
+import java.awt.dnd.DropTargetAdapter;
+import java.awt.dnd.DropTargetDropEvent;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.io.File;
+import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.List;
-import java.util.Optional;
 import java.util.Timer;
-import java.util.regex.Pattern;
 import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class TailViewer {
     // Constants
@@ -48,8 +53,8 @@ public class TailViewer {
         this.logFilePath = logFilePath;
     }
 
-    private static void printf(String format, Object... args) { System.out.print(String.format(format, args)); }
-    private static void printlnf(String format, Object... args) { System.out.println(String.format(format, args)); }
+    private static void print(String text) { System.out.print(text); }
+    private static void printlnf(String format, Object... args) { System.out.printf(format + "%n", args); }
 
     // Log reading and processing utility class
     private static class LogResult {
@@ -385,7 +390,7 @@ public class TailViewer {
                     LogResult result = getLogContent(logFilePath, lastPosition, maxLines);
                     lastPosition = result.newPosition;
                     String output = updateHighlightsAnsi(result.lines, highlightKeywords);
-                    printf("%s", output);
+                    print(output);
                 } catch (IOException ex) {
                     printlnf("Error reading file: %s", ex.getMessage());
                 }
@@ -410,11 +415,11 @@ public class TailViewer {
         boolean cliMode = false;
         String logPath = DEFAULT_LOG_FILE;
 
-        for (int i = 0; i < args.length; i++) {
-            if ("--cli".equalsIgnoreCase(args[i])) {
+        for (String arg : args) {
+            if ("--cli".equalsIgnoreCase(arg)) {
                 cliMode = true;
-            } else if (!args[i].startsWith("--") && DEFAULT_LOG_FILE.equals(logPath)) {
-                logPath = args[i];
+            } else if (!arg.startsWith("--") && DEFAULT_LOG_FILE.equals(logPath)) {
+                logPath = arg;
             }
         }
 
