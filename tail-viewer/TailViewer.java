@@ -389,7 +389,8 @@ public class TailViewer {
                     LogResult result = getLogContent(logFilePath, lastPosition, maxLines);
                     lastPosition = result.newPosition;
                     String output = updateHighlightsAnsi(result.lines, highlightKeywords);
-                    print(output);
+                    // Remove NUL chars from UTF-16
+                    print(output.replace("\u0000", ""));
                 } catch (IOException ex) {
                     printlnf("Error reading file: %s", ex.getMessage());
                 }
