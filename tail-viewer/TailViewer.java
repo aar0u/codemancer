@@ -25,6 +25,9 @@ public class TailViewer {
     private static final int UPDATE_INTERVAL_MS = 1000;
     private static final String[] DEFAULT_KEYWORDS = {"ERROR"};
     private static final String DEFAULT_LOG_FILE = "sample.log";
+    private static final Color HIGHLIGHT_UI_COLOR = Color.ORANGE;
+    private static final String HIGHLIGHT_ANSI_START = "\u001B[1;31m";
+    private static final String HIGHLIGHT_ANSI_RESET = "\u001B[0m";
 
     // UI Components
     private JFrame frame;
@@ -44,6 +47,9 @@ public class TailViewer {
     private TailViewer(String logFilePath) {
         this.logFilePath = logFilePath;
     }
+
+    private static void printf(String format, Object... args) { System.out.print(String.format(format, args)); }
+    private static void printlnf(String format, Object... args) { System.out.println(String.format(format, args)); }
 
     // Log reading and processing utility class
     private static class LogResult {
@@ -82,7 +88,8 @@ public class TailViewer {
                     lastPosition = raf.getFilePointer();
 
                     String newContent = new String(bytes, StandardCharsets.UTF_8);
-                    String[] newLines = newContent.split("\r?\n");
+                    // Keep empty segments by using split with limit = -1
+                    String[] newLines = newContent.split("\r?\n", -1);
                     fetchedLines = Arrays.asList(newLines);
                 }
             }
@@ -190,7 +197,7 @@ public class TailViewer {
 
                         if (firstFile.isPresent()) {
                             File file = firstFile.get();
-                            System.out.println("Dragged in file: " + file.getAbsolutePath());
+                            printlnf("Dragged in file: %s", file.getAbsolutePath());
                             logFilePath = file.getAbsolutePath();
                             lastPosition = 0;
                             updateLogContent(true);
@@ -268,16 +275,30 @@ public class TailViewer {
                 displayLines.clear();
                 displayLines.addAll(result.lines);
             } else {
-                displayLines.addAll(result.lines);
+                // Merge the incoming chunk with existing lines:
+                // - If the chunk starts without a newline, its first segment belongs to the last existing line
+                // - If the chunk starts with a newline, first segment is ""
+                if (!displayLines.isEmpty() && !result.lines.isEmpty()) {
+                    int lastIdx = displayLines.size() - 1;
+                    String merged = displayLines.get(lastIdx) + result.lines.get(0);
+                    displayLines.set(lastIdx, merged);
+                    if (result.lines.size() > 1) {
+                        displayLines.addAll(result.lines.subList(1, result.lines.size()));
+                    }
+                } else {
+                    displayLines.addAll(result.lines);
+                }
                 if (displayLines.size() > maxLines) {
                     displayLines.subList(0, displayLines.size() - maxLines).clear();
                 }
             }
 
             StringBuilder sb = new StringBuilder();
-            for (String line : displayLines) {
+            for (int i = 0; i < displayLines.size(); i++) {
+                String line = displayLines.get(i);
                 if (line != null) {
-                    sb.append(line).append("\n");
+                    sb.append(line);
+                    if (i < displayLines.size() - 1) sb.append('\n');
                 }
             }
 
@@ -288,12 +309,12 @@ public class TailViewer {
             long updateTime = System.currentTimeMillis() - startTime;
             int newLinesCount = result.lines.size();
             int totalLinesCount = displayLines.size();
-            System.out.printf("[GUI] Loaded: %d lines | Total: %d lines | Time: %dms%n",
+            printlnf("[GUI] Loaded: %d lines | Total: %d lines | Time: %dms",
                     newLinesCount, totalLinesCount, updateTime);
 
         } catch (IOException ex) {
             logDisplay.setText("Error reading file: " + ex.getMessage());
-            System.err.println("[GUI] Error: " + ex.getMessage());
+            printlnf("[GUI] Error: %s", ex.getMessage());
         }
     }
 
@@ -308,7 +329,7 @@ public class TailViewer {
             while (matcher.find()) {
                 try {
                     highlighter.addHighlight(matcher.start(), matcher.end(),
-                            new DefaultHighlighter.DefaultHighlightPainter(Color.ORANGE));
+                            new DefaultHighlighter.DefaultHighlightPainter(HIGHLIGHT_UI_COLOR));
                 } catch (BadLocationException ignored) {
                 }
             }
@@ -320,7 +341,8 @@ public class TailViewer {
         if (keywords == null) return "";
 
         StringBuilder sb = new StringBuilder();
-        for (String line : lines) {
+        for (int i = 0; i < lines.size(); i++) {
+            String line = lines.get(i);
             if (line == null) continue;
             String colored = line;
             for (String kw : keywords) {
@@ -329,13 +351,15 @@ public class TailViewer {
                     Matcher m = p.matcher(colored);
                     StringBuffer buf = new StringBuffer();
                     while (m.find()) {
-                        m.appendReplacement(buf, "\u001B[33m" + m.group() + "\u001B[0m");
+                        String coloredGroup = HIGHLIGHT_ANSI_START + m.group() + HIGHLIGHT_ANSI_RESET;
+                        m.appendReplacement(buf, Matcher.quoteReplacement(coloredGroup));
                     }
                     m.appendTail(buf);
                     colored = buf.toString();
                 }
             }
-            sb.append(colored).append("\n");
+            sb.append(colored);
+            if (i < lines.size() - 1) sb.append('\n');
         }
         return sb.toString();
     }
@@ -361,9 +385,9 @@ public class TailViewer {
                     LogResult result = getLogContent(logFilePath, lastPosition, maxLines);
                     lastPosition = result.newPosition;
                     String output = updateHighlightsAnsi(result.lines, highlightKeywords);
-                    System.out.print(output);
+                    printf("%s", output);
                 } catch (IOException ex) {
-                    System.err.println("Error reading file: " + ex.getMessage());
+                    printlnf("Error reading file: %s", ex.getMessage());
                 }
             }
         }, 0, UPDATE_INTERVAL_MS);
@@ -376,10 +400,10 @@ public class TailViewer {
             try {
                 String path = Paths.get(TailViewer.class.getProtectionDomain().getCodeSource().getLocation().toURI()).getParent().toString();
                 System.setProperty("java.home", path);
-                System.out.println("[INFO] Set java.home to: " + path);
+                printlnf("[INFO] Set java.home to: %s", path);
             } catch (Exception e) { 
                 System.setProperty("java.home", ".");
-                System.out.println("[INFO] Set java.home to: .");
+                printlnf("[INFO] Set java.home to: .");
             }
         }
 
@@ -389,7 +413,7 @@ public class TailViewer {
         for (int i = 0; i < args.length; i++) {
             if ("--cli".equalsIgnoreCase(args[i])) {
                 cliMode = true;
-            } else if (!args[i].startsWith("--")) {
+            } else if (!args[i].startsWith("--") && DEFAULT_LOG_FILE.equals(logPath)) {
                 logPath = args[i];
             }
         }
