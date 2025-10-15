@@ -93,6 +93,8 @@ public class TailViewer {
                     lastPosition = raf.getFilePointer();
 
                     String newContent = new String(bytes, StandardCharsets.UTF_8);
+                    // Clean NUL characters for UTF-16 files read as UTF-8 (complement to line 132)
+                    newContent = newContent.replace("\u0000", "");
                     // Keep empty segments by using split with limit = -1
                     String[] newLines = newContent.split("\r?\n", -1);
                     fetchedLines = Arrays.asList(newLines);
@@ -127,7 +129,7 @@ public class TailViewer {
                         result.add(0, line.toString());
                         line.setLength(0);
                         lines++;
-                    } else if (c != '\r') {
+                    } else if (c != '\r' && c != '\u0000') { // Skip NUL chars from UTF-16 files
                         line.insert(0, c);
                     }
                 }
@@ -389,8 +391,7 @@ public class TailViewer {
                     LogResult result = getLogContent(logFilePath, lastPosition, maxLines);
                     lastPosition = result.newPosition;
                     String output = updateHighlightsAnsi(result.lines, highlightKeywords);
-                    // Remove NUL chars from UTF-16
-                    print(output.replace("\u0000", ""));
+                    print(output);
                 } catch (IOException ex) {
                     printlnf("Error reading file: %s", ex.getMessage());
                 }
