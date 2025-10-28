@@ -9,13 +9,13 @@ import logging
 from typing import Optional, Tuple, List
 
 import keyboard
-from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray
-from PyQt6.QtGui import (QPixmap, QPainter, QPen, QColor, QShortcut,
-                         QKeySequence, QIcon, QFont)
+from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QShortcut, QKeySequence, QIcon, QFont
 from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton,
-                              QVBoxLayout, QWidget, QLabel, QColorDialog,
-                              QSlider, QHBoxLayout, QFileDialog, QLineEdit)
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, QColorDialog,
+    QSlider, QHBoxLayout, QFileDialog, QLineEdit, QSystemTrayIcon, QMenu
+)
 
 # ============================================================================
 # Logging Configuration
@@ -44,9 +44,6 @@ DEFAULT_PEN_WIDTH = 2
 DEFAULT_PEN_COLOR = QColor(255, 0, 0)
 DEFAULT_FONT_SIZE = 16
 MAX_HISTORY = 50
-
-# Timing
-SCREENSHOT_DELAY_MS = 100
 
 # Keyboard
 GLOBAL_HOTKEY = 'Ctrl+Shift+Q'
@@ -109,6 +106,143 @@ def create_svg_icon(path_data: str, color: str = "#ffffff", size: int = ICON_SIZ
     painter.end()
 
     return QIcon(pixmap)
+
+
+# ============================================================================
+# Application Controller
+# ============================================================================
+
+
+class AppController(QObject):
+    """
+    Main application controller managing system tray and screenshot functionality.
+
+    Handles all application-level logic including tray menu, screenshot capture,
+    global hotkey registration, and application lifecycle.
+    """
+
+    # Signal for thread-safe screenshot triggering from keyboard hotkey
+    screenshot_triggered = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.about_window = None
+        self.tray_icon = None
+        self._setup_about_window()
+        self._setup_tray()
+        self._setup_hotkey()
+
+        # Connect signal to slot
+        self.screenshot_triggered.connect(self.take_screenshot)
+
+    def _setup_about_window(self):
+        """Create the about window (hidden by default)."""
+        self.about_window = MainWindow()
+
+    def _setup_tray(self):
+        """Create and configure system tray icon and menu."""
+        # Create system tray icon
+        self.tray_icon = QSystemTrayIcon()
+        self.tray_icon.setIcon(QIcon(ICON_FILENAME))
+        self.tray_icon.setToolTip("ShotNPin - Screenshot Tool")
+
+        # Create tray menu
+        tray_menu = QMenu()
+
+        # Take Screenshot action
+        screenshot_action = tray_menu.addAction("Take Screenshot")
+        screenshot_action.triggered.connect(self.take_screenshot)
+
+        # About action
+        about_action = tray_menu.addAction("About")
+        about_action.triggered.connect(self.show_about)
+
+        tray_menu.addSeparator()
+
+        # Exit action
+        exit_action = tray_menu.addAction("Exit")
+        exit_action.triggered.connect(self.quit_application)
+
+        self.tray_icon.setContextMenu(tray_menu)
+
+        # Double-click to take screenshot
+        self.tray_icon.activated.connect(self.tray_icon_activated)
+
+        # Show the tray icon
+        self.tray_icon.show()
+        logger.info("System tray icon created")
+
+    def tray_icon_activated(self, reason):
+        """Handle tray icon activation (clicks)."""
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.take_screenshot()
+
+    def _setup_hotkey(self):
+        """Register global hotkey for screenshot capture."""
+        # Register global hotkey with a lambda that emits the signal
+        # The signal ensures thread-safe execution in Qt's main thread
+        try:
+            keyboard.add_hotkey(GLOBAL_HOTKEY, lambda: self.screenshot_triggered.emit())
+            logger.info(f"Global hotkey registered: {GLOBAL_HOTKEY}")
+        except Exception as e:
+            logger.error(f"Failed to register global hotkey {GLOBAL_HOTKEY}: {e}")
+            logger.info("You may need to run with administrator/root privileges for global hotkeys")
+
+    def show_about(self):
+        """Show the about window."""
+        if self.about_window:
+            self.about_window.show()
+            self.about_window.activateWindow()
+            self.about_window.raise_()
+
+    def take_screenshot(self):
+        """Capture screen and open editor."""
+        # Check if a CaptureEditor is already open
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, CaptureEditor) and widget.isVisible():
+                logger.debug("Screenshot already in progress, ignoring")
+                return
+
+        try:
+            screen = QApplication.primaryScreen()
+            if not screen:
+                logger.error("No screen available for capture")
+                return
+
+            screenshot = screen.grabWindow(0)
+            if screenshot and not screenshot.isNull():
+                editor = CaptureEditor(screenshot)
+
+                # Keep reference to prevent garbage collection
+                app = QApplication.instance()
+                app.capture_editor = editor
+
+                editor.show()
+                logger.debug("Capture editor opened")
+            else:
+                logger.error("Failed to capture screenshot")
+        except Exception as e:
+            logger.error(f"Error capturing screen: {e}")
+
+    def quit_application(self):
+        """Quit the application and clean up all windows."""
+        # Remove global hotkey
+        try:
+            keyboard.remove_hotkey(GLOBAL_HOTKEY)
+            logger.info("Global hotkey removed")
+        except Exception as e:
+            logger.debug(f"Error removing hotkey: {e}")
+
+        # Close all capture editors and pinned windows
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, (CaptureEditor, PinnedImageWindow)):
+                try:
+                    widget.close()
+                except Exception as e:
+                    logger.debug(f"Error closing window: {e}")
+
+        logger.info("Application quitting")
+        QApplication.quit()
 
 
 # ============================================================================
@@ -1238,30 +1372,20 @@ class CaptureEditor(QWidget):
 
 class MainWindow(QMainWindow):
     """
-    Main application window with launch button and hotkey registration.
+    About dialog window showing application information.
 
-    Provides a simple interface to trigger screenshot capture via button
-    or global hotkey.
+    Simple dialog displaying app name, hotkey, and usage instructions.
     """
 
     def __init__(self):
         super().__init__()
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
-        self.setWindowTitle("ShotNPin")
+        self.setWindowTitle("About - ShotNPin")
         self.setGeometry(100, 100, 300, 250)
-
-        # Register global hotkey
-        try:
-            keyboard.add_hotkey(GLOBAL_HOTKEY, self.take_screenshot)
-            logger.info(f"Global hotkey registered: {GLOBAL_HOTKEY}")
-        except Exception as e:
-            logger.error(f"Failed to register global hotkey {GLOBAL_HOTKEY}: {e}")
-            logger.info("You may need to run with administrator/root privileges for global hotkeys")
-
         self._setup_ui()
 
     def _setup_ui(self):
-        """Create and configure UI elements."""
+        """Create and configure UI elements for about dialog."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
@@ -1277,12 +1401,6 @@ class MainWindow(QMainWindow):
         shortcut_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         shortcut_label.setStyleSheet("color: #0078d4; font-weight: bold;")
         layout.addWidget(shortcut_label)
-
-        # Screenshot button
-        screenshot_btn = QPushButton("Take Screenshot")
-        screenshot_btn.clicked.connect(self.take_screenshot)
-        screenshot_btn.setStyleSheet("padding: 10px; font-size: 14px; margin-top: 10px;")
-        layout.addWidget(screenshot_btn)
 
         # Instructions
         info_text = (
@@ -1300,63 +1418,6 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
-    def take_screenshot(self):
-        """Initiate screenshot capture by hiding window and capturing screen."""
-        # Check if a CaptureEditor is already open
-        for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, CaptureEditor) and widget.isVisible():
-                logger.debug("Screenshot already in progress, ignoring")
-                return
-
-        self.hide()
-        QApplication.processEvents()
-        QTimer.singleShot(SCREENSHOT_DELAY_MS, self._capture_screen)
-
-    def _capture_screen(self):
-        """Capture the screen and open capture editor."""
-        try:
-            screen = QApplication.primaryScreen()
-            if not screen:
-                logger.error("No screen available for capture")
-                self.show()
-                return
-
-            screenshot = screen.grabWindow(0)
-            if screenshot and not screenshot.isNull():
-                editor = CaptureEditor(screenshot)
-
-                # Keep reference to prevent garbage collection
-                app = QApplication.instance()
-                app.capture_editor = editor
-
-                editor.show()
-                logger.debug("Capture editor opened")
-            else:
-                logger.error("Failed to capture screenshot")
-        except Exception as e:
-            logger.error(f"Error capturing screen: {e}")
-        finally:
-            self.show()
-
-    def closeEvent(self, event):
-        """Clean up global hotkey and all windows on exit."""
-        # Remove global hotkey
-        try:
-            keyboard.remove_hotkey(GLOBAL_HOTKEY)
-            logger.info("Global hotkey removed")
-        except Exception as e:
-            logger.debug(f"Error removing hotkey: {e}")
-
-        # Close all capture editors and pinned windows
-        for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, (CaptureEditor, PinnedImageWindow)):
-                try:
-                    widget.close()
-                except Exception as e:
-                    logger.debug(f"Error closing window: {e}")
-
-        logger.info("Application cleanup complete")
-        event.accept()
 
 
 # ============================================================================
@@ -1370,8 +1431,12 @@ def main():
     app.setApplicationName("ShotNPin")
     app.setWindowIcon(QIcon(ICON_FILENAME))
 
-    window = MainWindow()
-    window.show()
+    # Don't quit when last window closes (we run in system tray)
+    app.setQuitOnLastWindowClosed(False)
+
+    # Create app controller, keep reference to prevent garbage collection
+    controller = AppController()
+    app.controller = controller
 
     sys.exit(app.exec())
 
