@@ -54,6 +54,7 @@ public class JvaScheduler extends JPanel {
               Duration duration = Duration.between(now, clickTime);
               label.setText(format(duration));
               if (duration.isNegative()) {
+                // Options: NUMLOCK, SCROLL_LOCK, CAPS_LOCK, SPACE, ENTER
                 robot.keyPress(KeyEvent.VK_NUM_LOCK);
                 robot.keyRelease(KeyEvent.VK_NUM_LOCK);
                 clickTime =

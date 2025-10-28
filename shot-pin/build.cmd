@@ -1,0 +1,1 @@
+pyinstaller --onedir --noconfirm --windowed --icon icons8-screenshot-100.ico --add-data "icons8-screenshot-100.png:." --contents-directory . --workpath z:\temp --distpath z:\downloads shotnpin.py
