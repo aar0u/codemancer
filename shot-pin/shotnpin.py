@@ -6,15 +6,17 @@ A lightweight application for capturing, annotating, and pinning screenshots.
 """
 import sys
 import logging
+from pathlib import Path
 from typing import Optional, Tuple, List
 
 import keyboard
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QShortcut, QKeySequence, QIcon, QFont
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, QColorDialog,
-    QSlider, QHBoxLayout, QFileDialog, QLineEdit, QSystemTrayIcon, QMenu
+    QSlider, QHBoxLayout, QFileDialog, QLineEdit, QSystemTrayIcon, QMenu, QMessageBox
 )
 
 # ============================================================================
@@ -108,6 +110,82 @@ def create_svg_icon(path_data: str, color: str = "#ffffff", size: int = ICON_SIZ
     return QIcon(pixmap)
 
 
+def get_app_icon() -> QIcon:
+    """
+    Get the application icon with correct path resolution.
+    """
+    icon_path = str(Path(__file__).parent / ICON_FILENAME)
+    return QIcon(icon_path)
+
+
+# ============================================================================
+# Single Instance Management
+# ============================================================================
+
+
+class SingleInstance(QObject):
+    """
+    Uses QLocalServer/QLocalSocket for inter-process communication.
+    """
+
+    # Signal emitted when a new instance tries to start
+    new_instance_detected = pyqtSignal(str)
+
+    def __init__(self, key: str = 'shotnpin_single_instance'):
+        """
+        Initialize single instance checker.
+        """
+        super().__init__()
+        self.key = key
+        self.server = None
+
+    def is_already_running(self) -> bool:
+        """
+        Check if another instance is already running.
+        """
+        # Try to connect to existing instance
+        socket = QLocalSocket()
+        socket.connectToServer(self.key)
+
+        if socket.waitForConnected(500):
+            # Another instance is running, send a message
+            socket.write(b"new_instance")
+            socket.waitForBytesWritten(1000)
+            socket.disconnectFromServer()
+            logger.info(f"Another instance is already running (connected to '{self.key}')")
+            return True
+
+        # First remove any stale server (from crashed previous instance)
+        QLocalServer.removeServer(self.key)
+
+        self.server = QLocalServer()
+        if not self.server.listen(self.key):
+            logger.error(f"Failed to create local server: {self.server.errorString()}")
+            return True  # Assume another instance is running to be safe
+
+        # Connect signal to handle new instances trying to connect
+        self.server.newConnection.connect(self._handle_new_connection)
+        logger.info(f"Single instance server started (key: '{self.key}')")
+        return False
+
+    def _handle_new_connection(self):
+        """Handle connection from a new instance trying to start."""
+        connection = self.server.nextPendingConnection()
+        if connection:
+            if connection.waitForReadyRead(1000):
+                message = connection.readAll().data().decode('utf-8', errors='ignore')
+                logger.info(f"Received message from new instance: {message}")
+                self.new_instance_detected.emit(message)
+            connection.close()
+
+    def cleanup(self):
+        """Clean up the server."""
+        if self.server:
+            self.server.close()
+            QLocalServer.removeServer(self.key)
+            logger.info("Single instance server cleaned up")
+
+
 # ============================================================================
 # Application Controller
 # ============================================================================
@@ -118,19 +196,22 @@ class AppController(QObject):
     Main application controller managing system tray and screenshot functionality.
 
     Handles all application-level logic including tray menu, screenshot capture,
-    global hotkey registration, and application lifecycle.
+    global hotkey registration, single instance management, and application lifecycle.
     """
 
     # Signal for thread-safe screenshot triggering from keyboard hotkey
     screenshot_triggered = pyqtSignal()
 
-    def __init__(self):
+    def __init__(self, single_instance: SingleInstance):
         super().__init__()
         self.about_window = None
         self.tray_icon = None
+        self.single_instance = single_instance
+
         self._setup_about_window()
         self._setup_tray()
         self._setup_hotkey()
+        self._setup_single_instance_handler()
 
         # Connect signal to slot
         self.screenshot_triggered.connect(self.take_screenshot)
@@ -143,7 +224,7 @@ class AppController(QObject):
         """Create and configure system tray icon and menu."""
         # Create system tray icon
         self.tray_icon = QSystemTrayIcon()
-        self.tray_icon.setIcon(QIcon(ICON_FILENAME))
+        self.tray_icon.setIcon(get_app_icon())
         self.tray_icon.setToolTip("ShotNPin - Screenshot Tool")
 
         # Create tray menu
@@ -170,7 +251,53 @@ class AppController(QObject):
 
         # Show the tray icon
         self.tray_icon.show()
-        logger.info("System tray icon created")
+
+        # Verify the icon is visible
+        if self.tray_icon.isVisible():
+            logger.info("System tray icon created and visible")
+        else:
+            logger.warning("System tray icon created but not visible, retrying...")
+            # Try again after a short delay
+            QTimer.singleShot(500, self._ensure_tray_visible)
+
+    def _retry_tray_setup(self):
+        """Retry setting up the system tray if it wasn't available initially."""
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            logger.info("System tray now available, setting up...")
+            self._setup_tray()
+        else:
+            logger.error("System tray still not available, giving up")
+            QMessageBox.warning(
+                None,
+                "ShotNPin",
+                "System tray is not available.\nThe application will still work via the global hotkey."
+            )
+
+    def _ensure_tray_visible(self):
+        """Ensure the tray icon is visible."""
+        if self.tray_icon and not self.tray_icon.isVisible():
+            logger.warning("Tray icon not visible, attempting to show again...")
+            self.tray_icon.hide()  # Hide first
+            QTimer.singleShot(100, lambda: self.tray_icon.show())  # Then show
+
+            # Final check
+            QTimer.singleShot(300, self._final_tray_check)
+
+    def _final_tray_check(self):
+        """Final check for tray icon visibility."""
+        if self.tray_icon:
+            if self.tray_icon.isVisible():
+                logger.info("Tray icon is now visible")
+            else:
+                logger.error("Failed to show tray icon after retries")
+                # Show a notification message
+                if self.tray_icon.supportsMessages():
+                    self.tray_icon.showMessage(
+                        "ShotNPin",
+                        f"Running in background. Use {GLOBAL_HOTKEY} to capture.",
+                        QSystemTrayIcon.MessageIcon.Information,
+                        3000
+                    )
 
     def tray_icon_activated(self, reason):
         """Handle tray icon activation (clicks)."""
@@ -187,6 +314,12 @@ class AppController(QObject):
         except Exception as e:
             logger.error(f"Failed to register global hotkey {GLOBAL_HOTKEY}: {e}")
             logger.info("You may need to run with administrator/root privileges for global hotkeys")
+
+    def _setup_single_instance_handler(self):
+        """Setup handler for when another instance tries to start."""
+        self.single_instance.new_instance_detected.connect(
+            lambda msg: self.show_about() if msg == "new_instance" else None
+        )
 
     def show_about(self):
         """Show the about window."""
@@ -225,7 +358,7 @@ class AppController(QObject):
             logger.error(f"Error capturing screen: {e}")
 
     def quit_application(self):
-        """Quit the application and clean up all windows."""
+        """Quit the application and clean up all resources."""
         # Remove global hotkey
         try:
             keyboard.remove_hotkey(GLOBAL_HOTKEY)
@@ -240,6 +373,10 @@ class AppController(QObject):
                     widget.close()
                 except Exception as e:
                     logger.debug(f"Error closing window: {e}")
+
+        # Clean up single instance lock
+        if self.single_instance:
+            self.single_instance.cleanup()
 
         logger.info("Application quitting")
         QApplication.quit()
@@ -1429,13 +1566,19 @@ def main():
     """Initialize and run the ShotNPin application."""
     app = QApplication(sys.argv)
     app.setApplicationName("ShotNPin")
-    app.setWindowIcon(QIcon(ICON_FILENAME))
+
+    app.setWindowIcon(get_app_icon())
+
+    single_instance = SingleInstance()
+    if single_instance.is_already_running():
+        logger.info("Application startup blocked - another instance is already running")
+        sys.exit(0)
 
     # Don't quit when last window closes (we run in system tray)
     app.setQuitOnLastWindowClosed(False)
 
-    # Create app controller, keep reference to prevent garbage collection
-    controller = AppController()
+    # Create app controller with single instance management
+    controller = AppController(single_instance)
     app.controller = controller
 
     sys.exit(app.exec())
