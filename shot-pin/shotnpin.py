@@ -313,7 +313,18 @@ class AppController(QObject):
             logger.info(f"Global hotkey registered: {GLOBAL_HOTKEY}")
         except Exception as e:
             logger.error(f"Failed to register global hotkey {GLOBAL_HOTKEY}: {e}")
-            logger.info("You may need to run with administrator/root privileges for global hotkeys")
+            if sys.platform == "darwin":  # macOS
+                logger.info("On macOS: Please grant Accessibility permissions in System Preferences > Security & Privacy > Privacy > Accessibility")
+                QMessageBox.warning(
+                    None,
+                    "ShotNPin - Permission Required",
+                    f"Failed to register global hotkey {GLOBAL_HOTKEY}.\n\n"
+                    "Please grant Accessibility permissions in System Preferences:\n"
+                    "System Preferences → Security & Privacy → Privacy → Accessibility\n\n"
+                    "Add Terminal or this application to the list and check it."
+                )
+            else:
+                logger.info("You may need to run with administrator/root privileges for global hotkeys")
 
     def _setup_single_instance_handler(self):
         """Setup handler for when another instance tries to start."""
