@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Tuple, List
 
-import keyboard
+from pynput import keyboard
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QShortcut, QKeySequence, QIcon, QFont
@@ -48,7 +48,7 @@ DEFAULT_FONT_SIZE = 16
 MAX_HISTORY = 50
 
 # Keyboard
-GLOBAL_HOTKEY = 'Ctrl+Shift+Q'
+GLOBAL_HOTKEY = '<ctrl>+<shift>+q'
 KEYBOARD_STEP_SMALL = 1
 KEYBOARD_STEP_LARGE = 10
 
@@ -306,10 +306,11 @@ class AppController(QObject):
 
     def _setup_hotkey(self):
         """Register global hotkey for screenshot capture."""
-        # Register global hotkey with a lambda that emits the signal
-        # The signal ensures thread-safe execution in Qt's main thread
         try:
-            keyboard.add_hotkey(GLOBAL_HOTKEY, lambda: self.screenshot_triggered.emit())
+            # Define the hotkey combination
+            hotkeys = {GLOBAL_HOTKEY: lambda: self.screenshot_triggered.emit()}
+            keyboard.GlobalHotKeys(hotkeys).start()
+ 
             logger.info(f"Global hotkey registered: {GLOBAL_HOTKEY}")
         except Exception as e:
             logger.error(f"Failed to register global hotkey {GLOBAL_HOTKEY}: {e}")
@@ -355,6 +356,8 @@ class AppController(QObject):
 
             screenshot = screen.grabWindow(0)
             if screenshot and not screenshot.isNull():
+                screenshot.setDevicePixelRatio(screen.devicePixelRatio())
+ 
                 editor = CaptureEditor(screenshot)
 
                 # Keep reference to prevent garbage collection
@@ -370,12 +373,6 @@ class AppController(QObject):
 
     def quit_application(self):
         """Quit the application and clean up all resources."""
-        # Remove global hotkey
-        try:
-            keyboard.remove_hotkey(GLOBAL_HOTKEY)
-            logger.info("Global hotkey removed")
-        except Exception as e:
-            logger.debug(f"Error removing hotkey: {e}")
 
         # Close all capture editors and pinned windows
         for widget in QApplication.topLevelWidgets():
@@ -589,9 +586,11 @@ class PinnedImageWindow(QWidget):
         self.history_index = history_index
         self.glow_size = GLOW_SIZE
 
+        logical_width, logical_height = self._get_logical_size()
+ 
         # Size includes padding for glow effect
-        self.setFixedSize(pixmap.size().width() + 2 * self.glow_size,
-                         pixmap.size().height() + 2 * self.glow_size)
+        self.setFixedSize(logical_width + 2 * self.glow_size,
+                         logical_height + 2 * self.glow_size)
 
         # Position adjusted for glow effect
         if position:
@@ -630,6 +629,13 @@ class PinnedImageWindow(QWidget):
         QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)
         QShortcut(QKeySequence("Space"), self).activated.connect(self.reopen_capture)
 
+    def _get_logical_size(self) -> Tuple[int, int]:
+        """Get the logical size of the pixmap (accounting for device pixel ratio)"""
+        return (
+            int(self.pixmap.width() / self.pixmap.devicePixelRatio()),
+            int(self.pixmap.height() / self.pixmap.devicePixelRatio())
+        )
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -643,10 +649,12 @@ class PinnedImageWindow(QWidget):
             (QColor(0, 0, 0, 10), 5),
         ]
 
+        logical_width, logical_height = self._get_logical_size()
+
         for color, offset in glow_layers:
             painter.setPen(QPen(color, 1, Qt.PenStyle.SolidLine))
             glow_rect = QRect(self.glow_size - offset, self.glow_size - offset,
-                             self.pixmap.width() + offset * 2, self.pixmap.height() + offset * 2)
+                             logical_width + offset * 2, logical_height + offset * 2)
             painter.drawRect(glow_rect)
 
         # Draw the pixmap at the center (glow expands outward)
@@ -1431,6 +1439,22 @@ class CaptureEditor(QWidget):
             self.screenshot = self.history[self.history_index].copy()
             self.update()
 
+    def _scale_rect(self, rect: QRect) -> QRect:
+        """
+        Scale a rectangle by device pixel ratio for high DPI displays.
+        Note: Only use this when directly accessing pixmap pixel data (like copy).
+        When drawing with QPainter on a pixmap with devicePixelRatio set,
+        Qt automatically handles the scaling, so use logical coordinates.
+        """
+        if self.screenshot.devicePixelRatio() <= 1.0:
+            return rect
+        return QRect(
+            int(rect.x() * self.screenshot.devicePixelRatio()),
+            int(rect.y() * self.screenshot.devicePixelRatio()),
+            int(rect.width() * self.screenshot.devicePixelRatio()),
+            int(rect.height() * self.screenshot.devicePixelRatio())
+        )
+
     def _get_cropped_selection(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
         """
         Get the cropped annotated screenshot from current selection.
@@ -1442,7 +1466,11 @@ class CaptureEditor(QWidget):
         if self.start_pos and self.end_pos:
             selection_rect = QRect(self.start_pos, self.end_pos).normalized()
             if selection_rect.width() > MIN_VALID_RECT and selection_rect.height() > MIN_VALID_RECT:
-                cropped = self.screenshot.copy(selection_rect)
+                # Scale the selection rect for high DPI displays
+                scaled_rect = self._scale_rect(selection_rect)
+                cropped = self.screenshot.copy(scaled_rect)
+                # Preserve the device pixel ratio on the cropped pixmap
+                cropped.setDevicePixelRatio(self.screenshot.devicePixelRatio())
                 result = (cropped, selection_rect)
         return result
 
