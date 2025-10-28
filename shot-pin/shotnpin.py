@@ -726,13 +726,12 @@ class PinnedImageWindow(QWidget):
         editor.history_index = self.history_index
         editor.screenshot = editor.history[editor.history_index].copy()
 
-        editor.create_toolbar()
-
         # Keep reference to prevent garbage collection
         app = QApplication.instance()
         app.capture_editor = editor
 
         editor.show()
+        editor.create_toolbar()
         logger.debug("Reopened capture editor from pinned window")
 
         self.close()
