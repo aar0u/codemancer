@@ -37,7 +37,7 @@ logger = logging.getLogger('ShotNPin')
 GLOW_SIZE = 5
 RESIZE_HANDLE_SIZE = 8
 MIN_SELECTION_SIZE = 20
-MIN_VALID_RECT = 5
+MIN_VALID_RECT = 10
 ICON_SIZE = 24
 TOOLBAR_MARGIN = 5
 TOOLBAR_SPACING = 3
@@ -232,7 +232,7 @@ class AppController(QObject):
 
         # Global screenshot snapshots with state
         self.screenshot_snapshots: List[dict] = []  # Each item: {'screenshot': QPixmap, 'start_pos': QPoint, 'end_pos': QPoint}
-        
+
         # Managed window references
         self.capture_overlay: Optional['CaptureOverlay'] = None
         self.pinned_windows: List['PinnedImageWindow'] = []
@@ -473,7 +473,7 @@ class AppController(QObject):
                 self.capture_overlay.close()
             except Exception as e:
                 logger.debug(f"Error closing capture overlay: {e}")
-        
+
         # Close all pinned windows
         for pinned_window in self.pinned_windows[:]:  # Use slice to create a copy for safe iteration
             try:
@@ -819,7 +819,7 @@ class PinnedImageWindow(QWidget):
         overlay = app.controller.capture_overlay
         if not overlay:
             logger.error("CaptureOverlay not available")
-            return 
+            return
 
         # Restore selection from current annotation state
         overlay._restore_selection(
@@ -872,18 +872,18 @@ class CaptureOverlay(QWidget):
     - Undo/redo support with history
     - Keyboard shortcuts for all actions
     """
-    
+
     # Class-level counter for unique instance IDs
     _instance_counter = 0
 
     def __init__(self, screenshot: QPixmap):
         super().__init__()
-        
+
         # Generate unique instance ID
         CaptureOverlay._instance_counter += 1
         self.instance_id = CaptureOverlay._instance_counter
         self.start_time = time.time()
-        
+
         self.screenshot = screenshot.copy()
 
         # Window setup
@@ -1359,24 +1359,31 @@ class CaptureOverlay(QWidget):
     def _finalize_selection(self):
         """Finalize selection and initialize toolbar with snapshot handling"""
         selection_rect = QRect(self.start_pos, self.end_pos).normalized()
-        if selection_rect.width() > MIN_VALID_RECT and selection_rect.height() > MIN_VALID_RECT:
-            self.start_pos = selection_rect.topLeft()
-            self.end_pos = selection_rect.bottomRight()
-            self._show_toolbar()
-            self.update()
 
-            # Save screenshot with selection to snapshots
-            app = QApplication.instance()
-            if hasattr(app, 'controller') and app.controller:
-                app.controller._add_to_screenshot_snapshots(
-                    self.screenshot,
-                    self.start_pos,
-                    self.end_pos
-                )
-                logger.debug(f"Added screenshot to snapshots with selection: {self.start_pos} -> {self.end_pos}")
-                
-                # Reset snapshot index since we're now on a new screenshot
-                self.current_snapshot_index = -1
+        # Selection too small, clear it to allow new selection
+        if selection_rect.width() <= MIN_VALID_RECT or selection_rect.height() <= MIN_VALID_RECT:
+            self.start_pos = None
+            self.end_pos = None
+            self.update()
+            return
+
+        self.start_pos = selection_rect.topLeft()
+        self.end_pos = selection_rect.bottomRight()
+        self._show_toolbar()
+        self.update()
+
+        # Save screenshot with selection to snapshots
+        app = QApplication.instance()
+        if hasattr(app, 'controller') and app.controller:
+            app.controller._add_to_screenshot_snapshots(
+                self.screenshot,
+                self.start_pos,
+                self.end_pos
+            )
+            logger.debug(f"Added screenshot to snapshots with selection: {self.start_pos} -> {self.end_pos}")
+
+            # Reset snapshot index since we're now on a new screenshot
+            self.current_snapshot_index = -1
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton or event.button() == Qt.MouseButton.RightButton:
@@ -1478,22 +1485,22 @@ class CaptureOverlay(QWidget):
     def _find_current_snapshot_index(self, screenshot_snapshots):
         """
         Find the current snapshot index by checking stored index or comparing screenshot data.
-        
+
         Args:
             screenshot_snapshots: List of screenshot snapshot items
-        
+
         Returns:
             Current snapshot index, or len(screenshot_snapshots) if not found
         """
         if self.current_snapshot_index >= 0 and self.current_snapshot_index < len(screenshot_snapshots):
             return self.current_snapshot_index
-        
+
         # Try to find by comparing screenshot data
         for i, snapshot_item in enumerate(screenshot_snapshots):
             snapshot_screenshot = snapshot_item['screenshot']
             if snapshot_screenshot.cacheKey() == self.screenshot.cacheKey():
                 return i
-        
+
         # If not found, for navigation purposes, set to len so previous index is the last one
         return len(screenshot_snapshots)
 
@@ -1569,7 +1576,7 @@ class CaptureOverlay(QWidget):
 
     def _restore_selection(self, screenshot, start_pos, end_pos, reset_annotation=True):
         """Restore screenshot selection and optional reset annotation states
-        
+
         Args:
             screenshot: The screenshot pixmap to restore
             start_pos: Starting position for the selection
@@ -1579,11 +1586,11 @@ class CaptureOverlay(QWidget):
         self.screenshot = screenshot.copy()
         self.start_pos = start_pos
         self.end_pos = end_pos
-        
+
         if reset_annotation:
             self._init_annotation_states()
             self._save_annotation_state()
-        
+
         # Show toolbar if selection exists
         if self.start_pos and self.end_pos:
             self._show_toolbar()
