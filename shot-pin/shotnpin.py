@@ -118,6 +118,27 @@ def get_app_icon() -> QIcon:
     return QIcon(icon_path)
 
 
+def get_virtual_desktop_bounds(screens) -> Tuple[int, int, int, int]:
+    """
+    Calculate the virtual desktop bounds from multiple screens.
+    
+    Args:
+        screens: List of QScreen objects
+        
+    Returns:
+        Tuple of (min_x, min_y, max_x, max_y) representing the virtual desktop bounds
+    """
+    if not screens:
+        return (0, 0, 0, 0)
+    
+    min_x = min(screen.geometry().left() for screen in screens)
+    min_y = min(screen.geometry().top() for screen in screens)
+    max_x = max(screen.geometry().right() for screen in screens)
+    max_y = max(screen.geometry().bottom() for screen in screens)
+    
+    return (min_x, min_y, max_x, max_y)
+
+
 # ============================================================================
 # Single Instance Management
 # ============================================================================
@@ -349,15 +370,13 @@ class AppController(QObject):
                 return
 
         try:
-            screen = QApplication.primaryScreen()
-            if not screen:
+            screens = QApplication.screens()
+            if not screens:
                 logger.error("No screen available for capture")
                 return
 
-            screenshot = screen.grabWindow(0)
+            screenshot = self._capture_all_screens(screens)
             if screenshot and not screenshot.isNull():
-                screenshot.setDevicePixelRatio(screen.devicePixelRatio())
- 
                 editor = CaptureEditor(screenshot)
 
                 # Keep reference to prevent garbage collection
@@ -370,6 +389,59 @@ class AppController(QObject):
                 logger.error("Failed to capture screenshot")
         except Exception as e:
             logger.error(f"Error capturing screen: {e}")
+
+    def _capture_all_screens(self, screens):
+        """Capture all screens and combine them into a single pixmap."""
+        if not screens:
+            return None
+        
+        # Calculate the virtual desktop bounds
+        min_x, min_y, max_x, max_y = get_virtual_desktop_bounds(screens)
+        
+        virtual_width = max_x - min_x + 1
+        virtual_height = max_y - min_y + 1
+        
+        logger.debug(f"Virtual desktop bounds: {min_x}, {min_y}, {virtual_width}x{virtual_height}")
+        
+        # Get the maximum device pixel ratio among all screens
+        max_dpr = max(screen.devicePixelRatio() for screen in screens)
+        
+        # Create a pixmap for the entire virtual desktop with proper DPI scaling
+        combined_pixmap = QPixmap(int(virtual_width * max_dpr), int(virtual_height * max_dpr))
+        combined_pixmap.fill(Qt.GlobalColor.transparent)
+        combined_pixmap.setDevicePixelRatio(max_dpr)
+        
+        painter = QPainter(combined_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        
+        # Capture each screen and paste it at the correct position
+        for screen in screens:
+            screen_geometry = screen.geometry()
+            screen_pixmap = screen.grabWindow(0)
+            
+            if not screen_pixmap.isNull():
+                # Calculate position relative to virtual desktop
+                x_offset = screen_geometry.left() - min_x
+                y_offset = screen_geometry.top() - min_y
+                
+                # Scale the screen pixmap to match the combined pixmap's DPR
+                if screen.devicePixelRatio() != max_dpr:
+                    scaled_pixmap = screen_pixmap.scaled(
+                        int(screen_geometry.width() * max_dpr),
+                        int(screen_geometry.height() * max_dpr),
+                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    scaled_pixmap.setDevicePixelRatio(max_dpr)
+                    painter.drawPixmap(x_offset, y_offset, scaled_pixmap)
+                else:
+                    painter.drawPixmap(x_offset, y_offset, screen_pixmap)
+                
+                logger.debug(f"Captured screen at {x_offset}, {y_offset}, DPR: {screen.devicePixelRatio()}")
+        
+        painter.end()
+        
+        return combined_pixmap
 
     def quit_application(self):
         """Quit the application and clean up all resources."""
@@ -775,7 +847,24 @@ class CaptureEditor(QWidget):
 
         # Window setup
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
-        self.setWindowState(Qt.WindowState.WindowFullScreen)
+
+        screens = QApplication.screens()
+        if screens:
+            min_x, min_y, max_x, max_y = get_virtual_desktop_bounds(screens)
+            
+            virtual_width = max_x - min_x + 1
+            virtual_height = max_y - min_y + 1
+            
+            # Set geometry to cover the entire desktop
+            self.setGeometry(min_x, min_y, virtual_width, virtual_height)
+            logger.debug(f"CaptureEditor geometry set to virtual desktop: {min_x}, {min_y}, {virtual_width}x{virtual_height}")
+        else:
+            # Fallback to primary screen if no screens found
+            screen = QApplication.primaryScreen()
+            if screen:
+                full_geometry = screen.geometry()
+                self.setGeometry(full_geometry)
+        
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocus()
