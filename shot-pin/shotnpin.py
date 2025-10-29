@@ -234,7 +234,7 @@ class AppController(QObject):
         self.screenshot_snapshots: List[dict] = []  # Each item: {'screenshot': QPixmap, 'start_pos': QPoint, 'end_pos': QPoint}
         
         # Managed window references
-        self.capture_editor: Optional['CaptureEditor'] = None
+        self.capture_overlay: Optional['CaptureOverlay'] = None
         self.pinned_windows: List['PinnedImageWindow'] = []
 
         self._setup_about_window()
@@ -371,9 +371,9 @@ class AppController(QObject):
 
     def prepare_fullscreen_capture(self):
         """Prepare fullscreen capture for user selection."""
-        # Check if a CaptureEditor is already open
-        if self.capture_editor and self.capture_editor.isVisible():
-            logger.debug("Screenshot already in progress, ignoring")
+        # Check if a CaptureOverlay is already open
+        if self.capture_overlay and self.capture_overlay.isVisible():
+            logger.debug("Capture already in progress, ignoring")
             return
 
         try:
@@ -384,14 +384,14 @@ class AppController(QObject):
 
             screenshot = self._capture_all_screens(screens)
             if screenshot and not screenshot.isNull():
-                editor = CaptureEditor(screenshot)
+                overlay = CaptureOverlay(screenshot)
 
                 # Keep reference to prevent garbage collection
-                self.capture_editor = editor
+                self.capture_overlay = overlay
 
-                editor.show()
-                elapsed_ms = int((time.time() - editor.start_time) * 1000)
-                logger.info(f">>> [Editor #{editor.instance_id}] CaptureEditor OPENED (init: {elapsed_ms}ms)")
+                overlay.show()
+                elapsed_ms = int((time.time() - overlay.start_time) * 1000)
+                logger.info(f">>> [Overlay #{overlay.instance_id}] CaptureOverlay OPENED (init: {elapsed_ms}ms)")
             else:
                 logger.error("Failed to capture screenshot")
         except Exception as e:
@@ -444,10 +444,7 @@ class AppController(QObject):
                 else:
                     painter.drawPixmap(x_offset, y_offset, screen_pixmap)
 
-                logger.debug(f"Captured screen at {x_offset}, {y_offset}, DPR: {screen.devicePixelRatio()}")
-
         painter.end()
-
         return combined_pixmap
 
     def _add_to_screenshot_snapshots(self, screenshot: QPixmap, start_pos: Optional[QPoint] = None, end_pos: Optional[QPoint] = None):
@@ -471,11 +468,11 @@ class AppController(QObject):
         """Quit the application and clean up all resources."""
 
         # Close all managed windows
-        if self.capture_editor:
+        if self.capture_overlay:
             try:
-                self.capture_editor.close()
+                self.capture_overlay.close()
             except Exception as e:
-                logger.debug(f"Error closing capture editor: {e}")
+                logger.debug(f"Error closing capture overlay: {e}")
         
         # Close all pinned windows
         for pinned_window in self.pinned_windows[:]:  # Use slice to create a copy for safe iteration
@@ -505,7 +502,7 @@ class FloatingToolbar(QWidget):
     pen width adjustment, and various actions (copy, save, pin, close).
     """
 
-    def __init__(self, parent: 'CaptureEditor'):
+    def __init__(self, parent: 'CaptureOverlay'):
         super().__init__(parent)
         self.parent_window = parent
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
@@ -811,7 +808,7 @@ class PinnedImageWindow(QWidget):
         event.accept()
 
     def reopen_capture(self):
-        """Reopen capture editor with the saved annotation states restored"""
+        """Reopen capture overlay with the saved annotation states restored"""
         if not (self.saved_annotation_states and self.selection_rect):
             return
 
@@ -819,13 +816,13 @@ class PinnedImageWindow(QWidget):
         if not hasattr(app, 'controller') or not app.controller:
             logger.error("AppController not available")
             return
-        editor = app.controller.capture_editor
-        if not editor:
-            logger.error("CaptureEditor not available")
+        overlay = app.controller.capture_overlay
+        if not overlay:
+            logger.error("CaptureOverlay not available")
             return 
 
         # Restore selection from current annotation state
-        editor._restore_selection(
+        overlay._restore_selection(
             screenshot=self.saved_annotation_states[self.saved_state_index],
             start_pos=self.selection_rect.topLeft(),
             end_pos=self.selection_rect.bottomRight(),
@@ -833,13 +830,13 @@ class PinnedImageWindow(QWidget):
         )
 
         # Transfer saved annotation states reference, so close .clear() won't delete data
-        editor.annotation_states = self.saved_annotation_states
+        overlay.annotation_states = self.saved_annotation_states
         self.saved_annotation_states = []
-        editor.undo_redo_index = self.saved_state_index
+        overlay.undo_redo_index = self.saved_state_index
 
-        editor.show()
+        overlay.show()
 
-        logger.info(f">>> [Editor #{editor.instance_id}] CaptureEditor REOPENED from pinned window")
+        logger.info(f">>> [Overlay #{overlay.instance_id}] CaptureOverlay REOPENED from pinned window")
 
         self.close()
 
@@ -862,7 +859,7 @@ class PinnedImageWindow(QWidget):
         event.accept()
 
 
-class CaptureEditor(QWidget):
+class CaptureOverlay(QWidget):
     """
     Fullscreen overlay for selecting and annotating screenshot areas.
 
@@ -883,8 +880,8 @@ class CaptureEditor(QWidget):
         super().__init__()
         
         # Generate unique instance ID
-        CaptureEditor._instance_counter += 1
-        self.instance_id = CaptureEditor._instance_counter
+        CaptureOverlay._instance_counter += 1
+        self.instance_id = CaptureOverlay._instance_counter
         self.start_time = time.time()
         
         self.screenshot = screenshot.copy()
@@ -901,7 +898,7 @@ class CaptureEditor(QWidget):
 
             # Set geometry to cover the entire desktop
             self.setGeometry(min_x, min_y, virtual_width, virtual_height)
-            logger.debug(f"CaptureEditor geometry set to virtual desktop: {min_x}, {min_y}, {virtual_width}x{virtual_height}")
+            logger.debug(f"CaptureOverlay geometry set to virtual desktop: {min_x}, {min_y}, {virtual_width}x{virtual_height}")
         else:
             # Fallback to primary screen if no screens found
             screen = QApplication.primaryScreen()
@@ -1025,7 +1022,7 @@ class CaptureEditor(QWidget):
         painter.drawLine(selection_rect.right(), selection_rect.top(),
                        selection_rect.right(), selection_rect.bottom())
 
-    def get_resize_edge(self, pos: QPoint, rect: QRect) -> Optional[str]:
+    def _get_resize_edge(self, pos: QPoint, rect: QRect) -> Optional[str]:
         """
         Detect which edge/corner of the selection is under the cursor.
 
@@ -1066,7 +1063,7 @@ class CaptureEditor(QWidget):
 
         return None
 
-    def get_resize_cursor(self, edge: str) -> Qt.CursorShape:
+    def _get_resize_cursor(self, edge: str) -> Qt.CursorShape:
         """Get the appropriate cursor shape for a resize edge."""
         cursor_map = {
             'top': Qt.CursorShape.SizeVerCursor,
@@ -1104,7 +1101,7 @@ class CaptureEditor(QWidget):
 
         # Check for resize handle click (only when not in annotation mode)
         if not self.annotation_active:
-            resize_edge = self.get_resize_edge(pos, selection_rect)
+            resize_edge = self._get_resize_edge(pos, selection_rect)
             if resize_edge:
                 self.resizing = True
                 self.resize_edge = resize_edge
@@ -1135,10 +1132,10 @@ class CaptureEditor(QWidget):
             return
 
         selection_rect = QRect(self.start_pos, self.end_pos).normalized()
-        resize_edge = self.get_resize_edge(pos, selection_rect)
+        resize_edge = self._get_resize_edge(pos, selection_rect)
 
         if resize_edge:
-            self.setCursor(self.get_resize_cursor(resize_edge))
+            self.setCursor(self._get_resize_cursor(resize_edge))
         elif selection_rect.contains(pos):
             self.setCursor(Qt.CursorShape.OpenHandCursor)
         else:
@@ -1178,7 +1175,7 @@ class CaptureEditor(QWidget):
     def mouseMoveEvent(self, event):
         if self.resizing:
             self._apply_resize(event.pos().x(), event.pos().y())
-            self.position_toolbar()
+            self._position_toolbar()
             self.update()
         elif self.dragging_selection:
             selection_rect = QRect(self.start_pos, self.end_pos).normalized()
@@ -1191,7 +1188,7 @@ class CaptureEditor(QWidget):
 
             self.start_pos = QPoint(new_x, new_y)
             self.end_pos = QPoint(new_x + width, new_y + height)
-            self.position_toolbar()
+            self._position_toolbar()
             self.update()
         elif self.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
             if self.draw_mode == "pen":
@@ -1365,7 +1362,7 @@ class CaptureEditor(QWidget):
         if selection_rect.width() > MIN_VALID_RECT and selection_rect.height() > MIN_VALID_RECT:
             self.start_pos = selection_rect.topLeft()
             self.end_pos = selection_rect.bottomRight()
-            self.create_toolbar()
+            self._show_toolbar()
             self.update()
 
             # Save screenshot with selection to snapshots
@@ -1407,10 +1404,10 @@ class CaptureEditor(QWidget):
 
         # Handle history navigation keys (< and >)
         if key == Qt.Key.Key_Comma:
-            self._navigate_history(-1)
+            self._navigate_snapshots(-1)
             return
         elif key == Qt.Key.Key_Period:
-            self._navigate_history(1)
+            self._navigate_snapshots(1)
             return
 
         # Handle arrow keys for selection movement
@@ -1475,10 +1472,32 @@ class CaptureEditor(QWidget):
 
         self.start_pos = QPoint(new_x, new_y)
         self.end_pos = QPoint(new_x + width, new_y + height)
-        self.position_toolbar()
+        self._position_toolbar()
         self.update()
 
-    def _navigate_history(self, direction: int):
+    def _find_current_snapshot_index(self, screenshot_snapshots):
+        """
+        Find the current snapshot index by checking stored index or comparing screenshot data.
+        
+        Args:
+            screenshot_snapshots: List of screenshot snapshot items
+        
+        Returns:
+            Current snapshot index, or len(screenshot_snapshots) if not found
+        """
+        if self.current_snapshot_index >= 0 and self.current_snapshot_index < len(screenshot_snapshots):
+            return self.current_snapshot_index
+        
+        # Try to find by comparing screenshot data
+        for i, snapshot_item in enumerate(screenshot_snapshots):
+            snapshot_screenshot = snapshot_item['screenshot']
+            if snapshot_screenshot.cacheKey() == self.screenshot.cacheKey():
+                return i
+        
+        # If not found, for navigation purposes, set to len so previous index is the last one
+        return len(screenshot_snapshots)
+
+    def _navigate_snapshots(self, direction: int):
         """
         Navigate through screenshot snapshots (different screenshots).
 
@@ -1495,22 +1514,7 @@ class CaptureEditor(QWidget):
             logger.debug("Cannot navigate: screenshot snapshots is empty")
             return
 
-        if self.current_snapshot_index >= 0 and self.current_snapshot_index < len(screenshot_snapshots):
-            current_index = self.current_snapshot_index
-        else:
-            current_index = -1
-
-            # Try to find by comparing screenshot data
-            for i, snapshot_item in enumerate(screenshot_snapshots):
-                snapshot_screenshot = snapshot_item['screenshot']
-                if (snapshot_screenshot.cacheKey() == self.screenshot.cacheKey()):
-                    current_index = i
-                    break
-
-            if current_index == -1:
-                # If not found, for navigation purposes, set to len so previous index is the last one
-                current_index = len(screenshot_snapshots)
-
+        current_index = self._find_current_snapshot_index(screenshot_snapshots)
         new_index = current_index + direction
 
         logger.debug(f"Navigating to screenshot index {new_index} from {current_index} in direction {direction}")
@@ -1580,9 +1584,9 @@ class CaptureEditor(QWidget):
             self._init_annotation_states()
             self._save_annotation_state()
         
-        # Create toolbar if selection exists
+        # Show toolbar if selection exists
         if self.start_pos and self.end_pos:
-            self.create_toolbar()
+            self._show_toolbar()
 
     def _handle_ctrl_shortcuts(self, key) -> bool:
         """
@@ -1612,15 +1616,15 @@ class CaptureEditor(QWidget):
 
         return False
 
-    def create_toolbar(self):
-        """Create and show the floating toolbar"""
+    def _show_toolbar(self):
+        """Show the floating toolbar, creating it if necessary"""
         if not self.toolbar:
             self.toolbar = FloatingToolbar(self)
 
-        self.position_toolbar()
+        self._position_toolbar()
         self.toolbar.show()
 
-    def position_toolbar(self):
+    def _position_toolbar(self):
         """Position toolbar at bottom right of selection area (in parent coordinates)"""
         if self.toolbar and self.start_pos and self.end_pos:
             selection_rect = QRect(self.start_pos, self.end_pos).normalized()
@@ -1813,7 +1817,7 @@ class CaptureEditor(QWidget):
         self.screenshot = None
 
         lifetime_sec = time.time() - self.start_time
-        logger.info(f"<<< [Editor #{self.instance_id}] CaptureEditor CLOSED (lifetime: {lifetime_sec:.2f}s)")
+        logger.info(f"<<< [Overlay #{self.instance_id}] CaptureOverlay CLOSED (lifetime: {lifetime_sec:.2f}s)")
         event.accept()
 
 
