@@ -6,6 +6,7 @@ A lightweight application for capturing, annotating, and pinning screenshots.
 """
 import sys
 import logging
+import time
 from pathlib import Path
 from typing import Optional, Tuple, List
 
@@ -45,7 +46,7 @@ TOOLBAR_SPACING = 3
 DEFAULT_PEN_WIDTH = 2
 DEFAULT_PEN_COLOR = QColor(255, 0, 0)
 DEFAULT_FONT_SIZE = 16
-MAX_HISTORY = 50
+MAX_HISTORY = 20
 
 # Keyboard
 GLOBAL_HOTKEY = '<ctrl>+<shift>+q'
@@ -121,21 +122,21 @@ def get_app_icon() -> QIcon:
 def get_virtual_desktop_bounds(screens) -> Tuple[int, int, int, int]:
     """
     Calculate the virtual desktop bounds from multiple screens.
-    
+
     Args:
         screens: List of QScreen objects
-        
+
     Returns:
         Tuple of (min_x, min_y, max_x, max_y) representing the virtual desktop bounds
     """
     if not screens:
         return (0, 0, 0, 0)
-    
+
     min_x = min(screen.geometry().left() for screen in screens)
     min_y = min(screen.geometry().top() for screen in screens)
     max_x = max(screen.geometry().right() for screen in screens)
     max_y = max(screen.geometry().bottom() for screen in screens)
-    
+
     return (min_x, min_y, max_x, max_y)
 
 
@@ -229,13 +230,20 @@ class AppController(QObject):
         self.tray_icon = None
         self.single_instance = single_instance
 
+        # Global screenshot snapshots with state
+        self.screenshot_snapshots: List[dict] = []  # Each item: {'screenshot': QPixmap, 'start_pos': QPoint, 'end_pos': QPoint}
+        
+        # Managed window references
+        self.capture_editor: Optional['CaptureEditor'] = None
+        self.pinned_windows: List['PinnedImageWindow'] = []
+
         self._setup_about_window()
         self._setup_tray()
         self._setup_hotkey()
         self._setup_single_instance_handler()
 
         # Connect signal to slot
-        self.screenshot_triggered.connect(self.take_screenshot)
+        self.screenshot_triggered.connect(self.prepare_fullscreen_capture)
 
     def _setup_about_window(self):
         """Create the about window (hidden by default)."""
@@ -253,7 +261,7 @@ class AppController(QObject):
 
         # Take Screenshot action
         screenshot_action = tray_menu.addAction("Take Screenshot")
-        screenshot_action.triggered.connect(self.take_screenshot)
+        screenshot_action.triggered.connect(self.prepare_fullscreen_capture)
 
         # About action
         about_action = tray_menu.addAction("About")
@@ -323,7 +331,7 @@ class AppController(QObject):
     def tray_icon_activated(self, reason):
         """Handle tray icon activation (clicks)."""
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self.take_screenshot()
+            self.prepare_fullscreen_capture()
 
     def _setup_hotkey(self):
         """Register global hotkey for screenshot capture."""
@@ -331,7 +339,7 @@ class AppController(QObject):
             # Define the hotkey combination
             hotkeys = {GLOBAL_HOTKEY: lambda: self.screenshot_triggered.emit()}
             keyboard.GlobalHotKeys(hotkeys).start()
- 
+
             logger.info(f"Global hotkey registered: {GLOBAL_HOTKEY}")
         except Exception as e:
             logger.error(f"Failed to register global hotkey {GLOBAL_HOTKEY}: {e}")
@@ -361,13 +369,12 @@ class AppController(QObject):
             self.about_window.activateWindow()
             self.about_window.raise_()
 
-    def take_screenshot(self):
-        """Capture screen and open editor."""
+    def prepare_fullscreen_capture(self):
+        """Prepare fullscreen capture for user selection."""
         # Check if a CaptureEditor is already open
-        for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, CaptureEditor) and widget.isVisible():
-                logger.debug("Screenshot already in progress, ignoring")
-                return
+        if self.capture_editor and self.capture_editor.isVisible():
+            logger.debug("Screenshot already in progress, ignoring")
+            return
 
         try:
             screens = QApplication.screens()
@@ -380,11 +387,11 @@ class AppController(QObject):
                 editor = CaptureEditor(screenshot)
 
                 # Keep reference to prevent garbage collection
-                app = QApplication.instance()
-                app.capture_editor = editor
+                self.capture_editor = editor
 
                 editor.show()
-                logger.debug("Capture editor opened")
+                elapsed_ms = int((time.time() - editor.start_time) * 1000)
+                logger.info(f">>> [Editor #{editor.instance_id}] CaptureEditor OPENED (init: {elapsed_ms}ms)")
             else:
                 logger.error("Failed to capture screenshot")
         except Exception as e:
@@ -394,36 +401,36 @@ class AppController(QObject):
         """Capture all screens and combine them into a single pixmap."""
         if not screens:
             return None
-        
+
         # Calculate the virtual desktop bounds
         min_x, min_y, max_x, max_y = get_virtual_desktop_bounds(screens)
-        
+
         virtual_width = max_x - min_x + 1
         virtual_height = max_y - min_y + 1
-        
+
         logger.debug(f"Virtual desktop bounds: {min_x}, {min_y}, {virtual_width}x{virtual_height}")
-        
+
         # Get the maximum device pixel ratio among all screens
         max_dpr = max(screen.devicePixelRatio() for screen in screens)
-        
+
         # Create a pixmap for the entire virtual desktop with proper DPI scaling
         combined_pixmap = QPixmap(int(virtual_width * max_dpr), int(virtual_height * max_dpr))
         combined_pixmap.fill(Qt.GlobalColor.transparent)
         combined_pixmap.setDevicePixelRatio(max_dpr)
-        
+
         painter = QPainter(combined_pixmap)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        
+
         # Capture each screen and paste it at the correct position
         for screen in screens:
             screen_geometry = screen.geometry()
             screen_pixmap = screen.grabWindow(0)
-            
+
             if not screen_pixmap.isNull():
                 # Calculate position relative to virtual desktop
                 x_offset = screen_geometry.left() - min_x
                 y_offset = screen_geometry.top() - min_y
-                
+
                 # Scale the screen pixmap to match the combined pixmap's DPR
                 if screen.devicePixelRatio() != max_dpr:
                     scaled_pixmap = screen_pixmap.scaled(
@@ -436,23 +443,46 @@ class AppController(QObject):
                     painter.drawPixmap(x_offset, y_offset, scaled_pixmap)
                 else:
                     painter.drawPixmap(x_offset, y_offset, screen_pixmap)
-                
+
                 logger.debug(f"Captured screen at {x_offset}, {y_offset}, DPR: {screen.devicePixelRatio()}")
-        
+
         painter.end()
-        
+
         return combined_pixmap
+
+    def _add_to_screenshot_snapshots(self, screenshot: QPixmap, start_pos: Optional[QPoint] = None, end_pos: Optional[QPoint] = None):
+        """Add screenshot to snapshots with size limit."""
+        # Add to snapshots with state
+        snapshot_item = {
+            'screenshot': screenshot.copy(),
+            'start_pos': start_pos,
+            'end_pos': end_pos
+        }
+        self.screenshot_snapshots.append(snapshot_item)
+
+        # Limit snapshots size
+        if len(self.screenshot_snapshots) > MAX_HISTORY:
+            # Remove oldest screenshot
+            self.screenshot_snapshots.pop(0)
+
+        logger.debug(f"Screenshot added to snapshots. Total: {len(self.screenshot_snapshots)}")
 
     def quit_application(self):
         """Quit the application and clean up all resources."""
 
-        # Close all capture editors and pinned windows
-        for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, (CaptureEditor, PinnedImageWindow)):
-                try:
-                    widget.close()
-                except Exception as e:
-                    logger.debug(f"Error closing window: {e}")
+        # Close all managed windows
+        if self.capture_editor:
+            try:
+                self.capture_editor.close()
+            except Exception as e:
+                logger.debug(f"Error closing capture editor: {e}")
+        
+        # Close all pinned windows
+        for pinned_window in self.pinned_windows[:]:  # Use slice to create a copy for safe iteration
+            try:
+                pinned_window.close()
+            except Exception as e:
+                logger.debug(f"Error closing pinned window: {e}")
 
         # Clean up single instance lock
         if self.single_instance:
@@ -646,20 +676,20 @@ class PinnedImageWindow(QWidget):
 
     def __init__(self, pixmap: QPixmap, position: Optional[QPoint] = None,
                  selection_rect: Optional[QRect] = None,
-                 annotation_history: Optional[List[QPixmap]] = None,
-                 history_index: int = -1):
+                 saved_annotation_states: Optional[List[QPixmap]] = None,
+                 saved_state_index: int = -1):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         self.pixmap = pixmap
         self.selection_rect = selection_rect
-        self.annotation_history = annotation_history or []
-        self.history_index = history_index
+        self.saved_annotation_states = saved_annotation_states or []
+        self.saved_state_index = saved_state_index
         self.glow_size = GLOW_SIZE
 
         logical_width, logical_height = self._get_logical_size()
- 
+
         # Size includes padding for glow effect
         self.setFixedSize(logical_width + 2 * self.glow_size,
                          logical_height + 2 * self.glow_size)
@@ -781,47 +811,52 @@ class PinnedImageWindow(QWidget):
         event.accept()
 
     def reopen_capture(self):
-        """Reopen capture editor with the annotation history restored"""
-        if not (self.annotation_history and self.selection_rect):
+        """Reopen capture editor with the saved annotation states restored"""
+        if not (self.saved_annotation_states and self.selection_rect):
             return
 
-        # Get the current annotated screenshot from history
-        current_screenshot = self.annotation_history[self.history_index]
-        editor = CaptureEditor(current_screenshot)
-        editor.start_pos = self.selection_rect.topLeft()
-        editor.end_pos = self.selection_rect.bottomRight()
-
-        # Transfer annotation history reference, so close .clear() won't delete data
-        editor.history = self.annotation_history
-        self.annotation_history = []
-
-        editor.history_index = self.history_index
-        editor.screenshot = editor.history[editor.history_index].copy()
-
-        # Keep reference to prevent garbage collection
         app = QApplication.instance()
-        app.capture_editor = editor
+        if not hasattr(app, 'controller') or not app.controller:
+            logger.error("AppController not available")
+            return
+        editor = app.controller.capture_editor
+        if not editor:
+            logger.error("CaptureEditor not available")
+            return 
+
+        # Restore selection from current annotation state
+        editor._restore_selection(
+            screenshot=self.saved_annotation_states[self.saved_state_index],
+            start_pos=self.selection_rect.topLeft(),
+            end_pos=self.selection_rect.bottomRight(),
+            reset_annotation=False
+        )
+
+        # Transfer saved annotation states reference, so close .clear() won't delete data
+        editor.annotation_states = self.saved_annotation_states
+        self.saved_annotation_states = []
+        editor.undo_redo_index = self.saved_state_index
 
         editor.show()
-        editor.create_toolbar()
-        logger.debug("Reopened capture editor from pinned window")
+
+        logger.info(f">>> [Editor #{editor.instance_id}] CaptureEditor REOPENED from pinned window")
 
         self.close()
 
     def closeEvent(self, event):
         """Clean up and remove from pinned windows list"""
-        # Remove this window from the application's pinned windows list
+        # Remove this window from the controller's pinned windows list
         app = QApplication.instance()
-        if hasattr(app, 'pinned_windows') and self in app.pinned_windows:
-            app.pinned_windows.remove(self)
-            logger.info(f"Pinned window closed. Remaining: {len(app.pinned_windows)}")
+        if hasattr(app, 'controller') and app.controller and self in app.controller.pinned_windows:
+            app.controller.pinned_windows.remove(self)
+            logger.info(f"Pinned window closed. Remaining: {len(app.controller.pinned_windows)}")
 
         # Clean up timers
         if hasattr(self, 'opacity_timer'):
             self.opacity_timer.stop()
 
         # Clear resources to release memory
-        self.annotation_history.clear()
+        self.saved_annotation_states.clear()
         self.pixmap = None
 
         event.accept()
@@ -840,9 +875,18 @@ class CaptureEditor(QWidget):
     - Undo/redo support with history
     - Keyboard shortcuts for all actions
     """
+    
+    # Class-level counter for unique instance IDs
+    _instance_counter = 0
 
     def __init__(self, screenshot: QPixmap):
         super().__init__()
+        
+        # Generate unique instance ID
+        CaptureEditor._instance_counter += 1
+        self.instance_id = CaptureEditor._instance_counter
+        self.start_time = time.time()
+        
         self.screenshot = screenshot.copy()
 
         # Window setup
@@ -851,10 +895,10 @@ class CaptureEditor(QWidget):
         screens = QApplication.screens()
         if screens:
             min_x, min_y, max_x, max_y = get_virtual_desktop_bounds(screens)
-            
+
             virtual_width = max_x - min_x + 1
             virtual_height = max_y - min_y + 1
-            
+
             # Set geometry to cover the entire desktop
             self.setGeometry(min_x, min_y, virtual_width, virtual_height)
             logger.debug(f"CaptureEditor geometry set to virtual desktop: {min_x}, {min_y}, {virtual_width}x{virtual_height}")
@@ -864,7 +908,7 @@ class CaptureEditor(QWidget):
             if screen:
                 full_geometry = screen.geometry()
                 self.setGeometry(full_geometry)
-        
+
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocus()
@@ -900,15 +944,18 @@ class CaptureEditor(QWidget):
         self.text_input: Optional[QLineEdit] = None
         self.text_input_pos: Optional[QPoint] = None
 
-        # History for undo/redo
-        self.history: List[QPixmap] = []
-        self.history_index = -1
-        self.max_history = MAX_HISTORY
-
         # Toolbar
         self.toolbar: Optional[FloatingToolbar] = None
 
-        self.save_annotation_state()
+        # Hint message label for showing temporary notifications
+        self.hint_label: Optional[QLabel] = None
+
+        # Current position in screenshot snapshots (-1 means not in snapshots)
+        self.current_snapshot_index: int = -1
+
+        self._init_annotation_states()
+        # Take initial state
+        self._save_annotation_state()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1279,7 +1326,7 @@ class CaptureEditor(QWidget):
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, text)
             painter.end()
 
-            self.save_annotation_state()
+            self._save_annotation_state()
             self.update()
 
         # Clean up
@@ -1309,8 +1356,30 @@ class CaptureEditor(QWidget):
         # Pen mode already draws directly, no finalization needed
 
         painter.end()
-        self.save_annotation_state()
+        self._save_annotation_state()
         self.update()
+
+    def _finalize_selection(self):
+        """Finalize selection and initialize toolbar with snapshot handling"""
+        selection_rect = QRect(self.start_pos, self.end_pos).normalized()
+        if selection_rect.width() > MIN_VALID_RECT and selection_rect.height() > MIN_VALID_RECT:
+            self.start_pos = selection_rect.topLeft()
+            self.end_pos = selection_rect.bottomRight()
+            self.create_toolbar()
+            self.update()
+
+            # Save screenshot with selection to snapshots
+            app = QApplication.instance()
+            if hasattr(app, 'controller') and app.controller:
+                app.controller._add_to_screenshot_snapshots(
+                    self.screenshot,
+                    self.start_pos,
+                    self.end_pos
+                )
+                logger.debug(f"Added screenshot to snapshots with selection: {self.start_pos} -> {self.end_pos}")
+                
+                # Reset snapshot index since we're now on a new screenshot
+                self.current_snapshot_index = -1
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton or event.button() == Qt.MouseButton.RightButton:
@@ -1326,13 +1395,7 @@ class CaptureEditor(QWidget):
             elif self.selecting:
                 self.selecting = False
                 self.end_pos = event.pos()
-
-                selection_rect = QRect(self.start_pos, self.end_pos).normalized()
-                if selection_rect.width() > MIN_VALID_RECT and selection_rect.height() > MIN_VALID_RECT:
-                    self.start_pos = selection_rect.topLeft()
-                    self.end_pos = selection_rect.bottomRight()
-                    self.create_toolbar()
-                    self.update()
+                self._finalize_selection()
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -1340,6 +1403,14 @@ class CaptureEditor(QWidget):
         # Handle Escape key - special case with nested logic
         if key == Qt.Key.Key_Escape:
             self._handle_escape_key()
+            return
+
+        # Handle history navigation keys (< and >)
+        if key == Qt.Key.Key_Comma:
+            self._navigate_history(-1)
+            return
+        elif key == Qt.Key.Key_Period:
+            self._navigate_history(1)
             return
 
         # Handle arrow keys for selection movement
@@ -1407,6 +1478,112 @@ class CaptureEditor(QWidget):
         self.position_toolbar()
         self.update()
 
+    def _navigate_history(self, direction: int):
+        """
+        Navigate through screenshot snapshots (different screenshots).
+
+        Args:
+            direction: -1 for previous (left), 1 for next (right)
+        """
+        app = QApplication.instance()
+        if not hasattr(app, 'controller') or not app.controller or not app.controller.screenshot_snapshots:
+            return
+
+        screenshot_snapshots = app.controller.screenshot_snapshots
+
+        if len(screenshot_snapshots) == 0:
+            logger.debug("Cannot navigate: screenshot snapshots is empty")
+            return
+
+        if self.current_snapshot_index >= 0 and self.current_snapshot_index < len(screenshot_snapshots):
+            current_index = self.current_snapshot_index
+        else:
+            current_index = -1
+
+            # Try to find by comparing screenshot data
+            for i, snapshot_item in enumerate(screenshot_snapshots):
+                snapshot_screenshot = snapshot_item['screenshot']
+                if (snapshot_screenshot.cacheKey() == self.screenshot.cacheKey()):
+                    current_index = i
+                    break
+
+            if current_index == -1:
+                # If not found, for navigation purposes, set to len so previous index is the last one
+                current_index = len(screenshot_snapshots)
+
+        new_index = current_index + direction
+
+        logger.debug(f"Navigating to screenshot index {new_index} from {current_index} in direction {direction}")
+
+        if new_index < 0:
+            self._show_hint("Already at first screenshot")
+        elif new_index >= len(screenshot_snapshots):
+            self._show_hint("Already at latest screenshot")
+        else:
+            # Get the snapshot item
+            snapshot_item = screenshot_snapshots[new_index]
+
+            # Restore selection from snapshot item
+            self._restore_selection(
+                screenshot=snapshot_item['screenshot'],
+                start_pos=snapshot_item['start_pos'],
+                end_pos=snapshot_item['end_pos'],
+                reset_annotation=True
+            )
+
+            logger.debug(f"Navigated to screenshot {new_index} with selection: {self.start_pos} -> {self.end_pos}")
+
+            self.update()
+
+            # Update current snapshot index
+            self.current_snapshot_index = new_index
+
+    def _show_hint(self, message: str, duration: int = 1000):
+        """Show a temporary hint message overlay on the screen."""
+        if not hasattr(self, 'hint_label') or self.hint_label is None:
+            self.hint_label = QLabel(message, self)
+            self.hint_label.setStyleSheet(
+                "background-color: rgba(0, 0, 0, 180); "
+                "color: white; "
+                "padding: 10px 20px; "
+                "border-radius: 5px; "
+                "font-size: 14px;"
+            )
+            self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        else:
+            self.hint_label.setText(message)
+
+        # Position at the center of the screen
+        self.hint_label.adjustSize()
+        x = (self.width() - self.hint_label.width()) // 2
+        y = (self.height() - self.hint_label.height()) // 2
+        self.hint_label.move(x, y)
+        self.hint_label.show()
+
+        # Hide after duration
+        QTimer.singleShot(duration, self.hint_label.hide)
+
+    def _restore_selection(self, screenshot, start_pos, end_pos, reset_annotation=True):
+        """Restore screenshot selection and optional reset annotation states
+        
+        Args:
+            screenshot: The screenshot pixmap to restore
+            start_pos: Starting position for the selection
+            end_pos: Ending position for the selection
+            reset_annotation: If True, reset annotation states (default True)
+        """
+        self.screenshot = screenshot.copy()
+        self.start_pos = start_pos
+        self.end_pos = end_pos
+        
+        if reset_annotation:
+            self._init_annotation_states()
+            self._save_annotation_state()
+        
+        # Create toolbar if selection exists
+        if self.start_pos and self.end_pos:
+            self.create_toolbar()
+
     def _handle_ctrl_shortcuts(self, key) -> bool:
         """
         Handle Ctrl+key shortcuts.
@@ -1439,8 +1616,9 @@ class CaptureEditor(QWidget):
         """Create and show the floating toolbar"""
         if not self.toolbar:
             self.toolbar = FloatingToolbar(self)
-            self.position_toolbar()
-            self.toolbar.show()
+
+        self.position_toolbar()
+        self.toolbar.show()
 
     def position_toolbar(self):
         """Position toolbar at bottom right of selection area (in parent coordinates)"""
@@ -1499,32 +1677,37 @@ class CaptureEditor(QWidget):
             if self.toolbar:
                 self.toolbar.update_color_button(self.pen_color)
 
-    def save_annotation_state(self):
-        """Save current screenshot state to history"""
+    def _init_annotation_states(self):
+        """Initialize annotation states for undo/redo functionality."""
+        self.annotation_states: List[QPixmap] = []
+        self.undo_redo_index = -1
+
+    def _save_annotation_state(self):
+        """Save current annotation state to states list for undo/redo"""
+
         # Remove any states after current index (for redo)
-        self.history = self.history[:self.history_index + 1]
+        self.annotation_states = self.annotation_states[:self.undo_redo_index + 1]
 
         # Add new state
-        self.history.append(self.screenshot.copy())
-        self.history_index += 1
+        self.annotation_states.append(self.screenshot.copy())
+        self.undo_redo_index += 1
 
-        # Limit history size
-        if len(self.history) > self.max_history:
-            self.history.pop(0)
-            self.history_index -= 1
+        if len(self.annotation_states) > MAX_HISTORY:
+            self.annotation_states.pop(0)
+            self.undo_redo_index -= 1
 
     def undo_action(self):
         """Undo last annotation"""
-        if self.history_index > 0:
-            self.history_index -= 1
-            self.screenshot = self.history[self.history_index].copy()
+        if self.undo_redo_index > 0:
+            self.undo_redo_index -= 1
+            self.screenshot = self.annotation_states[self.undo_redo_index].copy()
             self.update()
 
     def redo_action(self):
         """Redo annotation"""
-        if self.history_index < len(self.history) - 1:
-            self.history_index += 1
-            self.screenshot = self.history[self.history_index].copy()
+        if self.undo_redo_index < len(self.annotation_states) - 1:
+            self.undo_redo_index += 1
+            self.screenshot = self.annotation_states[self.undo_redo_index].copy()
             self.update()
 
     def _scale_rect(self, rect: QRect) -> QRect:
@@ -1606,19 +1789,18 @@ class CaptureEditor(QWidget):
                 cropped,
                 position=selection_rect.topLeft(),
                 selection_rect=selection_rect,
-                annotation_history=self.history,
-                history_index=self.history_index
+                saved_annotation_states=self.annotation_states,
+                saved_state_index=self.undo_redo_index
             )
-            # Transfer annotation history reference, so close .clear() won't delete data
-            self.history = []
+            # Transfer annotation states reference, so close .clear() won't delete data
+            self.annotation_states = []
             pinned_window.show()
 
             # Keep reference to prevent garbage collection
             app = QApplication.instance()
-            if not hasattr(app, 'pinned_windows'):
-                app.pinned_windows = []
-            app.pinned_windows.append(pinned_window)
-            logger.info(f"Screenshot pinned to screen. Total pinned: {len(app.pinned_windows)}")
+            if hasattr(app, 'controller') and app.controller:
+                app.controller.pinned_windows.append(pinned_window)
+                logger.info(f"Screenshot pinned to screen. Total pinned: {len(app.controller.pinned_windows)}")
         self.close()
 
     def closeEvent(self, event):
@@ -1627,10 +1809,11 @@ class CaptureEditor(QWidget):
             self.toolbar.close()
 
         # Clear resources to release memory
-        self.history.clear()
+        self.annotation_states.clear()
         self.screenshot = None
 
-        logger.debug("Capture editor closed")
+        lifetime_sec = time.time() - self.start_time
+        logger.info(f"<<< [Editor #{self.instance_id}] CaptureEditor CLOSED (lifetime: {lifetime_sec:.2f}s)")
         event.accept()
 
 
@@ -1673,7 +1856,8 @@ class MainWindow(QMainWindow):
             "3. Adjust with drag or arrow keys\n"
             "4. Scroll wheel changes text font size\n"
             "5. Copy/Save/Pin with toolbar or hotkeys\n"
-            "6. On pinned: scroll to change transparency"
+            "6. On pinned: scroll to change transparency\n"
+            "7. Use , and . keys to navigate history"
         )
         info = QLabel(info_text)
         info.setAlignment(Qt.AlignmentFlag.AlignCenter)
