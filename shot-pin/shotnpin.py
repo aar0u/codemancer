@@ -916,7 +916,7 @@ class CaptureEditor(QWidget):
 
         self._paint_preview(painter)
 
-        if self.start_pos and self.end_pos:
+        if self.start_pos is not None and self.end_pos is not None:
             selection_rect = QRect(self.start_pos, self.end_pos).normalized()
             self._paint_overlay_around_selection(painter, selection_rect)
             self._paint_selection_border(painter, selection_rect)
