@@ -406,9 +406,9 @@ class AppController(QObject):
                 logger.error("No screen available for capture")
                 return
 
-            screenshot = self._capture_all_screens(screens)
-            if screenshot and not screenshot.isNull():
-                overlay = CaptureOverlay(screenshot)
+            full_screen = self._capture_all_screens(screens)
+            if full_screen and not full_screen.isNull():
+                overlay = CaptureOverlay(full_screen)
 
                 # Keep reference to prevent garbage collection
                 self.capture_overlay = overlay
@@ -417,7 +417,7 @@ class AppController(QObject):
                 elapsed_ms = int((time.time() - overlay.start_time) * 1000)
                 logger.info(f">>> [Overlay #{overlay.instance_id}] CaptureOverlay OPENED (init: {elapsed_ms}ms)")
             else:
-                logger.error("Failed to capture screenshot")
+                logger.error("Failed to capture full_screen")
         except Exception as e:
             logger.error(f"Error capturing screen: {e}")
 
@@ -902,7 +902,7 @@ class CaptureOverlay(QWidget):
     # Class-level counter for unique instance IDs
     _instance_counter = 0
 
-    def __init__(self, screenshot: QPixmap):
+    def __init__(self, full_screen: QPixmap):
         super().__init__()
 
         # Generate unique instance ID
@@ -910,7 +910,7 @@ class CaptureOverlay(QWidget):
         self.instance_id = CaptureOverlay._instance_counter
         self.start_time = time.time()
 
-        self.screenshot = screenshot.copy()
+        self.full_screen = full_screen
 
         # Window setup
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
@@ -977,12 +977,10 @@ class CaptureOverlay(QWidget):
         self.current_snapshot_index: int = -1
 
         self._init_annotation_states()
-        # Take initial state
-        self._save_annotation_state()
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.drawPixmap(0, 0, self.screenshot)
+        painter.drawPixmap(0, 0, self.full_screen)
 
         self._paint_preview(painter)
 
@@ -1218,7 +1216,7 @@ class CaptureOverlay(QWidget):
             self.update()
         elif self.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
             if self.draw_mode == "pen":
-                painter = QPainter(self.screenshot)
+                painter = QPainter(self.full_screen)
                 pen = QPen(self.pen_color, self.pen_width,
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
                 painter.setPen(pen)
@@ -1322,7 +1320,7 @@ class CaptureOverlay(QWidget):
         text = self.text_input.text()
 
         if text:
-            painter = QPainter(self.screenshot)
+            painter = QPainter(self.full_screen)
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
             # Set up font - must match exactly what we used in the input
@@ -1359,7 +1357,7 @@ class CaptureOverlay(QWidget):
 
     def _finalize_drawing(self, end_pos):
         """Finalize drawing operation and save to screenshot"""
-        painter = QPainter(self.screenshot)
+        painter = QPainter(self.full_screen)
 
         if self.draw_mode == "rectangle":
             pen = QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine)
@@ -1398,11 +1396,12 @@ class CaptureOverlay(QWidget):
         self._show_toolbar()
         self.update()
 
+        self._save_annotation_state()
         # Save screenshot with selection to snapshots
         app = QApplication.instance()
         if hasattr(app, 'controller') and app.controller:
             app.controller._add_to_screenshot_snapshots(
-                self.screenshot,
+                self.full_screen,
                 self.start_pos,
                 self.end_pos
             )
@@ -1524,7 +1523,7 @@ class CaptureOverlay(QWidget):
         # Try to find by comparing screenshot data
         for i, snapshot_item in enumerate(screenshot_snapshots):
             snapshot_screenshot = snapshot_item['screenshot']
-            if snapshot_screenshot.cacheKey() == self.screenshot.cacheKey():
+            if snapshot_screenshot.cacheKey() == self.full_screen.cacheKey():
                 return i
 
         # If not found, for navigation purposes, set to len so previous index is the last one
@@ -1609,7 +1608,7 @@ class CaptureOverlay(QWidget):
             end_pos: Ending position for the selection
             reset_annotation: If True, reset annotation states (default True)
         """
-        self.screenshot = screenshot.copy()
+        self.full_screen = screenshot.copy()
         self.start_pos = start_pos
         self.end_pos = end_pos
 
@@ -1716,7 +1715,7 @@ class CaptureOverlay(QWidget):
 
     def _init_annotation_states(self):
         """Initialize annotation states for undo/redo functionality."""
-        self.annotation_states: List[QPixmap] = []
+        self.annotation_states: List[dict] = []
         self.undo_redo_index = -1
 
     def _save_annotation_state(self):
@@ -1726,26 +1725,41 @@ class CaptureOverlay(QWidget):
         self.annotation_states = self.annotation_states[:self.undo_redo_index + 1]
 
         # Add new state
-        self.annotation_states.append(self.screenshot.copy())
+        cropped, selection_rect = self._get_cropped_selection()
+        self.annotation_states.append({
+            'screenshot': cropped,
+            'selection_rect': selection_rect
+        })
         self.undo_redo_index += 1
 
         if len(self.annotation_states) > MAX_HISTORY:
             self.annotation_states.pop(0)
             self.undo_redo_index -= 1
+        
+        logger.info(f"Annotation states: {len(self.annotation_states)}")
 
     def undo_action(self):
         """Undo last annotation"""
         if self.undo_redo_index > 0:
             self.undo_redo_index -= 1
-            self.screenshot = self.annotation_states[self.undo_redo_index].copy()
+            self._restore_annotation_state(self.undo_redo_index)
             self.update()
 
     def redo_action(self):
         """Redo annotation"""
         if self.undo_redo_index < len(self.annotation_states) - 1:
             self.undo_redo_index += 1
-            self.screenshot = self.annotation_states[self.undo_redo_index].copy()
+            self._restore_annotation_state(self.undo_redo_index)
             self.update()
+    
+    def _restore_annotation_state(self, index: int):
+        """Restore annotation state from index"""
+        state_item = self.annotation_states[index]
+        state_pixmap = state_item['screenshot']
+        selection_rect = state_item['selection_rect']
+        painter = QPainter(self.full_screen)
+        painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
+        painter.end()
 
     def _scale_rect(self, rect: QRect) -> QRect:
         """
@@ -1754,13 +1768,13 @@ class CaptureOverlay(QWidget):
         When drawing with QPainter on a pixmap with devicePixelRatio set,
         Qt automatically handles the scaling, so use logical coordinates.
         """
-        if self.screenshot.devicePixelRatio() <= 1.0:
+        if self.full_screen.devicePixelRatio() <= 1.0:
             return rect
         return QRect(
-            int(rect.x() * self.screenshot.devicePixelRatio()),
-            int(rect.y() * self.screenshot.devicePixelRatio()),
-            int(rect.width() * self.screenshot.devicePixelRatio()),
-            int(rect.height() * self.screenshot.devicePixelRatio())
+            int(rect.x() * self.full_screen.devicePixelRatio()),
+            int(rect.y() * self.full_screen.devicePixelRatio()),
+            int(rect.width() * self.full_screen.devicePixelRatio()),
+            int(rect.height() * self.full_screen.devicePixelRatio())
         )
 
     def _get_cropped_selection(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
@@ -1776,9 +1790,9 @@ class CaptureOverlay(QWidget):
             if selection_rect.width() > MIN_VALID_RECT and selection_rect.height() > MIN_VALID_RECT:
                 # Scale the selection rect for high DPI displays
                 scaled_rect = self._scale_rect(selection_rect)
-                cropped = self.screenshot.copy(scaled_rect)
+                cropped = self.full_screen.copy(scaled_rect)
                 # Preserve the device pixel ratio on the cropped pixmap
-                cropped.setDevicePixelRatio(self.screenshot.devicePixelRatio())
+                cropped.setDevicePixelRatio(self.full_screen.devicePixelRatio())
                 result = (cropped, selection_rect)
         return result
 
@@ -1846,7 +1860,7 @@ class CaptureOverlay(QWidget):
 
         # Clear resources to release memory
         self.annotation_states.clear()
-        self.screenshot = None
+        self.full_screen = None
 
         lifetime_sec = time.time() - self.start_time
         logger.info(f"<<< [Overlay #{self.instance_id}] CaptureOverlay CLOSED (lifetime: {lifetime_sec:.2f}s)")
