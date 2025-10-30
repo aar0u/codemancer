@@ -13,7 +13,7 @@ from typing import Optional, Tuple, List
 from pynput import keyboard
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QShortcut, QKeySequence, QIcon, QFont
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QShortcut, QKeySequence, QCursor, QIcon, QFont
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, QColorDialog,
@@ -49,7 +49,8 @@ DEFAULT_FONT_SIZE = 16
 MAX_HISTORY = 20
 
 # Keyboard
-GLOBAL_HOTKEY = '<ctrl>+<shift>+q'
+GLOBAL_HOTKEY_CAP = '<ctrl>+<alt>+1'
+GLOBAL_HOTKEY_PIN = '<ctrl>+<alt>+2'
 KEYBOARD_STEP_SMALL = 1
 KEYBOARD_STEP_LARGE = 10
 
@@ -221,8 +222,9 @@ class AppController(QObject):
     global hotkey registration, single instance management, and application lifecycle.
     """
 
-    # Signal for thread-safe screenshot triggering from keyboard hotkey
+    # Signal for thread-safe
     screenshot_triggered = pyqtSignal()
+    pin_clipboard_triggered = pyqtSignal()
 
     def __init__(self, single_instance: SingleInstance):
         super().__init__()
@@ -242,8 +244,32 @@ class AppController(QObject):
         self._setup_hotkey()
         self._setup_single_instance_handler()
 
-        # Connect signal to slot
+        # Connect signals to slots
         self.screenshot_triggered.connect(self.prepare_fullscreen_capture)
+        self.pin_clipboard_triggered.connect(self.pin_clipboard_image)
+
+    def pin_clipboard_image(self):
+        """Pin image from clipboard as a PinnedImageWindow."""
+        app = QApplication.instance()
+        clipboard = app.clipboard()
+        mime = clipboard.mimeData()
+        if mime.hasImage():
+            pixmap = clipboard.pixmap()
+            if not pixmap or pixmap.isNull():
+                logger.error("Clipboard image is null or invalid.")
+                return
+
+            pinned = PinnedImageWindow(
+                pixmap,
+                position=QCursor.pos(),
+                selection_rect=QRect(0, 0, pixmap.width(), pixmap.height()),
+            )
+            pinned.show()
+
+            self.pinned_windows.append(pinned)
+            logger.info(f"Clipboard pinned to screen. Total pinned: {len(self.pinned_windows)}")
+        else:
+            logger.warning("No image found in clipboard to pin.")
 
     def _setup_about_window(self):
         """Create the about window (hidden by default)."""
@@ -323,7 +349,7 @@ class AppController(QObject):
                 if self.tray_icon.supportsMessages():
                     self.tray_icon.showMessage(
                         "ShotNPin",
-                        f"Running in background. Use {GLOBAL_HOTKEY} to capture.",
+                        f"Running in background. Use {GLOBAL_HOTKEY_CAP} to capture.",
                         QSystemTrayIcon.MessageIcon.Information,
                         3000
                     )
@@ -334,24 +360,22 @@ class AppController(QObject):
             self.prepare_fullscreen_capture()
 
     def _setup_hotkey(self):
-        """Register global hotkey for screenshot capture."""
+        """Register global hotkey."""
         try:
-            # Define the hotkey combination
-            hotkeys = {GLOBAL_HOTKEY: lambda: self.screenshot_triggered.emit()}
+            hotkeys = {
+                GLOBAL_HOTKEY_CAP: lambda: self.screenshot_triggered.emit(),
+                GLOBAL_HOTKEY_PIN: lambda: self.pin_clipboard_triggered.emit()
+            }
             keyboard.GlobalHotKeys(hotkeys).start()
-
-            logger.info(f"Global hotkey registered: {GLOBAL_HOTKEY}")
+            logger.info(f"Registered global hotkeys: {', '.join(hotkeys.keys())}")
         except Exception as e:
-            logger.error(f"Failed to register global hotkey {GLOBAL_HOTKEY}: {e}")
+            logger.error(f"Hotkey registration failed: {e}")
             if sys.platform == "darwin":  # macOS
-                logger.info("On macOS: Please grant Accessibility permissions in System Preferences > Security & Privacy > Privacy > Accessibility")
+                logger.info("On macOS: Please grant Accessibility permissions in System Preferences > Security & Privacy > Privacy & Accessibility")
                 QMessageBox.warning(
                     None,
-                    "ShotNPin - Permission Required",
-                    f"Failed to register global hotkey {GLOBAL_HOTKEY}.\n\n"
-                    "Please grant Accessibility permissions in System Preferences:\n"
-                    "System Preferences → Security & Privacy → Privacy → Accessibility\n\n"
-                    "Add Terminal or this application to the list and check it."
+                    "ShotNPin",
+                    "Failed to register global hotkey.\nPlease grant Accessibility permissions in System Preferences > Privacy > Accessibility."
                 )
             else:
                 logger.info("You may need to run with administrator/root privileges for global hotkeys")
@@ -1809,7 +1833,6 @@ class CaptureOverlay(QWidget):
             self.annotation_states = []
             pinned_window.show()
 
-            # Keep reference to prevent garbage collection
             app = QApplication.instance()
             if hasattr(app, 'controller') and app.controller:
                 app.controller.pinned_windows.append(pinned_window)
@@ -1857,7 +1880,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
 
         # Hotkey info
-        shortcut_label = QLabel("Shortcut: {}".format(GLOBAL_HOTKEY))
+        shortcut_label = QLabel("Shortcut: {}".format(GLOBAL_HOTKEY_CAP))
         shortcut_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         shortcut_label.setStyleSheet("color: #0078d4; font-weight: bold;")
         layout.addWidget(shortcut_label)
