@@ -120,6 +120,22 @@ def get_app_icon() -> QIcon:
     return QIcon(icon_path)
 
 
+def get_app_controller():
+    """
+    Safely get the global AppController from QApplication instance.
+    """
+    app = QApplication.instance()
+    return getattr(app, 'controller', None)
+
+
+def get_global_toolbar():
+    """
+    Safely get the shared global toolbar from the AppController.
+    """
+    controller = get_app_controller()
+    return getattr(controller, 'global_toolbar', None)
+
+
 def get_virtual_desktop_bounds(screens) -> Tuple[int, int, int, int]:
     """
     Calculate the virtual desktop bounds from multiple screens.
@@ -528,8 +544,7 @@ class AnnotationMixin:
         self.annotation_active = False
         self.last_point = QPoint()
         self.draw_start_point = QPoint()
-        self.pen_color = DEFAULT_PEN_COLOR
-        self.pen_width = DEFAULT_PEN_WIDTH
+
         self.font_size = DEFAULT_FONT_SIZE
         self.draw_mode = "pen"
         self.preview_rect: Optional[QRect] = None
@@ -548,7 +563,7 @@ class AnnotationMixin:
 
     def set_draw_mode(self, mode):
         """Set the drawing mode and toggle annotation"""
-        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        toolbar = get_global_toolbar()
         if not toolbar:
             return
         # Map modes to their corresponding buttons
@@ -571,19 +586,6 @@ class AnnotationMixin:
             # Deactivate the mode
             self.annotation_active = False
             current_btn.setChecked(False)
-
-    def update_pen_width(self, value):
-        """Update pen width when slider changes"""
-        self.pen_width = value
-
-    def choose_color(self):
-        """Open color picker dialog"""
-        color = QColorDialog.getColor(self.pen_color, self, "Choose Pen Color")
-        if color.isValid():
-            self.pen_color = color
-            toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
-            if toolbar:
-                toolbar.update_color_button(self.pen_color)
 
     def _init_annotation_states(self):
         """Initialize annotation states for undo/redo functionality."""
@@ -645,9 +647,9 @@ class AnnotationMixin:
         self.text_input.setFont(font)
 
         # Calculate text color brightness to set contrasting background
-        brightness = self.pen_color.lightness()
+        brightness = get_global_toolbar().current_pen_color.lightness()
         bg_color = "rgba(255, 255, 255, 180)" if brightness < 128 else "rgba(0, 0, 0, 180)"
-        text_color = self.pen_color.name()
+        text_color = get_global_toolbar().current_pen_color.name()
 
         # No border at all to avoid offset issues
         self.text_input.setStyleSheet(f"""
@@ -698,7 +700,7 @@ class AnnotationMixin:
             painter.setFont(font)
 
             # Set up pen for text
-            painter.setPen(self.pen_color)
+            painter.setPen(get_global_toolbar().current_pen_color)
 
             # Calculate text offset based on QLineEdit's content margins
             # QLineEdit has internal padding that varies by platform
@@ -731,16 +733,16 @@ class AnnotationMixin:
         painter = QPainter(image)
 
         if self.draw_mode == "rectangle":
-            pen = QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine)
+            pen = QPen(get_global_toolbar().current_pen_color, get_global_toolbar().pen_width_slider.value(), Qt.PenStyle.SolidLine)
             painter.setPen(pen)
-            painter.setBrush(QColor(self.pen_color.red(),
-                                   self.pen_color.green(),
-                                   self.pen_color.blue(), 50))
+            painter.setBrush(QColor(get_global_toolbar().current_pen_color.red(),
+                                   get_global_toolbar().current_pen_color.green(),
+                                   get_global_toolbar().current_pen_color.blue(), 50))
             rect = QRect(self.draw_start_point, end_pos).normalized()
             painter.drawRect(rect)
             self.preview_rect = None
         elif self.draw_mode == "line":
-            pen = QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine,
+            pen = QPen(get_global_toolbar().current_pen_color, get_global_toolbar().pen_width_slider.value(), Qt.PenStyle.SolidLine,
                       Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
             painter.setPen(pen)
             painter.drawLine(self.draw_start_point, end_pos)
@@ -754,14 +756,14 @@ class AnnotationMixin:
     def _paint_preview(self, painter: QPainter):
         """Paint preview for rectangle/line drawing modes"""
         if self.preview_rect and self.draw_mode == "rectangle":
-            painter.setPen(QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine))
-            painter.setBrush(QColor(self.pen_color.red(),
-                                   self.pen_color.green(),
-                                   self.pen_color.blue(), 50))
+            painter.setPen(QPen(get_global_toolbar().current_pen_color, get_global_toolbar().pen_width_slider.value(), Qt.PenStyle.SolidLine))
+            painter.setBrush(QColor(get_global_toolbar().current_pen_color.red(),
+                                   get_global_toolbar().current_pen_color.green(),
+                                   get_global_toolbar().current_pen_color.blue(), 50))
             painter.drawRect(self.preview_rect)
 
         if self.preview_line and self.draw_mode == "line":
-            painter.setPen(QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine,
+            painter.setPen(QPen(get_global_toolbar().current_pen_color, get_global_toolbar().pen_width_slider.value(), Qt.PenStyle.SolidLine,
                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             painter.drawLine(self.preview_line[0], self.preview_line[1])
 
@@ -777,7 +779,7 @@ class AnnotationMixin:
     def _show_toolbar(self):
         """Show the floating toolbar, using global toolbar and setting parent if needed"""
         # Ensure we have a reference to the global toolbar
-        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        toolbar = get_global_toolbar()
         if not toolbar:
             logger.warning("Global toolbar not available, cannot show toolbar")
             return
@@ -789,7 +791,7 @@ class AnnotationMixin:
 
     def _position_toolbar(self):
         """Position toolbar at bottom right of selection area (in parent coordinates)"""
-        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        toolbar = get_global_toolbar()
         if not toolbar:
             return
         # Selection rectangle - plus border coz of glow effect for pinned window
@@ -823,8 +825,7 @@ class AnnotationMixin:
                 # Get the appropriate image to draw on
                 image = self.screenshot if hasattr(self, 'screenshot') else self.pixmap
                 painter = QPainter(image)
-                pen = QPen(self.pen_color, self.pen_width,
-                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+                pen = QPen(get_global_toolbar().current_pen_color, get_global_toolbar().pen_width_slider.value(), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
                 painter.setPen(pen)
                 painter.drawLine(self.last_point, event.pos())
                 self.last_point = event.pos()
@@ -845,7 +846,7 @@ class AnnotationMixin:
 
     def handle_annotation_wheel(self, event):
         """Handle wheel events for annotation (font size adjustment)"""
-        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        toolbar = get_global_toolbar()
         if toolbar and toolbar.geometry().contains(event.position().toPoint()):
             return False
         # Only handle wheel events when text input is active
@@ -866,7 +867,7 @@ class AnnotationMixin:
     def handle_annotation_key_press(self, event):
         """Handle key press events for annotation"""
         key = event.key()
-        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        toolbar = get_global_toolbar()
         # Handle Escape key - cancel text input or annotation mode
         if key == Qt.Key.Key_Escape:
             if self.text_input:
@@ -956,20 +957,8 @@ class FloatingToolbar(QWidget):
         # List to store button actions in order for keyboard shortcuts
         self.button_actions = []
 
-        # Button references - will be created when parent is set
-        self.pen_btn = None
-        self.rect_btn = None
-        self.line_btn = None
-        self.text_btn = None
-        self.color_btn = None
-        self.pen_width_label = None
-        self.pen_width_slider = None
-        self.undo_btn = None
-        self.redo_btn = None
-        self.copy_btn = None
-        self.save_btn = None
-        self.pin_btn = None
-        self.close_btn = None
+        # Global pen state
+        self.current_pen_color = DEFAULT_PEN_COLOR
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(TOOLBAR_MARGIN, TOOLBAR_MARGIN, TOOLBAR_MARGIN, TOOLBAR_MARGIN)
@@ -1045,22 +1034,23 @@ class FloatingToolbar(QWidget):
         # Color picker button
         self.color_btn = QPushButton()
         self.color_btn.setToolTip(f"Choose Color ({len(self.button_actions) + 1})")
-        # 不绑定事件
+        self.color_btn.clicked.connect(self.color_btn_callback)
+        self.update_color_button(self.current_pen_color)
         layout.addWidget(self.color_btn)
         self.button_actions.append(lambda: self.color_btn.click())
 
         # Pen width controls
-        self.pen_width_label = QLabel("1")
+        self.pen_width_label = QLabel()
         self.pen_width_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pen_width_label.setFixedWidth(24)
         layout.addWidget(self.pen_width_label)
 
         self.pen_width_slider = QSlider(Qt.Orientation.Horizontal)
         self.pen_width_slider.setRange(1, 20)
-        self.pen_width_slider.setValue(1)
         self.pen_width_slider.setFixedWidth(60)
         self.pen_width_slider.setSingleStep(1)
-        # 不绑定事件
+        self.pen_width_slider.valueChanged.connect(self.pen_width_label.setNum)
+        self.pen_width_slider.setValue(DEFAULT_PEN_WIDTH)
         layout.addWidget(self.pen_width_slider)
 
         # Undo/Redo buttons
@@ -1096,14 +1086,20 @@ class FloatingToolbar(QWidget):
 
     def update_color_button(self, color: QColor):
         """Update color button appearance based on selected color."""
-        if self.color_btn:
-            text_color = 'white' if color.lightness() < 128 else 'black'
-            self.color_btn.setStyleSheet(
-                f"background-color: {color.name()}; "
-                f"color: {text_color}; "
-                f"border: 1px solid #555; "
-                f"border-radius: 3px;"
-            )
+        text_color = 'white' if color.lightness() < 128 else 'black'
+        self.color_btn.setStyleSheet(
+            f"background-color: {color.name()}; "
+            f"color: {text_color}; "
+            f"border: 1px solid #555; "
+            f"border-radius: 3px;"
+        )
+        self.current_pen_color = color
+
+    def color_btn_callback(self):
+        color = QColorDialog.getColor(self.current_pen_color, self.connected_window, "Choose Pen Color")
+        if color.isValid():
+            self.update_color_button(color)
+        self.raise_()
 
     def reconnect_callbacks(self, toolbar_owner):
         """Reconnect all button and slider callbacks to the new toolbar owner, without recreating buttons."""
@@ -1112,21 +1108,18 @@ class FloatingToolbar(QWidget):
         def safe_disconnect(signal):
             try:
                 signal.disconnect()
-            except TypeError:
+            except Exception:
                 pass
 
+        # Color button remains the same
         for btn in self.findChildren(QPushButton):
-            if btn is not None:
+            if btn is not None and btn is not self.color_btn:
                 safe_disconnect(btn.clicked)
 
         self.pen_btn.clicked.connect(lambda: toolbar_owner.set_draw_mode("pen"))
         self.rect_btn.clicked.connect(lambda: toolbar_owner.set_draw_mode("rectangle"))
         self.line_btn.clicked.connect(lambda: toolbar_owner.set_draw_mode("line"))
         self.text_btn.clicked.connect(lambda: toolbar_owner.set_draw_mode("text"))
-
-        self.color_btn.clicked.connect(toolbar_owner.choose_color)
-        # Reflect current pen color
-        self.update_color_button(toolbar_owner.pen_color)
 
         self.undo_btn.clicked.connect(toolbar_owner.undo_action)
         self.redo_btn.clicked.connect(toolbar_owner.redo_action)
@@ -1136,10 +1129,7 @@ class FloatingToolbar(QWidget):
             self.pin_btn.clicked.connect(toolbar_owner.pin_to_display)
         self.close_btn.clicked.connect(toolbar_owner.close)
 
-        safe_disconnect(self.pen_width_slider.valueChanged)
-        self.pen_width_slider.valueChanged.connect(toolbar_owner.update_pen_width)
-        self.pen_width_slider.valueChanged.connect(self.pen_width_label.setNum)
-
+        # Set slider and label to current global value
         logger.debug(f"FloatingToolbar switched to parent: {toolbar_owner}")
 
 
@@ -1235,7 +1225,7 @@ class PinnedImageWindow(QWidget, AnnotationMixin):
             self._show_toolbar()
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
-            toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+            toolbar = get_global_toolbar()
             if toolbar:
                 toolbar.hide()
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -1343,7 +1333,7 @@ class PinnedImageWindow(QWidget, AnnotationMixin):
 
     def closeEvent(self, event):
         """Clean up toolbar and release resources when closing"""
-        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        toolbar = get_global_toolbar()
         if toolbar:
             toolbar.hide()
 
@@ -1436,7 +1426,7 @@ class CaptureOverlay(QWidget, AnnotationMixin):
         self.__init_annotation_mixin__()
 
         # Hide toolbar at start of new capture
-        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        toolbar = get_global_toolbar()
         if toolbar:
             toolbar.hide()
 
@@ -1456,14 +1446,14 @@ class CaptureOverlay(QWidget, AnnotationMixin):
     def _paint_preview(self, painter: QPainter):
         """Paint preview for rectangle/line drawing modes"""
         if self.preview_rect and self.draw_mode == "rectangle":
-            painter.setPen(QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine))
-            painter.setBrush(QColor(self.pen_color.red(),
-                                   self.pen_color.green(),
-                                   self.pen_color.blue(), 50))
+            painter.setPen(QPen(get_global_toolbar().current_pen_color, get_global_toolbar().pen_width_slider.value(), Qt.PenStyle.SolidLine))
+            painter.setBrush(QColor(get_global_toolbar().current_pen_color.red(),
+                                   get_global_toolbar().current_pen_color.green(),
+                                   get_global_toolbar().current_pen_color.blue(), 50))
             painter.drawRect(self.preview_rect)
 
         if self.preview_line and self.draw_mode == "line":
-            painter.setPen(QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine,
+            painter.setPen(QPen(get_global_toolbar().current_pen_color, get_global_toolbar().pen_width_slider.value(), Qt.PenStyle.SolidLine,
                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             painter.drawLine(self.preview_line[0], self.preview_line[1])
 
@@ -1772,7 +1762,7 @@ class CaptureOverlay(QWidget, AnnotationMixin):
 
         if self.annotation_active:
             self.annotation_active = False
-            toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+            toolbar = get_global_toolbar()
             if toolbar:
                 toolbar.pen_btn.setChecked(False)
                 toolbar.rect_btn.setChecked(False)
@@ -2043,7 +2033,7 @@ class CaptureOverlay(QWidget, AnnotationMixin):
     def closeEvent(self, event):
         """Clean up toolbar and release resources when closing"""
         # Hide toolbar instead of closing (since it's global and shared)
-        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        toolbar = get_global_toolbar()
         if toolbar:
             toolbar.hide()
 
