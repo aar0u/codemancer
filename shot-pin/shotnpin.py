@@ -40,6 +40,7 @@ MIN_VALID_RECT = 10
 ICON_SIZE = 24
 TOOLBAR_MARGIN = 5
 TOOLBAR_SPACING = 3
+SELECTION_BORDER_WIDTH = 3
 
 # Drawing Defaults
 DEFAULT_PEN_WIDTH = 2
@@ -234,9 +235,7 @@ class AppController(QObject):
         # Global screenshot snapshots with state
         self.screenshot_snapshots: List[dict] = []  # Each item: {'screenshot': QPixmap, 'start_pos': QPoint, 'end_pos': QPoint}
 
-        # Global toolbar instance (shared across all windows)
-        self.global_toolbar = FloatingToolbar(parent=None)
-        logger.debug("Global FloatingToolbar created")
+        self.global_toolbar = FloatingToolbar()
 
         # Managed window references
         self.capture_overlay = CaptureOverlay()
@@ -517,11 +516,11 @@ class AppController(QObject):
 class AnnotationMixin:
     """
     Mixin class providing annotation functionality for both CaptureOverlay and PinnedImageWindow.
-    
+
     This class contains all annotation-related methods, properties, and event handling
     that can be shared between different window types.
     """
-    
+
     def __init_annotation_mixin__(self):
         """Initialize annotation-related properties. Call this in the __init__ of the using class."""
         # Drawing state
@@ -535,44 +534,33 @@ class AnnotationMixin:
         self.draw_mode = "pen"
         self.preview_rect: Optional[QRect] = None
         self.preview_line: Optional[Tuple[QPoint, QPoint]] = None
-        
+
         # Text input state
         self.text_input: Optional[QLineEdit] = None
         self.text_input_pos: Optional[QPoint] = None
-        
-        # Toolbar - use global toolbar from AppController if available
-        app = QApplication.instance()
-        if hasattr(app, 'controller') and app.controller and hasattr(app.controller, 'global_toolbar'):
-            self.toolbar = app.controller.global_toolbar
-        else:
-            # Fallback if controller not available yet
-            self.toolbar: Optional[FloatingToolbar] = None
-        
+
         # Annotation states for undo/redo
         self.annotation_states: List[QPixmap] = []
         self.undo_redo_index = -1
-        
+
         self._init_annotation_states()
         self._save_annotation_state()
-    
+
     def set_draw_mode(self, mode):
         """Set the drawing mode and toggle annotation"""
-        if not self.toolbar:
+        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        if not toolbar:
             return
-
         # Map modes to their corresponding buttons
         buttons = {
-            "pen": self.toolbar.pen_btn,
-            "rectangle": self.toolbar.rect_btn,
-            "line": self.toolbar.line_btn,
-            "text": self.toolbar.text_btn
+            "pen": toolbar.pen_btn,
+            "rectangle": toolbar.rect_btn,
+            "line": toolbar.line_btn,
+            "text": toolbar.text_btn
         }
-
         current_btn = buttons[mode]
         is_activating = current_btn.isChecked()
-
         if is_activating:
-            # Activate the selected mode
             self.draw_mode = mode
             self.annotation_active = True
             # Uncheck all other buttons
@@ -593,8 +581,9 @@ class AnnotationMixin:
         color = QColorDialog.getColor(self.pen_color, self, "Choose Pen Color")
         if color.isValid():
             self.pen_color = color
-            if self.toolbar:
-                self.toolbar.update_color_button(self.pen_color)
+            toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+            if toolbar:
+                toolbar.update_color_button(self.pen_color)
 
     def _init_annotation_states(self):
         """Initialize annotation states for undo/redo functionality."""
@@ -614,7 +603,7 @@ class AnnotationMixin:
             self.annotation_states.append(self.pixmap.copy())
         else:
             return  # No valid image to save
-        
+
         self.undo_redo_index += 1
 
         if len(self.annotation_states) > MAX_HISTORY:
@@ -788,48 +777,41 @@ class AnnotationMixin:
     def _show_toolbar(self):
         """Show the floating toolbar, using global toolbar and setting parent if needed"""
         # Ensure we have a reference to the global toolbar
-        if not self.toolbar:
-            app = QApplication.instance()
-            if hasattr(app, 'controller') and app.controller and hasattr(app.controller, 'global_toolbar'):
-                self.toolbar = app.controller.global_toolbar
-            else:
-                logger.warning("Global toolbar not available, cannot show toolbar")
-                return
-        
-        # Set parent window if toolbar needs to be switched
-        if self.toolbar.parent_window != self:
-            self.toolbar.set_parent_window(self)
+        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        if not toolbar:
+            logger.warning("Global toolbar not available, cannot show toolbar")
+            return
+        if toolbar.connected_window != self:
+            toolbar.reconnect_callbacks(self)
 
         self._position_toolbar()
-        self.toolbar.show()
+        toolbar.show()
 
     def _position_toolbar(self):
         """Position toolbar at bottom right of selection area (in parent coordinates)"""
-        if self.toolbar and hasattr(self, 'start_pos') and hasattr(self, 'end_pos') and self.start_pos and self.end_pos:
+        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        if not toolbar:
+            return
+        # Selection rectangle - plus border coz of glow effect for pinned window
+        if hasattr(self, 'start_pos') and hasattr(self, 'end_pos') and self.start_pos and self.end_pos:
             selection_rect = QRect(self.start_pos, self.end_pos).normalized()
-            # Align to right side, position below selection
-            toolbar_x = selection_rect.right() - self.toolbar.width()
-            toolbar_y = selection_rect.bottom() + 5
-
-            # Keep toolbar on screen
-            toolbar_x = max(0, min(toolbar_x, self.width() - self.toolbar.width()))
-            toolbar_y = min(toolbar_y, self.height() - self.toolbar.height())
-
-            # Move toolbar (it's a child widget, so coordinates are relative to parent)
-            self.toolbar.move(toolbar_x, toolbar_y)
-            self.toolbar.raise_()  # Keep it on top of other child widgets
-        elif self.toolbar:
-            # For PinnedImageWindow, position at bottom right of the window
-            toolbar_x = self.width() - self.toolbar.width() - 10
-            toolbar_y = self.height() - self.toolbar.height() - 10
-            self.toolbar.move(toolbar_x, toolbar_y)
-            self.toolbar.raise_()
+            toolbar_x = selection_rect.right() + SELECTION_BORDER_WIDTH - toolbar.width()
+            toolbar_y = selection_rect.bottom() + SELECTION_BORDER_WIDTH + TOOLBAR_MARGIN
+            toolbar_x = max(0, min(toolbar_x, self.width() - toolbar.width()))
+            toolbar_y = min(toolbar_y, self.height() - toolbar.height())
+            toolbar.move(toolbar_x, toolbar_y)
+            toolbar.raise_()
+        else: # Pinned window
+            toolbar_x = self.width() - toolbar.width()
+            toolbar_y = self.height() + TOOLBAR_MARGIN
+            toolbar.move(self.mapToGlobal(QPoint(toolbar_x, toolbar_y)))
+            toolbar.raise_()
 
     def handle_annotation_mouse_press(self, event):
         """Handle mouse press events for annotation"""
         pos = event.pos()
-        
-        if (event.button() == Qt.MouseButton.RightButton or 
+
+        if (event.button() == Qt.MouseButton.RightButton or
             (event.button() == Qt.MouseButton.LeftButton and self.annotation_active)):
             # Right click always initiates drawing/annotation, or left click in annotation mode
             self._start_drawing_or_annotate(pos)
@@ -863,38 +845,30 @@ class AnnotationMixin:
 
     def handle_annotation_wheel(self, event):
         """Handle wheel events for annotation (font size adjustment)"""
-        # Check if mouse is over the toolbar - if so, let toolbar handle the event
-        if self.toolbar and self.toolbar.geometry().contains(event.position().toPoint()):
+        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        if toolbar and toolbar.geometry().contains(event.position().toPoint()):
             return False
-
         # Only handle wheel events when text input is active
         if self.text_input and self.text_input.isVisible():
-            # Get wheel delta (positive = scroll up, negative = scroll down)
             delta = event.angleDelta().y()
-
-            # Adjust font size (scroll up = larger, scroll down = smaller)
             if delta > 0:
-                self.font_size = min(72, self.font_size + 2)  # Max font size: 72
+                self.font_size = min(72, self.font_size + 2)
             else:
-                self.font_size = max(8, self.font_size - 2)   # Min font size: 8
-
-            # Update the text input font immediately
+                self.font_size = max(8, self.font_size - 2)
             font = QFont("Arial", self.font_size)
             font.setBold(True)
             self.text_input.setFont(font)
             self.text_input.adjustSize()
-
-            event.accept()  # Event handled
+            event.accept()
             return True
         return False
 
     def handle_annotation_key_press(self, event):
         """Handle key press events for annotation"""
         key = event.key()
-
+        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
         # Handle Escape key - cancel text input or annotation mode
         if key == Qt.Key.Key_Escape:
-            # If text input is active, cancel it
             if self.text_input:
                 self.text_input.deleteLater()
                 self.text_input = None
@@ -902,22 +876,19 @@ class AnnotationMixin:
                 return True
             if self.annotation_active:
                 self.annotation_active = False
-                if hasattr(self, 'toolbar') and self.toolbar:
-                    self.toolbar.pen_btn.setChecked(False)
-                    self.toolbar.rect_btn.setChecked(False)
-                    self.toolbar.line_btn.setChecked(False)
-                    self.toolbar.text_btn.setChecked(False)
+                if toolbar:
+                    toolbar.pen_btn.setChecked(False)
+                    toolbar.rect_btn.setChecked(False)
+                    toolbar.line_btn.setChecked(False)
+                    toolbar.text_btn.setChecked(False)
                 self.update()
                 return True
-
         # Handle number keys for toolbar shortcuts (1-9)
         if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
-            if hasattr(self, 'toolbar') and self.toolbar and hasattr(self.toolbar, 'button_actions'):
-                button_index = key - Qt.Key.Key_1
-                if button_index < len(self.toolbar.button_actions):
-                    self.toolbar.button_actions[button_index]()
-                    return True
-
+            button_index = key - Qt.Key.Key_1
+            if toolbar and button_index < len(toolbar.button_actions):
+                toolbar.button_actions[button_index]()
+                return True
         # Handle keyboard shortcuts with Ctrl modifier
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             shortcuts = {
@@ -927,7 +898,6 @@ class AnnotationMixin:
             if key in shortcuts:
                 shortcuts[key]()
                 return True
-
         return False
 
     def copy_to_clipboard(self):
@@ -969,19 +939,23 @@ class FloatingToolbar(QWidget):
     pen width adjustment, and various actions (copy, save, pin, close).
     """
 
-    def __init__(self, parent=None):
+    def __init__(self):
         # Create a temporary parent if none provided (for global toolbar)
-        super().__init__(parent)
-        self.parent_window = parent
-        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.Tool
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.ArrowCursor)
 
+        self.connected_window = None
         # List to store button actions in order for keyboard shortcuts
         self.button_actions = []
-        
+
         # Button references - will be created when parent is set
         self.pen_btn = None
         self.rect_btn = None
@@ -1003,15 +977,8 @@ class FloatingToolbar(QWidget):
         self.main_layout = layout
 
         self._setup_styles()
-        
-        # Only create buttons if parent is provided
-        if parent:
-            self._create_buttons(layout)
-            self.adjustSize()
-
-        # Ensure all children have arrow cursor
-        for child in self.findChildren(QWidget):
-            child.setCursor(Qt.CursorShape.ArrowCursor)
+        self._create_buttons(layout)
+        self.adjustSize()
 
     def _setup_styles(self):
         """Apply stylesheet to toolbar and its widgets."""
@@ -1138,67 +1105,42 @@ class FloatingToolbar(QWidget):
                 f"border-radius: 3px;"
             )
 
-    def set_parent_window(self, parent):
-        """Set the parent window and reconnect button callbacks to new parent."""
-        self.parent_window = parent
-        if parent:
-            self.setParent(parent)
-            # 如果按钮还没创建，先创建；否则只重连事件
-            if not self.pen_btn:
-                self._create_buttons(self.main_layout)
-            else:
-                self.reconnect_callbacks(parent)
+    def reconnect_callbacks(self, toolbar_owner):
+        """Reconnect all button and slider callbacks to the new toolbar owner, without recreating buttons."""
+        self.connected_window = toolbar_owner
+        # Disconnect all buttons' clicked signals
+        def safe_disconnect(signal):
+            try:
+                signal.disconnect()
+            except TypeError:
+                pass
 
-    def reconnect_callbacks(self, parent_window):
-        """重新连接所有按钮和滑块的回调到新父窗口，不重新创建按钮。"""
-        self.parent_window = parent_window
-        # 断开所有按钮的clicked信号
         for btn in self.findChildren(QPushButton):
             if btn is not None:
-                try:
-                    btn.clicked.disconnect()
-                except Exception:
-                    pass
-        # 重新连接绘图工具按钮
-        if self.pen_btn:
-            self.pen_btn.clicked.connect(lambda: parent_window.set_draw_mode("pen"))
-        if self.rect_btn:
-            self.rect_btn.clicked.connect(lambda: parent_window.set_draw_mode("rectangle"))
-        if self.line_btn:
-            self.line_btn.clicked.connect(lambda: parent_window.set_draw_mode("line"))
-        if self.text_btn:
-            self.text_btn.clicked.connect(lambda: parent_window.set_draw_mode("text"))
-        # 重新连接其他按钮
-        if self.color_btn:
-            self.color_btn.clicked.connect(parent_window.choose_color)
-        if self.undo_btn:
-            self.undo_btn.clicked.connect(parent_window.undo_action)
-        if self.redo_btn:
-            self.redo_btn.clicked.connect(parent_window.redo_action)
-        if self.copy_btn:
-            self.copy_btn.clicked.connect(parent_window.copy_to_clipboard)
-        if self.save_btn:
-            self.save_btn.clicked.connect(parent_window.save_to_file)
-        if self.pin_btn and hasattr(parent_window, "pin_to_display"):
-            self.pin_btn.clicked.connect(parent_window.pin_to_display)
-        if self.close_btn:
-            self.close_btn.clicked.connect(parent_window.close)
-        # 断开并重连滑块
-        if self.pen_width_slider:
-            try:
-                self.pen_width_slider.valueChanged.disconnect()
-            except Exception:
-                pass
-            self.pen_width_slider.valueChanged.connect(parent_window.update_pen_width)
-            if self.pen_width_label:
-                self.pen_width_slider.valueChanged.connect(self.pen_width_label.setNum)
-        # 更新颜色按钮
-        if hasattr(parent_window, 'pen_color') and self.color_btn:
-            self.update_color_button(parent_window.pen_color)
-            self.adjustSize()
-            logger.debug(f"FloatingToolbar switched to parent: {parent_window}")
-        else:
-            logger.warning("FloatingToolbar set_parent_window called with None parent")
+                safe_disconnect(btn.clicked)
+
+        self.pen_btn.clicked.connect(lambda: toolbar_owner.set_draw_mode("pen"))
+        self.rect_btn.clicked.connect(lambda: toolbar_owner.set_draw_mode("rectangle"))
+        self.line_btn.clicked.connect(lambda: toolbar_owner.set_draw_mode("line"))
+        self.text_btn.clicked.connect(lambda: toolbar_owner.set_draw_mode("text"))
+
+        self.color_btn.clicked.connect(toolbar_owner.choose_color)
+        # Reflect current pen color
+        self.update_color_button(toolbar_owner.pen_color)
+
+        self.undo_btn.clicked.connect(toolbar_owner.undo_action)
+        self.redo_btn.clicked.connect(toolbar_owner.redo_action)
+        self.copy_btn.clicked.connect(toolbar_owner.copy_to_clipboard)
+        self.save_btn.clicked.connect(toolbar_owner.save_to_file)
+        if hasattr(toolbar_owner, "pin_to_display"):
+            self.pin_btn.clicked.connect(toolbar_owner.pin_to_display)
+        self.close_btn.clicked.connect(toolbar_owner.close)
+
+        safe_disconnect(self.pen_width_slider.valueChanged)
+        self.pen_width_slider.valueChanged.connect(toolbar_owner.update_pen_width)
+        self.pen_width_slider.valueChanged.connect(self.pen_width_label.setNum)
+
+        logger.debug(f"FloatingToolbar switched to parent: {toolbar_owner}")
 
 
 class PinnedImageWindow(QWidget, AnnotationMixin):
@@ -1269,7 +1211,7 @@ class PinnedImageWindow(QWidget, AnnotationMixin):
 
         # Initialize annotation functionality
         self.__init_annotation_mixin__()
-        
+
         # If we have saved annotation states, restore them
         if saved_annotation_states:
             self.annotation_states = saved_annotation_states
@@ -1293,8 +1235,9 @@ class PinnedImageWindow(QWidget, AnnotationMixin):
             self._show_toolbar()
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
-            if self.toolbar:
-                self.toolbar.hide()
+            toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+            if toolbar:
+                toolbar.hide()
             self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
 
@@ -1323,7 +1266,7 @@ class PinnedImageWindow(QWidget, AnnotationMixin):
 
         # Draw the pixmap at the center (glow expands outward)
         painter.drawPixmap(self.glow_size, self.glow_size, self.pixmap)
-        
+
         # Draw annotations if annotation mode is active
         if self.annotation_active:
             self._paint_preview(painter)
@@ -1332,21 +1275,21 @@ class PinnedImageWindow(QWidget, AnnotationMixin):
         if event.button() == Qt.MouseButton.LeftButton and not self.annotation_active:
             self.dragging = True
             self.offset = event.pos()
-        
+
         # Handle annotation events
         self.handle_annotation_mouse_press(event)
 
     def mouseMoveEvent(self, event):
         if self.dragging:
             self.move(self.mapToGlobal(event.pos() - self.offset))
-        
+
         # Handle annotation events
         self.handle_annotation_mouse_move(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.dragging = False
-        
+
         # Handle annotation events
         self.handle_annotation_mouse_release(event)
 
@@ -1358,7 +1301,7 @@ class PinnedImageWindow(QWidget, AnnotationMixin):
         # Handle annotation events first
         if self.handle_annotation_wheel(event):
             return
-        
+
         # Handle opacity adjustment
         # Get wheel delta (positive = scroll up, negative = scroll down)
         delta = event.angleDelta().y()
@@ -1394,12 +1337,16 @@ class PinnedImageWindow(QWidget, AnnotationMixin):
         # Handle annotation events
         if self.handle_annotation_key_press(event):
             return
-        
+
         super().keyPressEvent(event)
 
 
     def closeEvent(self, event):
-        """Clean up and remove from pinned windows list"""
+        """Clean up toolbar and release resources when closing"""
+        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        if toolbar:
+            toolbar.hide()
+
         # Remove this window from the controller's pinned windows list
         app = QApplication.instance()
         if hasattr(app, 'controller') and app.controller and self in app.controller.pinned_windows:
@@ -1489,8 +1436,9 @@ class CaptureOverlay(QWidget, AnnotationMixin):
         self.__init_annotation_mixin__()
 
         # Hide toolbar at start of new capture
-        if self.toolbar:
-            self.toolbar.hide()
+        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        if toolbar:
+            toolbar.hide()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1545,7 +1493,7 @@ class CaptureOverlay(QWidget, AnnotationMixin):
 
     def _paint_selection_border(self, painter: QPainter, selection_rect: QRect):
         """Paint the selection rectangle border"""
-        border_width = 3 if not self.selecting else 2
+        border_width = SELECTION_BORDER_WIDTH if not self.selecting else SELECTION_BORDER_WIDTH - 1
         pen = QPen(SELECTION_BORDER_COLOR, border_width, Qt.PenStyle.SolidLine)
         pen.setCapStyle(Qt.PenCapStyle.SquareCap)
         painter.setPen(pen)
@@ -1723,7 +1671,7 @@ class CaptureOverlay(QWidget, AnnotationMixin):
             self.update()
         elif self.start_pos and self.end_pos:
             self._update_cursor(event.pos())
-        
+
         # Handle annotation events
         self.handle_annotation_mouse_move(event)
 
@@ -1732,7 +1680,7 @@ class CaptureOverlay(QWidget, AnnotationMixin):
         # Handle annotation events first
         if self.handle_annotation_wheel(event):
             return
-        
+
         super().wheelEvent(event)
 
     def _finalize_selection(self):
@@ -1776,7 +1724,7 @@ class CaptureOverlay(QWidget, AnnotationMixin):
                 self.selecting = False
                 self.end_pos = event.pos()
                 self._finalize_selection()
-        
+
         # Handle annotation events
         self.handle_annotation_mouse_release(event)
 
@@ -1824,11 +1772,12 @@ class CaptureOverlay(QWidget, AnnotationMixin):
 
         if self.annotation_active:
             self.annotation_active = False
-            if self.toolbar:
-                self.toolbar.pen_btn.setChecked(False)
-                self.toolbar.rect_btn.setChecked(False)
-                self.toolbar.line_btn.setChecked(False)
-                self.toolbar.text_btn.setChecked(False)
+            toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+            if toolbar:
+                toolbar.pen_btn.setChecked(False)
+                toolbar.rect_btn.setChecked(False)
+                toolbar.line_btn.setChecked(False)
+                toolbar.text_btn.setChecked(False)
             self.update()
         else:
             self.close()
@@ -1999,22 +1948,6 @@ class CaptureOverlay(QWidget, AnnotationMixin):
 
         return False
 
-    def _position_toolbar(self):
-        """Position toolbar at bottom right of selection area (in parent coordinates)"""
-        if self.toolbar and self.start_pos and self.end_pos:
-            selection_rect = QRect(self.start_pos, self.end_pos).normalized()
-            # Align to right side, position below selection
-            toolbar_x = selection_rect.right() - self.toolbar.width()
-            toolbar_y = selection_rect.bottom() + 5
-
-            # Keep toolbar on screen
-            toolbar_x = max(0, min(toolbar_x, self.width() - self.toolbar.width()))
-            toolbar_y = min(toolbar_y, self.height() - self.toolbar.height())
-
-            # Move toolbar (it's a child widget, so coordinates are relative to parent)
-            self.toolbar.move(toolbar_x, toolbar_y)
-            self.toolbar.raise_()  # Keep it on top of other child widgets
-
     def _scale_rect(self, rect: QRect) -> QRect:
         """
         Scale a rectangle by device pixel ratio for high DPI displays.
@@ -2110,12 +2043,9 @@ class CaptureOverlay(QWidget, AnnotationMixin):
     def closeEvent(self, event):
         """Clean up toolbar and release resources when closing"""
         # Hide toolbar instead of closing (since it's global and shared)
-        if self.toolbar:
-            self.toolbar.hide()
-            # Disconnect from this window
-            app = QApplication.instance()
-            if hasattr(app, 'controller') and app.controller and self.toolbar == app.controller.global_toolbar:
-                self.toolbar.parent_window = None
+        toolbar = getattr(getattr(QApplication.instance(), 'controller', None), 'global_toolbar', None)
+        if toolbar:
+            toolbar.hide()
 
         # Clear resources to release memory
         self.annotation_states.clear()
