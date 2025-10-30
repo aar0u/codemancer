@@ -6,7 +6,6 @@ A lightweight application for capturing, annotating, and pinning screenshots.
 """
 import sys
 import logging
-import time
 from pathlib import Path
 from typing import Optional, Tuple, List
 
@@ -236,7 +235,7 @@ class AppController(QObject):
         self.screenshot_snapshots: List[dict] = []  # Each item: {'screenshot': QPixmap, 'start_pos': QPoint, 'end_pos': QPoint}
 
         # Managed window references
-        self.capture_overlay: Optional['CaptureOverlay'] = None
+        self.capture_overlay = CaptureOverlay()
         self.pinned_windows: List['PinnedImageWindow'] = []
 
         self._setup_about_window()
@@ -396,7 +395,7 @@ class AppController(QObject):
     def prepare_fullscreen_capture(self):
         """Prepare fullscreen capture for user selection."""
         # Check if a CaptureOverlay is already open
-        if self.capture_overlay and self.capture_overlay.isVisible():
+        if self.capture_overlay.isVisible():
             logger.debug("Capture already in progress, ignoring")
             return
 
@@ -408,14 +407,10 @@ class AppController(QObject):
 
             screenshot = self._capture_all_screens(screens)
             if screenshot and not screenshot.isNull():
-                overlay = CaptureOverlay(screenshot)
+                self.capture_overlay.new_capture(screenshot)
 
-                # Keep reference to prevent garbage collection
-                self.capture_overlay = overlay
-
-                overlay.show()
-                elapsed_ms = int((time.time() - overlay.start_time) * 1000)
-                logger.info(f">>> [Overlay #{overlay.instance_id}] CaptureOverlay OPENED (init: {elapsed_ms}ms)")
+                self.capture_overlay.show()
+                logger.info(f">>> [Overlay #{CaptureOverlay._display_counter}] CaptureOverlay OPENED")
             else:
                 logger.error("Failed to capture screenshot")
         except Exception as e:
@@ -516,6 +511,431 @@ class AppController(QObject):
 # ============================================================================
 # UI Classes
 # ============================================================================
+
+
+class AnnotationMixin:
+    """
+    Mixin class providing annotation functionality for both CaptureOverlay and PinnedImageWindow.
+    
+    This class contains all annotation-related methods, properties, and event handling
+    that can be shared between different window types.
+    """
+    
+    def __init_annotation_mixin__(self):
+        """Initialize annotation-related properties. Call this in the __init__ of the using class."""
+        # Drawing state
+        self.drawing = False
+        self.annotation_active = False
+        self.last_point = QPoint()
+        self.draw_start_point = QPoint()
+        self.pen_color = DEFAULT_PEN_COLOR
+        self.pen_width = DEFAULT_PEN_WIDTH
+        self.font_size = DEFAULT_FONT_SIZE
+        self.draw_mode = "pen"
+        self.preview_rect: Optional[QRect] = None
+        self.preview_line: Optional[Tuple[QPoint, QPoint]] = None
+        
+        # Text input state
+        self.text_input: Optional[QLineEdit] = None
+        self.text_input_pos: Optional[QPoint] = None
+        
+        # Toolbar
+        self.toolbar: Optional[FloatingToolbar] = None
+        
+        # Annotation states for undo/redo
+        self.annotation_states: List[QPixmap] = []
+        self.undo_redo_index = -1
+        
+        self._init_annotation_states()
+        self._save_annotation_state()
+    
+    def set_draw_mode(self, mode):
+        """Set the drawing mode and toggle annotation"""
+        if not self.toolbar:
+            return
+
+        # Map modes to their corresponding buttons
+        buttons = {
+            "pen": self.toolbar.pen_btn,
+            "rectangle": self.toolbar.rect_btn,
+            "line": self.toolbar.line_btn,
+            "text": self.toolbar.text_btn
+        }
+
+        current_btn = buttons[mode]
+        is_activating = current_btn.isChecked()
+
+        if is_activating:
+            # Activate the selected mode
+            self.draw_mode = mode
+            self.annotation_active = True
+            # Uncheck all other buttons
+            for m, btn in buttons.items():
+                if m != mode:
+                    btn.setChecked(False)
+        else:
+            # Deactivate the mode
+            self.annotation_active = False
+            current_btn.setChecked(False)
+
+    def update_pen_width(self, value):
+        """Update pen width when slider changes"""
+        self.pen_width = value
+
+    def choose_color(self):
+        """Open color picker dialog"""
+        color = QColorDialog.getColor(self.pen_color, self, "Choose Pen Color")
+        if color.isValid():
+            self.pen_color = color
+            if self.toolbar:
+                self.toolbar.update_color_button(self.pen_color)
+
+    def _init_annotation_states(self):
+        """Initialize annotation states for undo/redo functionality."""
+        self.annotation_states: List[QPixmap] = []
+        self.undo_redo_index = -1
+
+    def _save_annotation_state(self):
+        """Save current annotation state to states list for undo/redo"""
+
+        # Remove any states after current index (for redo)
+        self.annotation_states = self.annotation_states[:self.undo_redo_index + 1]
+
+        # Add new state - support both screenshot and pixmap attributes
+        if hasattr(self, 'screenshot'):
+            self.annotation_states.append(self.screenshot.copy())
+        elif hasattr(self, 'pixmap'):
+            self.annotation_states.append(self.pixmap.copy())
+        else:
+            return  # No valid image to save
+        
+        self.undo_redo_index += 1
+
+        if len(self.annotation_states) > MAX_HISTORY:
+            self.annotation_states.pop(0)
+            self.undo_redo_index -= 1
+
+    def undo_action(self):
+        """Undo last annotation"""
+        if self.undo_redo_index > 0:
+            self.undo_redo_index -= 1
+            if hasattr(self, 'screenshot'):
+                self.screenshot = self.annotation_states[self.undo_redo_index].copy()
+            elif hasattr(self, 'pixmap'):
+                self.pixmap = self.annotation_states[self.undo_redo_index].copy()
+            self.update()
+
+    def redo_action(self):
+        """Redo annotation"""
+        if self.undo_redo_index < len(self.annotation_states) - 1:
+            self.undo_redo_index += 1
+            if hasattr(self, 'screenshot'):
+                self.screenshot = self.annotation_states[self.undo_redo_index].copy()
+            elif hasattr(self, 'pixmap'):
+                self.pixmap = self.annotation_states[self.undo_redo_index].copy()
+            self.update()
+
+    def _add_text_annotation(self, pos: QPoint):
+        """Add text annotation at the given position"""
+        # Create a text input field at the clicked position
+        if self.text_input:
+            self._finalize_text_input()
+
+        self.text_input_pos = pos
+        self.text_input = QLineEdit(self)
+
+        # Style the text input
+        font = QFont("Arial", self.font_size)
+        font.setBold(True)
+        self.text_input.setFont(font)
+
+        # Calculate text color brightness to set contrasting background
+        brightness = self.pen_color.lightness()
+        bg_color = "rgba(255, 255, 255, 180)" if brightness < 128 else "rgba(0, 0, 0, 180)"
+        text_color = self.pen_color.name()
+
+        # No border at all to avoid offset issues
+        self.text_input.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {bg_color};
+                color: {text_color};
+                border: none;
+                padding: 0px;
+                margin: 0px;
+                font-weight: bold;
+            }}
+        """)
+
+        # Set all margins to 0
+        self.text_input.setTextMargins(0, 0, 0, 0)
+        self.text_input.setContentsMargins(0, 0, 0, 0)
+
+        # Position the input so it appears where the text will be drawn
+        self.text_input.setMinimumWidth(100)
+        self.text_input.adjustSize()
+
+        # Position at click location - we'll adjust the final text drawing to match
+        self.text_input.move(pos.x(), pos.y())
+
+        self.text_input.show()
+        self.text_input.setFocus()
+
+        # Connect signals
+        self.text_input.returnPressed.connect(self._finalize_text_input)
+        self.text_input.editingFinished.connect(self._finalize_text_input)
+
+    def _finalize_text_input(self):
+        """Finalize the text input and draw it on the screenshot"""
+        if not self.text_input or not self.text_input_pos:
+            return
+
+        text = self.text_input.text()
+
+        if text:
+            # Get the appropriate image to draw on
+            image = self.screenshot if hasattr(self, 'screenshot') else self.pixmap
+            painter = QPainter(image)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+            # Set up font - must match exactly what we used in the input
+            font = QFont("Arial", self.font_size)
+            font.setBold(True)
+            painter.setFont(font)
+
+            # Set up pen for text
+            painter.setPen(self.pen_color)
+
+            # Calculate text offset based on QLineEdit's content margins
+            # QLineEdit has internal padding that varies by platform
+            content_margins = self.text_input.contentsMargins()
+            x_offset = content_margins.left() if content_margins.left() > 0 else 2
+            y_offset = content_margins.top() if content_margins.top() > 0 else 1
+
+            # Draw text with calculated offsets
+            text_rect = QRect(
+                self.text_input_pos.x() + x_offset,
+                self.text_input_pos.y() + y_offset,
+                1000,  # Width (large enough for any text)
+                100    # Height (large enough for any font size)
+            )
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, text)
+            painter.end()
+
+            self._save_annotation_state()
+            self.update()
+
+        # Clean up
+        self.text_input.deleteLater()
+        self.text_input = None
+        self.text_input_pos = None
+
+    def _finalize_drawing(self, end_pos):
+        """Finalize drawing operation and save to screenshot"""
+        # Get the appropriate image to draw on
+        image = self.screenshot if hasattr(self, 'screenshot') else self.pixmap
+        painter = QPainter(image)
+
+        if self.draw_mode == "rectangle":
+            pen = QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine)
+            painter.setPen(pen)
+            painter.setBrush(QColor(self.pen_color.red(),
+                                   self.pen_color.green(),
+                                   self.pen_color.blue(), 50))
+            rect = QRect(self.draw_start_point, end_pos).normalized()
+            painter.drawRect(rect)
+            self.preview_rect = None
+        elif self.draw_mode == "line":
+            pen = QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(self.draw_start_point, end_pos)
+            self.preview_line = None
+        # Pen mode already draws directly, no finalization needed
+
+        painter.end()
+        self._save_annotation_state()
+        self.update()
+
+    def _paint_preview(self, painter: QPainter):
+        """Paint preview for rectangle/line drawing modes"""
+        if self.preview_rect and self.draw_mode == "rectangle":
+            painter.setPen(QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine))
+            painter.setBrush(QColor(self.pen_color.red(),
+                                   self.pen_color.green(),
+                                   self.pen_color.blue(), 50))
+            painter.drawRect(self.preview_rect)
+
+        if self.preview_line and self.draw_mode == "line":
+            painter.setPen(QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine,
+                               Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawLine(self.preview_line[0], self.preview_line[1])
+
+    def _start_drawing_or_annotate(self, pos: QPoint):
+        """Start drawing or place text annotation based on draw mode"""
+        if self.draw_mode == "text":
+            self._add_text_annotation(pos)
+        else:
+            self.drawing = True
+            self.last_point = pos
+            self.draw_start_point = pos
+
+    def _show_toolbar(self):
+        """Show the floating toolbar, creating it if necessary"""
+        if not self.toolbar:
+            self.toolbar = FloatingToolbar(self)
+
+        self._position_toolbar()
+        self.toolbar.show()
+
+    def _position_toolbar(self):
+        """Position toolbar at bottom right of selection area (in parent coordinates)"""
+        if self.toolbar and hasattr(self, 'start_pos') and hasattr(self, 'end_pos') and self.start_pos and self.end_pos:
+            selection_rect = QRect(self.start_pos, self.end_pos).normalized()
+            # Align to right side, position below selection
+            toolbar_x = selection_rect.right() - self.toolbar.width()
+            toolbar_y = selection_rect.bottom() + 5
+
+            # Keep toolbar on screen
+            toolbar_x = max(0, min(toolbar_x, self.width() - self.toolbar.width()))
+            toolbar_y = min(toolbar_y, self.height() - self.toolbar.height())
+
+            # Move toolbar (it's a child widget, so coordinates are relative to parent)
+            self.toolbar.move(toolbar_x, toolbar_y)
+            self.toolbar.raise_()  # Keep it on top of other child widgets
+        elif self.toolbar:
+            # For PinnedImageWindow, position at bottom right of the window
+            toolbar_x = self.width() - self.toolbar.width() - 10
+            toolbar_y = self.height() - self.toolbar.height() - 10
+            self.toolbar.move(toolbar_x, toolbar_y)
+            self.toolbar.raise_()
+
+    def handle_annotation_mouse_press(self, event):
+        """Handle mouse press events for annotation"""
+        pos = event.pos()
+        
+        if (event.button() == Qt.MouseButton.RightButton or 
+            (event.button() == Qt.MouseButton.LeftButton and self.annotation_active)):
+            # Right click always initiates drawing/annotation, or left click in annotation mode
+            self._start_drawing_or_annotate(pos)
+
+    def handle_annotation_mouse_move(self, event):
+        """Handle mouse move events for annotation"""
+        if self.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
+            if self.draw_mode == "pen":
+                # Get the appropriate image to draw on
+                image = self.screenshot if hasattr(self, 'screenshot') else self.pixmap
+                painter = QPainter(image)
+                pen = QPen(self.pen_color, self.pen_width,
+                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+                painter.setPen(pen)
+                painter.drawLine(self.last_point, event.pos())
+                self.last_point = event.pos()
+                painter.end()
+                self.update()
+            elif self.draw_mode == "rectangle":
+                self.preview_rect = QRect(self.draw_start_point, event.pos()).normalized()
+                self.update()
+            elif self.draw_mode == "line":
+                self.preview_line = (self.draw_start_point, event.pos())
+                self.update()
+
+    def handle_annotation_mouse_release(self, event):
+        """Handle mouse release events for annotation"""
+        if (event.button() == Qt.MouseButton.LeftButton or event.button() == Qt.MouseButton.RightButton) and self.drawing:
+            self._finalize_drawing(event.pos())
+            self.drawing = False
+
+    def handle_annotation_wheel(self, event):
+        """Handle wheel events for annotation (font size adjustment)"""
+        # Check if mouse is over the toolbar - if so, let toolbar handle the event
+        if self.toolbar and self.toolbar.geometry().contains(event.position().toPoint()):
+            return False
+
+        # Only handle wheel events when text input is active
+        if self.text_input and self.text_input.isVisible():
+            # Get wheel delta (positive = scroll up, negative = scroll down)
+            delta = event.angleDelta().y()
+
+            # Adjust font size (scroll up = larger, scroll down = smaller)
+            if delta > 0:
+                self.font_size = min(72, self.font_size + 2)  # Max font size: 72
+            else:
+                self.font_size = max(8, self.font_size - 2)   # Min font size: 8
+
+            # Update the text input font immediately
+            font = QFont("Arial", self.font_size)
+            font.setBold(True)
+            self.text_input.setFont(font)
+            self.text_input.adjustSize()
+
+            event.accept()  # Event handled
+            return True
+        return False
+
+    def handle_annotation_key_press(self, event):
+        """Handle key press events for annotation"""
+        key = event.key()
+
+        # Handle Escape key - cancel text input or annotation mode
+        if key == Qt.Key.Key_Escape:
+            # If text input is active, cancel it
+            if self.text_input:
+                self.text_input.deleteLater()
+                self.text_input = None
+                self.text_input_pos = None
+                return True
+
+            if self.annotation_active:
+                self.annotation_active = False
+                if self.toolbar:
+                    self.toolbar.pen_btn.setChecked(False)
+                    self.toolbar.rect_btn.setChecked(False)
+                    self.toolbar.line_btn.setChecked(False)
+                    self.toolbar.text_btn.setChecked(False)
+                self.update()
+                return True
+
+        # Handle keyboard shortcuts with Ctrl modifier
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            shortcuts = {
+                Qt.Key.Key_Z: self.undo_action,
+                Qt.Key.Key_Y: self.redo_action,
+            }
+            if key in shortcuts:
+                shortcuts[key]()
+                return True
+
+        return False
+
+    def copy_to_clipboard(self):
+        """Copy the current content to clipboard"""
+        try:
+            clipboard = QApplication.clipboard()
+            if clipboard:
+                clipboard.setPixmap(self.screenshot)
+                logger.info("Screenshot copied to clipboard")
+            else:
+                logger.error("Clipboard not available")
+        except Exception as e:
+            logger.error(f"Error copying to clipboard: {e}")
+
+    def save_to_file(self):
+        """Save the current content to a file"""
+        # Open save dialog
+        file_path, _ = QFileDialog.getSaveFileName(
+            None,
+            "Save Screenshot",
+            "",
+            "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;All Files (*)"
+        )
+        if file_path:
+            try:
+                if self.screenshot.save(file_path):
+                    logger.info(f"Screenshot saved to {file_path}")
+                else:
+                    logger.error(f"Failed to save screenshot to {file_path}")
+            except Exception as e:
+                logger.error(f"Error saving screenshot: {e}")
 
 
 class FloatingToolbar(QWidget):
@@ -682,7 +1102,7 @@ class FloatingToolbar(QWidget):
         )
 
 
-class PinnedImageWindow(QWidget):
+class PinnedImageWindow(QWidget, AnnotationMixin):
     """
     Pinned window for displaying captured and annotated screenshots.
 
@@ -748,9 +1168,17 @@ class PinnedImageWindow(QWidget):
         self.opacity_timer.setSingleShot(True)
         self.opacity_timer.timeout.connect(self.opacity_label.hide)
 
+        # Initialize annotation functionality
+        self.__init_annotation_mixin__()
+        
+        # If we have saved annotation states, restore them
+        if saved_annotation_states:
+            self.annotation_states = saved_annotation_states
+            self.undo_redo_index = saved_state_index
+
         # Keyboard shortcuts
         QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)
-        QShortcut(QKeySequence("Space"), self).activated.connect(self.reopen_capture)
+        QShortcut(QKeySequence("Space"), self).activated.connect(self.toggle_annotation_mode)
 
     def _get_logical_size(self) -> Tuple[int, int]:
         """Get the logical size of the pixmap (accounting for device pixel ratio)"""
@@ -758,6 +1186,18 @@ class PinnedImageWindow(QWidget):
             int(self.pixmap.width() / self.pixmap.devicePixelRatio()),
             int(self.pixmap.height() / self.pixmap.devicePixelRatio())
         )
+
+    def toggle_annotation_mode(self):
+        """Toggle annotation mode on/off"""
+        self.annotation_active = not self.annotation_active
+        if self.annotation_active:
+            self._show_toolbar()
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            if self.toolbar:
+                self.toolbar.hide()
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
 
     def paintEvent(self, event):
         logical_width, logical_height = self._get_logical_size()
@@ -784,25 +1224,43 @@ class PinnedImageWindow(QWidget):
 
         # Draw the pixmap at the center (glow expands outward)
         painter.drawPixmap(self.glow_size, self.glow_size, self.pixmap)
+        
+        # Draw annotations if annotation mode is active
+        if self.annotation_active:
+            self._paint_preview(painter)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton and not self.annotation_active:
             self.dragging = True
             self.offset = event.pos()
+        
+        # Handle annotation events
+        self.handle_annotation_mouse_press(event)
 
     def mouseMoveEvent(self, event):
         if self.dragging:
             self.move(self.mapToGlobal(event.pos() - self.offset))
+        
+        # Handle annotation events
+        self.handle_annotation_mouse_move(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.dragging = False
+        
+        # Handle annotation events
+        self.handle_annotation_mouse_release(event)
 
     def mouseDoubleClickEvent(self, event):
         self.close()
 
     def wheelEvent(self, event):
-        """Handle mouse wheel events to adjust window opacity/transparency"""
+        """Handle mouse wheel events to adjust window opacity/transparency or annotation"""
+        # Handle annotation events first
+        if self.handle_annotation_wheel(event):
+            return
+        
+        # Handle opacity adjustment
         # Get wheel delta (positive = scroll up, negative = scroll down)
         delta = event.angleDelta().y()
 
@@ -833,38 +1291,13 @@ class PinnedImageWindow(QWidget):
 
         event.accept()
 
-    def reopen_capture(self):
-        """Reopen capture overlay with the saved annotation states restored"""
-        if not (self.saved_annotation_states and self.selection_rect):
+    def keyPressEvent(self, event):
+        # Handle annotation events
+        if self.handle_annotation_key_press(event):
             return
+        
+        super().keyPressEvent(event)
 
-        app = QApplication.instance()
-        if not hasattr(app, 'controller') or not app.controller:
-            logger.error("AppController not available")
-            return
-        overlay = app.controller.capture_overlay
-        if not overlay:
-            logger.error("CaptureOverlay not available")
-            return
-
-        # Restore selection from current annotation state
-        overlay._restore_selection(
-            screenshot=self.saved_annotation_states[self.saved_state_index],
-            start_pos=self.selection_rect.topLeft(),
-            end_pos=self.selection_rect.bottomRight(),
-            reset_annotation=False
-        )
-
-        # Transfer saved annotation states reference, so close .clear() won't delete data
-        overlay.annotation_states = self.saved_annotation_states
-        self.saved_annotation_states = []
-        overlay.undo_redo_index = self.saved_state_index
-
-        overlay.show()
-
-        logger.info(f">>> [Overlay #{overlay.instance_id}] CaptureOverlay REOPENED from pinned window")
-
-        self.close()
 
     def closeEvent(self, event):
         """Clean up and remove from pinned windows list"""
@@ -885,7 +1318,7 @@ class PinnedImageWindow(QWidget):
         event.accept()
 
 
-class CaptureOverlay(QWidget):
+class CaptureOverlay(QWidget, AnnotationMixin):
     """
     Fullscreen overlay for selecting and annotating screenshot areas.
 
@@ -900,19 +1333,11 @@ class CaptureOverlay(QWidget):
     """
 
     # Class-level counter for unique instance IDs
-    _instance_counter = 0
+    _display_counter = 0
 
-    def __init__(self, screenshot: QPixmap):
+    def __init__(self):
         super().__init__()
 
-        # Generate unique instance ID
-        CaptureOverlay._instance_counter += 1
-        self.instance_id = CaptureOverlay._instance_counter
-        self.start_time = time.time()
-
-        self.screenshot = screenshot.copy()
-
-        # Window setup
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
 
         screens = QApplication.screens()
@@ -937,6 +1362,10 @@ class CaptureOverlay(QWidget):
         self.setFocus()
         self.setMouseTracking(True)
 
+    def new_capture(self, screenshot: QPixmap):
+        CaptureOverlay._display_counter += 1
+
+        self.screenshot = screenshot.copy()
         # Selection state
         self.start_pos: Optional[QPoint] = None
         self.end_pos: Optional[QPoint] = None
@@ -951,34 +1380,14 @@ class CaptureOverlay(QWidget):
         self.resize_edge: Optional[str] = None
         self.resize_handle_size = RESIZE_HANDLE_SIZE
 
-        # Drawing state
-        self.drawing = False
-        self.annotation_active = False
-        self.last_point = QPoint()
-        self.draw_start_point = QPoint()
-        self.pen_color = DEFAULT_PEN_COLOR
-        self.pen_width = DEFAULT_PEN_WIDTH
-        self.font_size = DEFAULT_FONT_SIZE
-        self.draw_mode = "pen"
-        self.preview_rect: Optional[QRect] = None
-        self.preview_line: Optional[Tuple[QPoint, QPoint]] = None
-
-        # Text input state
-        self.text_input: Optional[QLineEdit] = None
-        self.text_input_pos: Optional[QPoint] = None
-
-        # Toolbar
-        self.toolbar: Optional[FloatingToolbar] = None
-
         # Hint message label for showing temporary notifications
         self.hint_label: Optional[QLabel] = None
 
         # Current position in screenshot snapshots (-1 means not in snapshots)
         self.current_snapshot_index: int = -1
 
-        self._init_annotation_states()
-        # Take initial state
-        self._save_annotation_state()
+        # Initialize annotation functionality
+        self.__init_annotation_mixin__()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1116,10 +1525,8 @@ class CaptureOverlay(QWidget):
                 self.end_pos = pos
                 self.selecting = True
 
-        elif event.button() == Qt.MouseButton.RightButton:
-            # Right click always initiates drawing/annotation (if selection exists)
-            if self.start_pos and self.end_pos:
-                self._start_drawing_or_annotate(pos)
+        # Handle annotation events
+        self.handle_annotation_mouse_press(event)
 
     def _handle_click_on_existing_selection(self, pos: QPoint):
         """Handle clicks when a selection already exists"""
@@ -1135,21 +1542,13 @@ class CaptureOverlay(QWidget):
 
         # Check if click is for annotation or selection manipulation
         if self.annotation_active or not selection_rect.contains(pos):
-            self._start_drawing_or_annotate(pos)
+            # Let AnnotationMixin handle this
+            pass
         else:
             # Start dragging the selection
             self.dragging_selection = True
             self.drag_offset = pos - selection_rect.topLeft()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
-
-    def _start_drawing_or_annotate(self, pos: QPoint):
-        """Start drawing or place text annotation based on draw mode"""
-        if self.draw_mode == "text":
-            self._add_text_annotation(pos)
-        else:
-            self.drawing = True
-            self.last_point = pos
-            self.draw_start_point = pos
 
     def _update_cursor(self, pos):
         """Update cursor based on position relative to selection"""
@@ -1216,171 +1615,22 @@ class CaptureOverlay(QWidget):
             self.end_pos = QPoint(new_x + width, new_y + height)
             self._position_toolbar()
             self.update()
-        elif self.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
-            if self.draw_mode == "pen":
-                painter = QPainter(self.screenshot)
-                pen = QPen(self.pen_color, self.pen_width,
-                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-                painter.setPen(pen)
-                painter.drawLine(self.last_point, event.pos())
-                self.last_point = event.pos()
-                self.update()
-            elif self.draw_mode == "rectangle":
-                self.preview_rect = QRect(self.draw_start_point, event.pos()).normalized()
-                self.update()
-            elif self.draw_mode == "line":
-                self.preview_line = (self.draw_start_point, event.pos())
-                self.update()
         elif self.selecting:
             self.end_pos = event.pos()
             self.update()
         elif self.start_pos and self.end_pos:
             self._update_cursor(event.pos())
-
-    def _add_text_annotation(self, pos: QPoint):
-        """Add text annotation at the given position"""
-        # Create a text input field at the clicked position
-        if self.text_input:
-            self._finalize_text_input()
-
-        self.text_input_pos = pos
-        self.text_input = QLineEdit(self)
-
-        # Style the text input
-        font = QFont("Arial", self.font_size)
-        font.setBold(True)
-        self.text_input.setFont(font)
-
-        # Calculate text color brightness to set contrasting background
-        brightness = self.pen_color.lightness()
-        bg_color = "rgba(255, 255, 255, 180)" if brightness < 128 else "rgba(0, 0, 0, 180)"
-        text_color = self.pen_color.name()
-
-        # No border at all to avoid offset issues
-        self.text_input.setStyleSheet(f"""
-            QLineEdit {{
-                background-color: {bg_color};
-                color: {text_color};
-                border: none;
-                padding: 0px;
-                margin: 0px;
-                font-weight: bold;
-            }}
-        """)
-
-        # Set all margins to 0
-        self.text_input.setTextMargins(0, 0, 0, 0)
-        self.text_input.setContentsMargins(0, 0, 0, 0)
-
-        # Position the input so it appears where the text will be drawn
-        self.text_input.setMinimumWidth(100)
-        self.text_input.adjustSize()
-
-        # Position at click location - we'll adjust the final text drawing to match
-        self.text_input.move(pos.x(), pos.y())
-
-        self.text_input.show()
-        self.text_input.setFocus()
-
-        # Connect signals
-        self.text_input.returnPressed.connect(self._finalize_text_input)
-        self.text_input.editingFinished.connect(self._finalize_text_input)
+        
+        # Handle annotation events
+        self.handle_annotation_mouse_move(event)
 
     def wheelEvent(self, event):
         """Handle mouse wheel events for font size adjustment when text input is active"""
-        # Check if mouse is over the toolbar - if so, let toolbar handle the event
-        if self.toolbar and self.toolbar.geometry().contains(event.position().toPoint()):
-            super().wheelEvent(event)
+        # Handle annotation events first
+        if self.handle_annotation_wheel(event):
             return
-
-        # Only handle wheel events when text input is active
-        if self.text_input and self.text_input.isVisible():
-            # Get wheel delta (positive = scroll up, negative = scroll down)
-            delta = event.angleDelta().y()
-
-            # Adjust font size (scroll up = larger, scroll down = smaller)
-            if delta > 0:
-                self.font_size = min(72, self.font_size + 2)  # Max font size: 72
-            else:
-                self.font_size = max(8, self.font_size - 2)   # Min font size: 8
-
-            # Update the text input font immediately
-            font = QFont("Arial", self.font_size)
-            font.setBold(True)
-            self.text_input.setFont(font)
-            self.text_input.adjustSize()
-
-            event.accept()  # Event handled
-        else:
-            super().wheelEvent(event)
-
-    def _finalize_text_input(self):
-        """Finalize the text input and draw it on the screenshot"""
-        if not self.text_input or not self.text_input_pos:
-            return
-
-        text = self.text_input.text()
-
-        if text:
-            painter = QPainter(self.screenshot)
-            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-
-            # Set up font - must match exactly what we used in the input
-            font = QFont("Arial", self.font_size)
-            font.setBold(True)
-            painter.setFont(font)
-
-            # Set up pen for text
-            painter.setPen(self.pen_color)
-
-            # Calculate text offset based on QLineEdit's content margins
-            # QLineEdit has internal padding that varies by platform
-            content_margins = self.text_input.contentsMargins()
-            x_offset = content_margins.left() if content_margins.left() > 0 else 2
-            y_offset = content_margins.top() if content_margins.top() > 0 else 1
-
-            # Draw text with calculated offsets
-            text_rect = QRect(
-                self.text_input_pos.x() + x_offset,
-                self.text_input_pos.y() + y_offset,
-                1000,  # Width (large enough for any text)
-                100    # Height (large enough for any font size)
-            )
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, text)
-            painter.end()
-
-            self._save_annotation_state()
-            self.update()
-
-        # Clean up
-        self.text_input.deleteLater()
-        self.text_input = None
-        self.text_input_pos = None
-
-    def _finalize_drawing(self, end_pos):
-        """Finalize drawing operation and save to screenshot"""
-        painter = QPainter(self.screenshot)
-
-        if self.draw_mode == "rectangle":
-            pen = QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine)
-            painter.setPen(pen)
-            painter.setBrush(QColor(self.pen_color.red(),
-                                   self.pen_color.green(),
-                                   self.pen_color.blue(), 50))
-            rect = QRect(self.draw_start_point, end_pos).normalized()
-            painter.drawRect(rect)
-            self.preview_rect = None
-        elif self.draw_mode == "line":
-            pen = QPen(self.pen_color, self.pen_width, Qt.PenStyle.SolidLine,
-                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(pen)
-            painter.drawLine(self.draw_start_point, end_pos)
-            self.preview_line = None
-        # Pen mode already draws directly, no finalization needed
-
-        painter.end()
-        self._save_annotation_state()
-        self.update()
+        
+        super().wheelEvent(event)
 
     def _finalize_selection(self):
         """Finalize selection and initialize toolbar with snapshot handling"""
@@ -1419,13 +1669,13 @@ class CaptureOverlay(QWidget):
             elif self.dragging_selection:
                 self.dragging_selection = False
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
-            elif self.drawing:
-                self._finalize_drawing(event.pos())
-                self.drawing = False
             elif self.selecting:
                 self.selecting = False
                 self.end_pos = event.pos()
                 self._finalize_selection()
+        
+        # Handle annotation events
+        self.handle_annotation_mouse_release(event)
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -1460,6 +1710,10 @@ class CaptureOverlay(QWidget):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             if self._handle_ctrl_shortcuts(key):
                 return
+
+        # Handle annotation events
+        if self.handle_annotation_key_press(event):
+            return
 
         super().keyPressEvent(event)
 
@@ -1649,14 +1903,6 @@ class CaptureOverlay(QWidget):
 
         return False
 
-    def _show_toolbar(self):
-        """Show the floating toolbar, creating it if necessary"""
-        if not self.toolbar:
-            self.toolbar = FloatingToolbar(self)
-
-        self._position_toolbar()
-        self.toolbar.show()
-
     def _position_toolbar(self):
         """Position toolbar at bottom right of selection area (in parent coordinates)"""
         if self.toolbar and self.start_pos and self.end_pos:
@@ -1672,80 +1918,6 @@ class CaptureOverlay(QWidget):
             # Move toolbar (it's a child widget, so coordinates are relative to parent)
             self.toolbar.move(toolbar_x, toolbar_y)
             self.toolbar.raise_()  # Keep it on top of other child widgets
-
-    def set_draw_mode(self, mode):
-        """Set the drawing mode and toggle annotation"""
-        if not self.toolbar:
-            return
-
-        # Map modes to their corresponding buttons
-        buttons = {
-            "pen": self.toolbar.pen_btn,
-            "rectangle": self.toolbar.rect_btn,
-            "line": self.toolbar.line_btn,
-            "text": self.toolbar.text_btn
-        }
-
-        current_btn = buttons[mode]
-        is_activating = current_btn.isChecked()
-
-        if is_activating:
-            # Activate the selected mode
-            self.draw_mode = mode
-            self.annotation_active = True
-            # Uncheck all other buttons
-            for m, btn in buttons.items():
-                if m != mode:
-                    btn.setChecked(False)
-        else:
-            # Deactivate the mode
-            self.annotation_active = False
-            current_btn.setChecked(False)
-
-    def update_pen_width(self, value):
-        """Update pen width when slider changes"""
-        self.pen_width = value
-
-    def choose_color(self):
-        """Open color picker dialog"""
-        color = QColorDialog.getColor(self.pen_color, self, "Choose Pen Color")
-        if color.isValid():
-            self.pen_color = color
-            if self.toolbar:
-                self.toolbar.update_color_button(self.pen_color)
-
-    def _init_annotation_states(self):
-        """Initialize annotation states for undo/redo functionality."""
-        self.annotation_states: List[QPixmap] = []
-        self.undo_redo_index = -1
-
-    def _save_annotation_state(self):
-        """Save current annotation state to states list for undo/redo"""
-
-        # Remove any states after current index (for redo)
-        self.annotation_states = self.annotation_states[:self.undo_redo_index + 1]
-
-        # Add new state
-        self.annotation_states.append(self.screenshot.copy())
-        self.undo_redo_index += 1
-
-        if len(self.annotation_states) > MAX_HISTORY:
-            self.annotation_states.pop(0)
-            self.undo_redo_index -= 1
-
-    def undo_action(self):
-        """Undo last annotation"""
-        if self.undo_redo_index > 0:
-            self.undo_redo_index -= 1
-            self.screenshot = self.annotation_states[self.undo_redo_index].copy()
-            self.update()
-
-    def redo_action(self):
-        """Redo annotation"""
-        if self.undo_redo_index < len(self.annotation_states) - 1:
-            self.undo_redo_index += 1
-            self.screenshot = self.annotation_states[self.undo_redo_index].copy()
-            self.update()
 
     def _scale_rect(self, rect: QRect) -> QRect:
         """
@@ -1848,8 +2020,7 @@ class CaptureOverlay(QWidget):
         self.annotation_states.clear()
         self.screenshot = None
 
-        lifetime_sec = time.time() - self.start_time
-        logger.info(f"<<< [Overlay #{self.instance_id}] CaptureOverlay CLOSED (lifetime: {lifetime_sec:.2f}s)")
+        logger.info(f"<<< [Overlay #{CaptureOverlay._display_counter}] CaptureOverlay HIDED")
         event.accept()
 
 
