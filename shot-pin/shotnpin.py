@@ -13,7 +13,7 @@ from typing import Optional, Tuple, List
 from pynput import keyboard
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QShortcut, QKeySequence, QIcon, QFont
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QShortcut, QKeySequence, QIcon, QFont
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, QColorDialog,
@@ -264,13 +264,13 @@ class AppController(QObject):
         screenshot_action.triggered.connect(self.prepare_fullscreen_capture)
 
         # About action
-        about_action = tray_menu.addAction("About")
+        about_action = tray_menu.addAction("&About")
         about_action.triggered.connect(self.show_about)
 
         tray_menu.addSeparator()
 
         # Exit action
-        exit_action = tray_menu.addAction("Exit")
+        exit_action = tray_menu.addAction("&Exit")
         exit_action.triggered.connect(self.quit_application)
 
         self.tray_icon.setContextMenu(tray_menu)
@@ -736,24 +736,26 @@ class PinnedImageWindow(QWidget):
         )
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # Draw glow effect expanding outward from the pixmap
-        glow_layers = [
-            (QColor(0, 0, 0, 80), 1),
-            (QColor(0, 0, 0, 60), 2),
-            (QColor(0, 0, 0, 40), 3),
-            (QColor(0, 0, 0, 20), 4),
-            (QColor(0, 0, 0, 10), 5),
-        ]
-
         logical_width, logical_height = self._get_logical_size()
 
+        glow_base_color = (220, 220, 220)
+        glow_layers = [
+            (QColor(*glow_base_color, 80), 1),   # Inner
+            (QColor(*glow_base_color, 60), 2),
+            (QColor(*glow_base_color, 40), 3),
+            (QColor(*glow_base_color, 20), 5),
+            (QColor(*glow_base_color, 10), 9),   # Outer
+        ]
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        # Draw glow effect expanding outward from the pixmap
         for color, offset in glow_layers:
-            painter.setPen(QPen(color, 1, Qt.PenStyle.SolidLine))
+            painter.setBrush(QBrush(color))
             glow_rect = QRect(self.glow_size - offset, self.glow_size - offset,
-                             logical_width + offset * 2, logical_height + offset * 2)
+                            logical_width + offset * 2, logical_height + offset * 2)
             painter.drawRect(glow_rect)
 
         # Draw the pixmap at the center (glow expands outward)
