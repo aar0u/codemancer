@@ -7,7 +7,7 @@ A lightweight application for capturing, annotating, and pinning screenshots.
 import sys
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Callable
 
 from pynput import keyboard
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject
@@ -16,7 +16,7 @@ from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QShortcut, QKey
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, QColorDialog,
-    QSlider, QHBoxLayout, QFileDialog, QLineEdit, QSystemTrayIcon, QMenu, QMessageBox
+    QSlider, QHBoxLayout, QFileDialog, QLineEdit, QSystemTrayIcon, QMenu, QMessageBox, QButtonGroup
 )
 
 # ============================================================================
@@ -77,7 +77,7 @@ SVG_ICONS = {
     'copy': "M 16 9 V 5 a 2 2 0 0 0 -2 -2 H 6 A 2 2 0 0 0 4 5 v 8 A 2 2 0 0 0 6 15 h 2 m 8 -6 H 18 a 2 2 0 0 1 2 2 V 19 A 2 2 0 0 1 18 21 h -8 A 2 2 0 0 1 8 19 V 15 m 8 -6 H 10 a 2 2 0 0 0 -2 2 v 4",
     'save': "M12 3v13m-5-5l5 5l5-5M4 21h16",
     'rectangle': "M 5 7 A 2.25 2.25 0 0 1 7 5 h 10 a 2.25 2.25 0 0 1 2 2 v 10 a 2.25 2.25 0 0 1 -2 2 h -10 a 2.25 2.25 0 0 1 -2 -2 Z",
-    'pencil': "m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125",
+    'pen': "m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125",
     'line': "M4 20 L20 4",
     'text': "M4 7V4h16v3M9 20h6M12 4v16",
 }
@@ -110,7 +110,6 @@ def create_svg_icon(path_data: str, color: str = "#ffffff", size: int = ICON_SIZ
 
     return QIcon(pixmap)
 
-
 def get_app_icon() -> QIcon:
     """
     Get the application icon with correct path resolution.
@@ -125,14 +124,12 @@ def get_app_controller():
     app = QApplication.instance()
     return getattr(app, 'controller', None)
 
-
 def get_actionbar() -> Optional["ActionBar"]:
     """
     Safely get the shared global toolbar from the AppController.
     """
     controller = get_app_controller()
     return getattr(controller, 'toolbar', None)
-
 
 def get_virtual_desktop_bounds(screens) -> Tuple[int, int, int, int]:
     """
@@ -554,7 +551,7 @@ class ActionBar(QWidget):
         layout.setSpacing(TOOLBAR_SPACING)
 
         self._setup_styles()
-        self._create_buttons(layout)
+        self._init_buttons(layout)
         self.adjustSize()
 
         # Ensure all children have arrow cursor
@@ -604,37 +601,33 @@ class ActionBar(QWidget):
             }}
         """)
 
-    def _create_buttons(self, layout: QHBoxLayout):
+    def _init_buttons(self, layout: QHBoxLayout):
         """Create and add all toolbar buttons to the layout."""
 
-        # Drawing tool buttons (checkable) - with number shortcuts
-        self.pen_btn = self._create_button('pencil', f"Pen Tool ({len(self.button_actions) + 1})",
-                                          lambda: self.linked_widget.set_draw_mode("pen"), checkable=True)
-        layout.addWidget(self.pen_btn)
-        self.button_actions.append(lambda: self.pen_btn.click())
-
-        self.rect_btn = self._create_button('rectangle', f"Rectangle Tool ({len(self.button_actions) + 1})",
-                                            lambda: self.linked_widget.set_draw_mode("rectangle"), checkable=True)
-        layout.addWidget(self.rect_btn)
-        self.button_actions.append(lambda: self.rect_btn.click())
-
-        self.line_btn = self._create_button('line', f"Line Tool ({len(self.button_actions) + 1})",
-                                           lambda: self.linked_widget.set_draw_mode("line"), checkable=True)
-        layout.addWidget(self.line_btn)
-        self.button_actions.append(lambda: self.line_btn.click())
-
-        self.text_btn = self._create_button('text', f"Text Tool ({len(self.button_actions) + 1})",
-                                           lambda: self.linked_widget.set_draw_mode("text"), checkable=True)
-        layout.addWidget(self.text_btn)
-        self.button_actions.append(lambda: self.text_btn.click())
+        tool_names = [
+            ("pen", "Pen Tool"),
+            ("rectangle", "Rectangle Tool"),
+            ("line", "Line Tool"),
+            ("text", "Text Tool"),
+        ]
+        self.tool_buttons = []
+        for idx, (mode, label) in enumerate(tool_names, start=1):
+            btn = self._create_button(
+                icon_name=mode,
+                tooltip=f"{label} ({idx})",
+                callback=self.tool_button_handler,
+                checkable=True
+            )
+            btn.setProperty("mode", mode) 
+            layout.addWidget(btn)
+            self.tool_buttons.append(btn)
+            self.button_actions.append(lambda b=btn: b.click())
 
         # Color picker button
-        self.color_btn = QPushButton()
-        self.color_btn.setToolTip(f"Choose Color ({len(self.button_actions) + 1})")
-        self.color_btn.clicked.connect(lambda: self.choose_color())
+        self.color_btn = self._create_button(tooltip=f"Choose Color ({len(self.button_actions) + 1})", callback=self.choose_color)
         self.update_color_button(self.current_pen_color)
         layout.addWidget(self.color_btn)
-        self.button_actions.append(lambda: self.choose_color())
+        self.button_actions.append(lambda: self.color_btn.click())
 
         # Pen width controls
         self.pen_width_label = QLabel()
@@ -671,33 +664,55 @@ class ActionBar(QWidget):
         self.close_btn = self._create_button('close', "Close (Esc)", lambda: self.linked_widget.close())
         layout.addWidget(self.close_btn)
 
-    def _create_button(self, icon_name: str, tooltip: str, callback, checkable: bool = False) -> QPushButton:
+    def _create_button(
+        self,
+        icon_name: Optional[str] = None,
+        tooltip: str = "",
+        callback: Optional[Callable[[], None]] = None,
+        checkable: bool = False
+    ) -> QPushButton:
         """Helper method to create a toolbar button."""
         btn = QPushButton()
-        btn.setIcon(create_svg_icon(SVG_ICONS[icon_name]))
         btn.setToolTip(tooltip)
-        btn.clicked.connect(callback)
+        if icon_name is not None:
+            btn.setIcon(create_svg_icon(SVG_ICONS[icon_name]))
+        if callback:
+            btn.clicked.connect(callback)
         if checkable:
             btn.setCheckable(True)
             btn.setChecked(False)
         return btn
 
-    def choose_color(self):
-        """Open color picker dialog"""
-        color = QColorDialog.getColor(self.current_pen_color, self, "Choose Pen Color")
-        if color.isValid():
-            self.current_pen_color = color
-            self.update_color_button(color)
+    def tool_button_handler(self):
+        """
+        Handler for drawing tool buttons to ensure mutual exclusion,
+        but allow all to be unselected.
+        """
+        sender = self.sender()
+        if sender.isChecked():
+            # Uncheck all others
+            for btn in self.tool_buttons:
+                if btn is not sender:
+                    btn.setChecked(False)
+        else:
+            # Allow all to be unselected
+            sender.setChecked(False)
 
-    def update_color_button(self, color: QColor):
-        """Update color button appearance based on selected color."""
-        text_color = 'white' if color.lightness() < 128 else 'black'
-        self.color_btn.setStyleSheet(
-            f"background-color: {color.name()}; "
-            f"color: {text_color}; "
-            f"border: 1px solid #555; "
-            f"border-radius: 3px;"
-        )
+    def get_active_draw_mode(self) -> Optional[str]:
+        """Get the currently active drawing mode."""
+        for btn in self.tool_buttons:
+            if btn.isChecked():
+                return btn.property("mode")
+        return None
+
+    def is_any_draw_tool_active(self) -> bool:
+        """Check if any of the drawing tool buttons (pen, rectangle, line, text) are pressed."""
+        return any(btn.isChecked() for btn in self.tool_buttons)
+    
+    def deactivate_all_draw_tools(self):
+        """Deactivate all drawing tool buttons."""
+        for btn in self.tool_buttons:
+            btn.setChecked(False)
 
     def _show_toolbar(self, linked: QWidget):
         """Show toolbar linked to a specific widget."""
@@ -723,6 +738,24 @@ class ActionBar(QWidget):
             # Move toolbar (it's a child widget, so coordinates are relative to parent)
             self.move(toolbar_x, toolbar_y)
             self.raise_()  # Keep it on top of other child widgets
+
+    def choose_color(self):
+        """Open color picker dialog"""
+        color = QColorDialog.getColor(self.current_pen_color, self, "Choose Pen Color")
+        if color.isValid():
+            self.current_pen_color = color
+            self.update_color_button(color)
+
+    def update_color_button(self, color: QColor):
+        """Update color button appearance based on selected color."""
+        text_color = 'white' if color.lightness() < 128 else 'black'
+        self.color_btn.setStyleSheet(
+            f"background-color: {color.name()}; "
+            f"color: {text_color}; "
+            f"border: 1px solid #555; "
+            f"border-radius: 3px;"
+        )
+
 
     def _add_text_annotation(self, pos: QPoint):
         """Add text annotation at the given position"""
@@ -811,6 +844,34 @@ class ActionBar(QWidget):
         self.linked_widget.text_input.deleteLater()
         self.linked_widget.text_input = None
         self.linked_widget.text_input_pos = None
+
+    def _paint_shape_preview(self, painter: QPainter):
+        """Paint preview for rectangle/line drawing modes"""
+        if not self.linked_widget:
+            return
+        if self.linked_widget.preview_rect and self.get_active_draw_mode() == "rectangle":
+            painter.setPen(QPen(self.current_pen_color, self.pen_width_slider.value(), Qt.PenStyle.SolidLine))
+            painter.setBrush(QColor(self.current_pen_color.red(), self.current_pen_color.green(), self.current_pen_color.blue(), 50))
+            painter.drawRect(self.linked_widget.preview_rect)
+
+        if self.linked_widget.preview_line and self.get_active_draw_mode() == "line":
+            painter.setPen(QPen(self.current_pen_color, self.pen_width_slider.value(), Qt.PenStyle.SolidLine,
+                               Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawLine(self.linked_widget.preview_line[0], self.linked_widget.preview_line[1])
+
+    def handle_mouse_press(self, event):
+        """Start drawing or place text annotation based on draw mode"""
+        if not self.linked_widget or not self.is_any_draw_tool_active():
+            return False
+ 
+        pos = event.pos()
+        if self.get_active_draw_mode() == "text":
+            self._add_text_annotation(pos)
+        else:
+            self.linked_widget.drawing = True
+            self.linked_widget.last_point = pos
+            self.linked_widget.draw_start_point = pos
+        return True
 
 class PinnedImageWindow(QWidget):
     """
@@ -1080,10 +1141,8 @@ class CaptureOverlay(QWidget):
 
         # Drawing state
         self.drawing = False
-        self.annotation_active = False
         self.last_point = QPoint()
         self.draw_start_point = QPoint()
-        self.draw_mode = "pen"
         self.preview_rect: Optional[QRect] = None
         self.preview_line: Optional[Tuple[QPoint, QPoint]] = None
 
@@ -1103,7 +1162,7 @@ class CaptureOverlay(QWidget):
         painter = QPainter(self)
         painter.drawPixmap(0, 0, self.full_screen)
 
-        self._paint_preview(painter)
+        get_actionbar()._paint_shape_preview(painter)
 
         if self.start_pos is not None and self.end_pos is not None:
             selection_rect = QRect(self.start_pos, self.end_pos).normalized()
@@ -1112,19 +1171,6 @@ class CaptureOverlay(QWidget):
         else:
             painter.fillRect(self.rect(), OVERLAY_COLOR)
 
-    def _paint_preview(self, painter: QPainter):
-        """Paint preview for rectangle/line drawing modes"""
-        if self.preview_rect and self.draw_mode == "rectangle":
-            painter.setPen(QPen(get_actionbar().current_pen_color, get_actionbar().pen_width_slider.value(), Qt.PenStyle.SolidLine))
-            painter.setBrush(QColor(get_actionbar().current_pen_color.red(),
-                                   get_actionbar().current_pen_color.green(),
-                                   get_actionbar().current_pen_color.blue(), 50))
-            painter.drawRect(self.preview_rect)
-
-        if self.preview_line and self.draw_mode == "line":
-            painter.setPen(QPen(get_actionbar().current_pen_color, get_actionbar().pen_width_slider.value(), Qt.PenStyle.SolidLine,
-                               Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            painter.drawLine(self.preview_line[0], self.preview_line[1])
 
     def _paint_overlay_around_selection(self, painter: QPainter, selection_rect: QRect):
         """Paint dark overlay around the selection area"""
@@ -1224,55 +1270,27 @@ class CaptureOverlay(QWidget):
 
     def mousePressEvent(self, event):
         pos = event.pos()
-
-        if event.button() == Qt.MouseButton.LeftButton:
-            # Handle left click - can start selection or interact with existing selection
-            if self.start_pos and self.end_pos and not self.selecting:
-                self._handle_click_on_existing_selection(pos)
-            else:
-                # Start new selection
-                self.start_pos = pos
-                self.end_pos = pos
-                self.selecting = True
-
-        elif event.button() == Qt.MouseButton.RightButton:
-            # Right click always initiates drawing/annotation (if selection exists)
-            if self.start_pos and self.end_pos:
-                self._start_drawing_or_annotate(pos)
-
-    def _handle_click_on_existing_selection(self, pos: QPoint):
-        """Handle clicks when a selection already exists"""
-        selection_rect = QRect(self.start_pos, self.end_pos).normalized()
-
-        # Check for resize handle click (only when not in annotation mode)
-        if not self.annotation_active:
+        if self.start_pos and self.end_pos and not self.selecting:
+            selection_rect = QRect(self.start_pos, self.end_pos).normalized()
             resize_edge = self._get_resize_edge(pos, selection_rect)
             if resize_edge:
                 self.resizing = True
                 self.resize_edge = resize_edge
-                return
-
-        # Check if click is for annotation or selection manipulation
-        if self.annotation_active or not selection_rect.contains(pos):
-            self._start_drawing_or_annotate(pos)
+            elif selection_rect.contains(pos):
+                if get_actionbar().handle_mouse_press(event):
+                    return
+                self.dragging_selection = True
+                self.drag_offset = pos - selection_rect.topLeft()
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
         else:
-            # Start dragging the selection
-            self.dragging_selection = True
-            self.drag_offset = pos - selection_rect.topLeft()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.start_pos = event.pos()
+            self.end_pos = event.pos()
+            self.selecting = True
 
-    def _start_drawing_or_annotate(self, pos: QPoint):
-        """Start drawing or place text annotation based on draw mode"""
-        if self.draw_mode == "text":
-            get_actionbar()._add_text_annotation(pos)
-        else:
-            self.drawing = True
-            self.last_point = pos
-            self.draw_start_point = pos
 
     def _update_cursor(self, pos):
         """Update cursor based on position relative to selection"""
-        if self.annotation_active:
+        if get_actionbar().is_any_draw_tool_active():
             self.setCursor(Qt.CursorShape.CrossCursor)
             return
 
@@ -1318,9 +1336,10 @@ class CaptureOverlay(QWidget):
             resize_operations[self.resize_edge]()
 
     def mouseMoveEvent(self, event):
+        toolbar = get_actionbar()
         if self.resizing:
             self._apply_resize(event.pos().x(), event.pos().y())
-            get_actionbar()._position_toolbar()
+            toolbar._position_toolbar()
             self.update()
         elif self.dragging_selection:
             selection_rect = QRect(self.start_pos, self.end_pos).normalized()
@@ -1333,21 +1352,22 @@ class CaptureOverlay(QWidget):
 
             self.start_pos = QPoint(new_x, new_y)
             self.end_pos = QPoint(new_x + width, new_y + height)
-            get_actionbar()._position_toolbar()
+            toolbar._position_toolbar()
             self.update()
         elif self.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
-            if self.draw_mode == "pen":
+            if toolbar.get_active_draw_mode() == "pen":
+                # pen draws directly onto the screenshot
                 painter = QPainter(self.full_screen)
-                pen = QPen(get_actionbar().current_pen_color, get_actionbar().pen_width_slider.value(),
+                pen = QPen(toolbar.current_pen_color, toolbar.pen_width_slider.value(),
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
                 painter.setPen(pen)
                 painter.drawLine(self.last_point, event.pos())
                 self.last_point = event.pos()
                 self.update()
-            elif self.draw_mode == "rectangle":
+            elif toolbar.get_active_draw_mode() == "rectangle":
                 self.preview_rect = QRect(self.draw_start_point, event.pos()).normalized()
                 self.update()
-            elif self.draw_mode == "line":
+            elif toolbar.get_active_draw_mode() == "line":
                 self.preview_line = (self.draw_start_point, event.pos())
                 self.update()
         elif self.selecting:
@@ -1386,11 +1406,13 @@ class CaptureOverlay(QWidget):
             super().wheelEvent(event)
 
 
-    def _finalize_drawing(self, end_pos):
+    def _commit_shape(self, end_pos):
         """Finalize drawing operation and save to screenshot"""
         painter = QPainter(self.full_screen)
 
-        if self.draw_mode == "rectangle":
+        toolbar = get_actionbar()
+
+        if toolbar.get_active_draw_mode() == "rectangle":
             pen = QPen(get_actionbar().current_pen_color, get_actionbar().pen_width_slider.value(), Qt.PenStyle.SolidLine)
             painter.setPen(pen)
             painter.setBrush(QColor(get_actionbar().current_pen_color.red(),
@@ -1399,13 +1421,13 @@ class CaptureOverlay(QWidget):
             rect = QRect(self.draw_start_point, end_pos).normalized()
             painter.drawRect(rect)
             self.preview_rect = None
-        elif self.draw_mode == "line":
+        elif toolbar.get_active_draw_mode() == "line":
             pen = QPen(get_actionbar().current_pen_color, get_actionbar().pen_width_slider.value(), Qt.PenStyle.SolidLine,
                       Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
             painter.setPen(pen)
             painter.drawLine(self.draw_start_point, end_pos)
             self.preview_line = None
-        # Pen mode already draws directly, no finalization needed
+        # Pen mode already draws directly, no action needed here
 
         painter.end()
         self._save_annotation_state()
@@ -1453,7 +1475,7 @@ class CaptureOverlay(QWidget):
                 self.dragging_selection = False
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             elif self.drawing:
-                self._finalize_drawing(event.pos())
+                self._commit_shape(event.pos())
                 self.drawing = False
             elif self.selecting:
                 self.selecting = False
@@ -1507,14 +1529,8 @@ class CaptureOverlay(QWidget):
             return
 
         toolbar = get_actionbar()
-        if self.annotation_active:
-            self.annotation_active = False
-            if toolbar:
-                toolbar.pen_btn.setChecked(False)
-                toolbar.rect_btn.setChecked(False)
-                toolbar.line_btn.setChecked(False)
-                toolbar.text_btn.setChecked(False)
-            self.update()
+        if toolbar.is_any_draw_tool_active():
+            toolbar.deactivate_all_draw_tools()
         else:
             self.close()
 
@@ -1683,36 +1699,6 @@ class CaptureOverlay(QWidget):
             return True
 
         return False
-
-
-    def set_draw_mode(self, mode):
-        """Set the drawing mode and toggle annotation"""
-        toolbar = get_actionbar()
-
-        # Map modes to their corresponding buttons
-        buttons = {
-            "pen": toolbar.pen_btn,
-            "rectangle": toolbar.rect_btn,
-            "line": toolbar.line_btn,
-            "text": toolbar.text_btn
-        }
-
-        current_btn = buttons[mode]
-        is_activating = current_btn.isChecked()
-
-        if is_activating:
-            # Activate the selected mode
-            self.draw_mode = mode
-            self.annotation_active = True
-            # Uncheck all other buttons
-            for m, btn in buttons.items():
-                if m != mode:
-                    btn.setChecked(False)
-        else:
-            # Deactivate the mode
-            self.annotation_active = False
-            current_btn.setChecked(False)
-
 
     def _init_annotation_states(self):
         """Initialize annotation states for undo/redo functionality."""
@@ -1914,7 +1900,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(info)
 
         layout.addStretch()
-
 
 
 # ============================================================================
