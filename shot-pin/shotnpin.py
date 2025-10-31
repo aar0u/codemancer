@@ -873,6 +873,27 @@ class ActionBar(QWidget):
             self.linked_widget.draw_start_point = pos
         return True
 
+    def handle_mouse_move(self, event):
+        """Handle mouse move for drawing preview"""
+        if not self.linked_widget or not self.is_any_draw_tool_active():
+            return False
+
+        pos = event.pos()
+        if self.linked_widget.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
+            if self.get_active_draw_mode() == "pen":
+                # pen draws directly onto the screenshot
+                painter = QPainter(self.linked_widget.full_screen)
+                pen = QPen(self.current_pen_color, self.pen_width_slider.value(), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+                painter.setPen(pen)
+                painter.drawLine(self.linked_widget.last_point, pos)
+                self.linked_widget.last_point = pos
+            elif self.get_active_draw_mode() == "rectangle":
+                self.linked_widget.preview_rect = QRect(self.linked_widget.draw_start_point, pos).normalized()
+            elif self.get_active_draw_mode() == "line":
+                self.linked_widget.preview_line = (self.linked_widget.draw_start_point, pos)
+            self.linked_widget.update()
+        return True
+
 class PinnedImageWindow(QWidget):
     """
     Pinned window for displaying captured and annotated screenshots.
@@ -1354,27 +1375,14 @@ class CaptureOverlay(QWidget):
             self.end_pos = QPoint(new_x + width, new_y + height)
             toolbar._position_toolbar()
             self.update()
-        elif self.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
-            if toolbar.get_active_draw_mode() == "pen":
-                # pen draws directly onto the screenshot
-                painter = QPainter(self.full_screen)
-                pen = QPen(toolbar.current_pen_color, toolbar.pen_width_slider.value(),
-                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-                painter.setPen(pen)
-                painter.drawLine(self.last_point, event.pos())
-                self.last_point = event.pos()
-                self.update()
-            elif toolbar.get_active_draw_mode() == "rectangle":
-                self.preview_rect = QRect(self.draw_start_point, event.pos()).normalized()
-                self.update()
-            elif toolbar.get_active_draw_mode() == "line":
-                self.preview_line = (self.draw_start_point, event.pos())
-                self.update()
         elif self.selecting:
             self.end_pos = event.pos()
             self.update()
         elif self.start_pos and self.end_pos:
             self._update_cursor(event.pos())
+            selection_rect = QRect(self.start_pos, self.end_pos).normalized()
+            if selection_rect.contains(event.pos()):
+                toolbar.handle_mouse_move(event)
 
 
     def wheelEvent(self, event):
