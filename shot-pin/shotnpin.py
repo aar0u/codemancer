@@ -756,7 +756,6 @@ class ActionBar(QWidget):
             f"border-radius: 3px;"
         )
 
-
     def _add_text_annotation(self, pos: QPoint):
         """Add text annotation at the given position"""
         # Create a text input field at the clicked position
@@ -850,13 +849,12 @@ class ActionBar(QWidget):
         if not self.linked_widget:
             return
         if self.linked_widget.preview_rect and self.get_active_draw_mode() == "rectangle":
-            painter.setPen(QPen(self.current_pen_color, self.pen_width_slider.value(), Qt.PenStyle.SolidLine))
+            painter.setPen(self._create_drawing_pen(Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin))
             painter.setBrush(QColor(self.current_pen_color.red(), self.current_pen_color.green(), self.current_pen_color.blue(), 50))
             painter.drawRect(self.linked_widget.preview_rect)
 
         if self.linked_widget.preview_line and self.get_active_draw_mode() == "line":
-            painter.setPen(QPen(self.current_pen_color, self.pen_width_slider.value(), Qt.PenStyle.SolidLine,
-                               Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.setPen(self._create_drawing_pen())
             painter.drawLine(self.linked_widget.preview_line[0], self.linked_widget.preview_line[1])
 
     def handle_mouse_press(self, event):
@@ -880,19 +878,57 @@ class ActionBar(QWidget):
 
         pos = event.pos()
         if self.linked_widget.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
-            if self.get_active_draw_mode() == "pen":
+            draw_mode = self.get_active_draw_mode()
+            
+            if draw_mode == "pen":
                 # pen draws directly onto the screenshot
                 painter = QPainter(self.linked_widget.full_screen)
-                pen = QPen(self.current_pen_color, self.pen_width_slider.value(), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+                pen = self._create_drawing_pen()
                 painter.setPen(pen)
                 painter.drawLine(self.linked_widget.last_point, pos)
                 self.linked_widget.last_point = pos
-            elif self.get_active_draw_mode() == "rectangle":
+                painter.end()
+            elif draw_mode == "rectangle":
                 self.linked_widget.preview_rect = QRect(self.linked_widget.draw_start_point, pos).normalized()
-            elif self.get_active_draw_mode() == "line":
+            elif draw_mode == "line":
                 self.linked_widget.preview_line = (self.linked_widget.draw_start_point, pos)
             self.linked_widget.update()
         return True
+
+    def _create_drawing_pen(self, cap_style=Qt.PenCapStyle.RoundCap, join_style=Qt.PenJoinStyle.RoundJoin) -> QPen:
+        """Create a standard pen for drawing operations"""
+        return QPen(
+            self.current_pen_color,
+            self.pen_width_slider.value(),
+            Qt.PenStyle.SolidLine,
+            cap_style,
+            join_style
+        )
+
+    def _finalize_sharp(self, end_point: QPoint):
+        """Draw the shape to the pixmap based on current draw mode"""
+        painter = QPainter(self.linked_widget.full_screen)
+        draw_mode = self.get_active_draw_mode()
+        if draw_mode == "rectangle":
+            pen = self._create_drawing_pen(Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin)
+            painter.setPen(pen)
+            painter.setBrush(QColor(
+                self.current_pen_color.red(),
+                self.current_pen_color.green(),
+                self.current_pen_color.blue(),
+                50
+            ))
+            rect = QRect(self.linked_widget.draw_start_point, end_point).normalized()
+            painter.drawRect(rect)
+            self.linked_widget.preview_rect = None
+        elif draw_mode == "line":
+            pen = self._create_drawing_pen()
+            painter.setPen(pen)
+            painter.drawLine(self.linked_widget.draw_start_point, end_point)
+            self.linked_widget.preview_line = None
+        painter.end()
+        self.linked_widget._save_annotation_state()
+        self.linked_widget.update()
 
 class PinnedImageWindow(QWidget):
     """
@@ -1384,7 +1420,6 @@ class CaptureOverlay(QWidget):
             if selection_rect.contains(event.pos()):
                 toolbar.handle_mouse_move(event)
 
-
     def wheelEvent(self, event):
         """Handle mouse wheel events for font size adjustment when text input is active"""
         # Check if mouse is over the toolbar - if so, let toolbar handle the event
@@ -1412,34 +1447,6 @@ class CaptureOverlay(QWidget):
             event.accept()  # Event handled
         else:
             super().wheelEvent(event)
-
-
-    def _commit_shape(self, end_pos):
-        """Finalize drawing operation and save to screenshot"""
-        painter = QPainter(self.full_screen)
-
-        toolbar = get_actionbar()
-
-        if toolbar.get_active_draw_mode() == "rectangle":
-            pen = QPen(get_actionbar().current_pen_color, get_actionbar().pen_width_slider.value(), Qt.PenStyle.SolidLine)
-            painter.setPen(pen)
-            painter.setBrush(QColor(get_actionbar().current_pen_color.red(),
-                                   get_actionbar().current_pen_color.green(),
-                                   get_actionbar().current_pen_color.blue(), 50))
-            rect = QRect(self.draw_start_point, end_pos).normalized()
-            painter.drawRect(rect)
-            self.preview_rect = None
-        elif toolbar.get_active_draw_mode() == "line":
-            pen = QPen(get_actionbar().current_pen_color, get_actionbar().pen_width_slider.value(), Qt.PenStyle.SolidLine,
-                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(pen)
-            painter.drawLine(self.draw_start_point, end_pos)
-            self.preview_line = None
-        # Pen mode already draws directly, no action needed here
-
-        painter.end()
-        self._save_annotation_state()
-        self.update()
 
     def _finalize_selection(self):
         """Finalize selection and initialize toolbar with snapshot handling"""
@@ -1483,7 +1490,7 @@ class CaptureOverlay(QWidget):
                 self.dragging_selection = False
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             elif self.drawing:
-                self._commit_shape(event.pos())
+                get_actionbar()._finalize_sharp(event.pos())
                 self.drawing = False
             elif self.selecting:
                 self.selecting = False
