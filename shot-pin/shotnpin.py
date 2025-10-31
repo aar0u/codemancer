@@ -119,6 +119,21 @@ def get_app_icon() -> QIcon:
     icon_path = str(Path(__file__).parent / ICON_FILENAME)
     return QIcon(icon_path)
 
+def get_app_controller():
+    """
+    Safely get the global AppController from QApplication instance.
+    """
+    app = QApplication.instance()
+    return getattr(app, 'controller', None)
+
+
+def get_controller_toolbar():
+    """
+    Safely get the shared global toolbar from the AppController.
+    """
+    controller = get_app_controller()
+    return getattr(controller, 'toolbar', None)
+
 
 def get_virtual_desktop_bounds(screens) -> Tuple[int, int, int, int]:
     """
@@ -234,6 +249,8 @@ class AppController(QObject):
 
         # Global screenshot snapshots with state
         self.screenshot_snapshots: List[dict] = []  # Each item: {'screenshot': QPixmap, 'start_pos': QPoint, 'end_pos': QPoint}
+
+        self.toolbar = FloatingToolbar()
 
         # Managed window references
         self.capture_overlay: Optional['CaptureOverlay'] = None
@@ -526,14 +543,14 @@ class FloatingToolbar(QWidget):
     pen width adjustment, and various actions (copy, save, pin, close).
     """
 
-    def __init__(self, parent: 'CaptureOverlay'):
-        super().__init__(parent)
-        self.parent_window = parent
+    def __init__(self):
+        super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.ArrowCursor)
 
+        self.connected_window = None
         # List to store button actions in order for keyboard shortcuts
         self.button_actions = []
 
@@ -548,6 +565,11 @@ class FloatingToolbar(QWidget):
         # Ensure all children have arrow cursor
         for child in self.findChildren(QWidget):
             child.setCursor(Qt.CursorShape.ArrowCursor)
+    
+    def link(self, connected: 'CaptureOverlay'):
+        """Link the toolbar to a new parent CaptureOverlay."""
+        self.connected_window = connected
+        self.setParent(connected)
 
     def _setup_styles(self):
         """Apply stylesheet to toolbar and its widgets."""
@@ -594,7 +616,7 @@ class FloatingToolbar(QWidget):
 
     def _create_buttons(self, layout: QHBoxLayout):
         """Create and add all toolbar buttons to the layout."""
-        parent = self.parent_window
+        parent = self.connected_window
 
         # Drawing tool buttons (checkable) - with number shortcuts
         self.pen_btn = self._create_button('pencil', f"Pen Tool ({len(self.button_actions) + 1})",
@@ -620,44 +642,46 @@ class FloatingToolbar(QWidget):
         # Color picker button
         self.color_btn = QPushButton()
         self.color_btn.setToolTip(f"Choose Color ({len(self.button_actions) + 1})")
-        self.color_btn.clicked.connect(parent.choose_color)
-        self.update_color_button(parent.pen_color)
+        self.color_btn.clicked.connect(lambda: parent.choose_color())
+        # self.update_color_button(parent.pen_color)
         layout.addWidget(self.color_btn)
-        self.button_actions.append(parent.choose_color)
+        self.button_actions.append(lambda: parent.choose_color())
 
         # Pen width controls
-        self.pen_width_label = QLabel(str(parent.pen_width))
+        self.pen_width_label = QLabel("1")
+        # self.pen_width_label = QLabel(str(parent.pen_width))
         self.pen_width_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pen_width_label.setFixedWidth(24)
         layout.addWidget(self.pen_width_label)
 
         self.pen_width_slider = QSlider(Qt.Orientation.Horizontal)
         self.pen_width_slider.setRange(1, 20)
-        self.pen_width_slider.setValue(parent.pen_width)
+        # self.pen_width_slider.setValue(parent.pen_width)
+        self.pen_width_slider.setValue(1)
         self.pen_width_slider.setFixedWidth(60)
         self.pen_width_slider.setSingleStep(1)
-        self.pen_width_slider.valueChanged.connect(parent.update_pen_width)
+        self.pen_width_slider.valueChanged.connect(lambda: parent.update_pen_width())
         self.pen_width_slider.valueChanged.connect(self.pen_width_label.setNum)
         layout.addWidget(self.pen_width_slider)
 
         # Undo/Redo buttons
-        self.undo_btn = self._create_button('undo', "Undo (Ctrl+Z)", parent.undo_action)
+        self.undo_btn = self._create_button('undo', "Undo (Ctrl+Z)", lambda: parent.undo_action())
         layout.addWidget(self.undo_btn)
 
-        self.redo_btn = self._create_button('redo', "Redo (Ctrl+Y)", parent.redo_action)
+        self.redo_btn = self._create_button('redo', "Redo (Ctrl+Y)", lambda: parent.redo_action())
         layout.addWidget(self.redo_btn)
 
         # Action buttons
-        self.copy_btn = self._create_button('copy', "Copy to Clipboard (Ctrl+C)", parent.copy_to_clipboard)
+        self.copy_btn = self._create_button('copy', "Copy to Clipboard (Ctrl+C)", lambda: parent.copy_to_clipboard())
         layout.addWidget(self.copy_btn)
 
-        self.save_btn = self._create_button('save', "Save to File (Ctrl+S)", parent.save_to_file)
+        self.save_btn = self._create_button('save', "Save to File (Ctrl+S)", lambda: parent.save_to_file())
         layout.addWidget(self.save_btn)
 
-        self.pin_btn = self._create_button('pin', "Pin (Ctrl+T)", parent.pin_to_display)
+        self.pin_btn = self._create_button('pin', "Pin (Ctrl+T)", lambda: parent.pin_to_display())
         layout.addWidget(self.pin_btn)
 
-        self.close_btn = self._create_button('close', "Close (Esc)", parent.close)
+        self.close_btn = self._create_button('close', "Close (Esc)", lambda: parent.close())
         layout.addWidget(self.close_btn)
 
     def _create_button(self, icon_name: str, tooltip: str, callback, checkable: bool = False) -> QPushButton:
@@ -966,9 +990,6 @@ class CaptureOverlay(QWidget):
         # Text input state
         self.text_input: Optional[QLineEdit] = None
         self.text_input_pos: Optional[QPoint] = None
-
-        # Toolbar
-        self.toolbar: Optional[FloatingToolbar] = None
 
         # Hint message label for showing temporary notifications
         self.hint_label: Optional[QLabel] = None
@@ -1448,11 +1469,12 @@ class CaptureOverlay(QWidget):
             self._handle_arrow_key_movement(event)
             return
 
+        toolbar = get_controller_toolbar()
         # Handle number keys for toolbar shortcuts (1-9)
-        if Qt.Key.Key_1 <= key <= Qt.Key.Key_9 and self.toolbar:
+        if Qt.Key.Key_1 <= key <= Qt.Key.Key_9 and toolbar:
             button_index = key - Qt.Key.Key_1
-            if button_index < len(self.toolbar.button_actions):
-                self.toolbar.button_actions[button_index]()
+            if button_index < len(toolbar.button_actions):
+                toolbar.button_actions[button_index]()
             return
 
         # Handle keyboard shortcuts with Ctrl modifier
@@ -1471,13 +1493,14 @@ class CaptureOverlay(QWidget):
             self.text_input_pos = None
             return
 
+        toolbar = get_controller_toolbar()
         if self.annotation_active:
             self.annotation_active = False
-            if self.toolbar:
-                self.toolbar.pen_btn.setChecked(False)
-                self.toolbar.rect_btn.setChecked(False)
-                self.toolbar.line_btn.setChecked(False)
-                self.toolbar.text_btn.setChecked(False)
+            if toolbar:
+                toolbar.pen_btn.setChecked(False)
+                toolbar.rect_btn.setChecked(False)
+                toolbar.line_btn.setChecked(False)
+                toolbar.text_btn.setChecked(False)
             self.update()
         else:
             self.close()
@@ -1650,39 +1673,40 @@ class CaptureOverlay(QWidget):
 
     def _show_toolbar(self):
         """Show the floating toolbar, creating it if necessary"""
-        if not self.toolbar:
-            self.toolbar = FloatingToolbar(self)
+        toolbar = get_controller_toolbar()
 
+        toolbar.link(self)
         self._position_toolbar()
-        self.toolbar.show()
+        toolbar.show()
 
     def _position_toolbar(self):
         """Position toolbar at bottom right of selection area (in parent coordinates)"""
-        if self.toolbar and self.start_pos and self.end_pos:
+        toolbar = get_controller_toolbar()
+
+        if toolbar and self.start_pos and self.end_pos:
             selection_rect = QRect(self.start_pos, self.end_pos).normalized()
             # Align to right side, position below selection
-            toolbar_x = selection_rect.right() - self.toolbar.width()
+            toolbar_x = selection_rect.right() - toolbar.width()
             toolbar_y = selection_rect.bottom() + 5
 
             # Keep toolbar on screen
-            toolbar_x = max(0, min(toolbar_x, self.width() - self.toolbar.width()))
-            toolbar_y = min(toolbar_y, self.height() - self.toolbar.height())
+            toolbar_x = max(0, min(toolbar_x, self.width() - toolbar.width()))
+            toolbar_y = min(toolbar_y, self.height() - toolbar.height())
 
             # Move toolbar (it's a child widget, so coordinates are relative to parent)
-            self.toolbar.move(toolbar_x, toolbar_y)
-            self.toolbar.raise_()  # Keep it on top of other child widgets
+            toolbar.move(toolbar_x, toolbar_y)
+            toolbar.raise_()  # Keep it on top of other child widgets
 
     def set_draw_mode(self, mode):
         """Set the drawing mode and toggle annotation"""
-        if not self.toolbar:
-            return
+        toolbar = get_controller_toolbar()
 
         # Map modes to their corresponding buttons
         buttons = {
-            "pen": self.toolbar.pen_btn,
-            "rectangle": self.toolbar.rect_btn,
-            "line": self.toolbar.line_btn,
-            "text": self.toolbar.text_btn
+            "pen": toolbar.pen_btn,
+            "rectangle": toolbar.rect_btn,
+            "line": toolbar.line_btn,
+            "text": toolbar.text_btn
         }
 
         current_btn = buttons[mode]
@@ -1710,8 +1734,7 @@ class CaptureOverlay(QWidget):
         color = QColorDialog.getColor(self.pen_color, self, "Choose Pen Color")
         if color.isValid():
             self.pen_color = color
-            if self.toolbar:
-                self.toolbar.update_color_button(self.pen_color)
+            get_controller_toolbar().update_color_button(self.pen_color)
 
     def _init_annotation_states(self):
         """Initialize annotation states for undo/redo functionality."""
@@ -1855,8 +1878,7 @@ class CaptureOverlay(QWidget):
 
     def closeEvent(self, event):
         """Clean up toolbar and release resources when closing"""
-        if self.toolbar:
-            self.toolbar.close()
+        get_controller_toolbar().close()
 
         # Clear resources to release memory
         self.annotation_states.clear()
