@@ -16,7 +16,7 @@ from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QShortcut, QKey
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, QColorDialog,
-    QSlider, QHBoxLayout, QFileDialog, QLineEdit, QSystemTrayIcon, QMenu, QMessageBox, QButtonGroup
+    QSlider, QHBoxLayout, QFileDialog, QLineEdit, QSystemTrayIcon, QMenu, QMessageBox
 )
 
 # ============================================================================
@@ -722,11 +722,8 @@ class ActionBar(QWidget):
 
     def _position_toolbar(self):
         """Position toolbar at bottom right of selection area (in parent coordinates)"""
-
-        start_pos = getattr(self.linked_widget, 'start_pos', None)
-        end_pos = getattr(self.linked_widget, 'end_pos', None)
-        if start_pos is not None and end_pos is not None:
-            selection_rect = QRect(start_pos, end_pos).normalized()
+        selection_rect = self.linked_widget.overlay_selection_rect
+        if selection_rect is not None:
             # Align to right side, position below selection
             toolbar_x = selection_rect.right() - self.width()
             toolbar_y = selection_rect.bottom() + 5
@@ -1215,14 +1212,21 @@ class CaptureOverlay(QWidget):
 
         self._init_annotation_states()
 
+    @property
+    def overlay_selection_rect(self) -> Optional[QRect]:
+        """Get the current selection rectangle, normalized. Returns None if selection is not valid."""
+        if self.start_pos is not None and self.end_pos is not None:
+            return QRect(self.start_pos, self.end_pos).normalized()
+        return None
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.drawPixmap(0, 0, self.full_screen)
 
         get_actionbar()._paint_shape_preview(painter)
 
-        if self.start_pos is not None and self.end_pos is not None:
-            selection_rect = QRect(self.start_pos, self.end_pos).normalized()
+        selection_rect = self.overlay_selection_rect
+        if selection_rect is not None:
             self._paint_overlay_around_selection(painter, selection_rect)
             self._paint_selection_border(painter, selection_rect)
         else:
@@ -1327,8 +1331,8 @@ class CaptureOverlay(QWidget):
 
     def mousePressEvent(self, event):
         pos = event.pos()
-        if self.start_pos and self.end_pos and not self.selecting:
-            selection_rect = QRect(self.start_pos, self.end_pos).normalized()
+        selection_rect = self.overlay_selection_rect
+        if selection_rect is not None and not self.selecting:
             resize_edge = self._get_resize_edge(pos, selection_rect)
             if resize_edge:
                 self.resizing = True
@@ -1351,7 +1355,11 @@ class CaptureOverlay(QWidget):
             self.setCursor(Qt.CursorShape.CrossCursor)
             return
 
-        selection_rect = QRect(self.start_pos, self.end_pos).normalized()
+        selection_rect = self.overlay_selection_rect
+        if selection_rect is None:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            return
+
         resize_edge = self._get_resize_edge(pos, selection_rect)
 
         if resize_edge:
@@ -1399,25 +1407,25 @@ class CaptureOverlay(QWidget):
             toolbar._position_toolbar()
             self.update()
         elif self.dragging_selection:
-            selection_rect = QRect(self.start_pos, self.end_pos).normalized()
-            width = selection_rect.width()
-            height = selection_rect.height()
-            new_top_left = event.pos() - self.drag_offset
+            selection_rect = self.overlay_selection_rect
+            if selection_rect is not None:
+                width = selection_rect.width()
+                height = selection_rect.height()
+                new_top_left = event.pos() - self.drag_offset
 
-            new_x = max(0, min(new_top_left.x(), self.width() - width))
-            new_y = max(0, min(new_top_left.y(), self.height() - height))
+                new_x = max(0, min(new_top_left.x(), self.width() - width))
+                new_y = max(0, min(new_top_left.y(), self.height() - height))
 
-            self.start_pos = QPoint(new_x, new_y)
-            self.end_pos = QPoint(new_x + width, new_y + height)
-            toolbar._position_toolbar()
-            self.update()
+                self.start_pos = QPoint(new_x, new_y)
+                self.end_pos = QPoint(new_x + width, new_y + height)
+                toolbar._position_toolbar()
+                self.update()
         elif self.selecting:
             self.end_pos = event.pos()
             self.update()
-        elif self.start_pos and self.end_pos:
+        elif self.overlay_selection_rect is not None:
             self._update_cursor(event.pos())
-            selection_rect = QRect(self.start_pos, self.end_pos).normalized()
-            if selection_rect.contains(event.pos()):
+            if self.overlay_selection_rect.contains(event.pos()):
                 toolbar.handle_mouse_move(event)
 
     def wheelEvent(self, event):
@@ -1450,10 +1458,10 @@ class CaptureOverlay(QWidget):
 
     def _finalize_selection(self):
         """Finalize selection and initialize toolbar with snapshot handling"""
-        selection_rect = QRect(self.start_pos, self.end_pos).normalized()
+        selection_rect = self.overlay_selection_rect
 
         # Selection too small, clear it to allow new selection
-        if selection_rect.width() <= MIN_VALID_RECT or selection_rect.height() <= MIN_VALID_RECT:
+        if selection_rect is None or selection_rect.width() <= MIN_VALID_RECT or selection_rect.height() <= MIN_VALID_RECT:
             self.start_pos = None
             self.end_pos = None
             self.update()
@@ -1490,7 +1498,8 @@ class CaptureOverlay(QWidget):
                 self.dragging_selection = False
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             elif self.drawing:
-                get_actionbar()._finalize_sharp(event.pos())
+                if self.overlay_selection_rect.contains(event.pos()):
+                    get_actionbar()._finalize_sharp(event.pos())
                 self.drawing = False
             elif self.selecting:
                 self.selecting = False
@@ -1515,7 +1524,7 @@ class CaptureOverlay(QWidget):
 
         # Handle arrow keys for selection movement
         arrow_keys = [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down]
-        if key in arrow_keys and self.start_pos and self.end_pos:
+        if key in arrow_keys and self.overlay_selection_rect is not None:
             self._handle_arrow_key_movement(event)
             return
 
@@ -1684,7 +1693,7 @@ class CaptureOverlay(QWidget):
             self._save_annotation_state()
 
         # Show toolbar if selection exists
-        if self.start_pos and self.end_pos:
+        if self.overlay_selection_rect is not None:
             get_actionbar()._show_toolbar(self)
 
     def _handle_ctrl_shortcuts(self, key) -> bool:
@@ -1694,7 +1703,7 @@ class CaptureOverlay(QWidget):
         Returns True if the shortcut was handled, False otherwise.
         """
         # Shortcuts that require selection
-        if self.start_pos and self.end_pos:
+        if self.overlay_selection_rect is not None:
             shortcuts = {
                 Qt.Key.Key_S: self.save_to_file,
                 Qt.Key.Key_C: self.copy_to_clipboard,
@@ -1787,15 +1796,14 @@ class CaptureOverlay(QWidget):
             Tuple of (cropped_pixmap, selection_rect) or (None, None) if invalid.
         """
         result: Tuple[Optional[QPixmap], Optional[QRect]] = (None, None)
-        if self.start_pos and self.end_pos:
-            selection_rect = QRect(self.start_pos, self.end_pos).normalized()
-            if selection_rect.width() > MIN_VALID_RECT and selection_rect.height() > MIN_VALID_RECT:
-                # Scale the selection rect for high DPI displays
-                scaled_rect = self._scale_rect(selection_rect)
-                cropped = self.full_screen.copy(scaled_rect)
-                # Preserve the device pixel ratio on the cropped pixmap
-                cropped.setDevicePixelRatio(self.full_screen.devicePixelRatio())
-                result = (cropped, selection_rect)
+        selection_rect = self.overlay_selection_rect
+        if selection_rect is not None and selection_rect.width() > MIN_VALID_RECT and selection_rect.height() > MIN_VALID_RECT:
+            # Scale the selection rect for high DPI displays
+            scaled_rect = self._scale_rect(selection_rect)
+            cropped = self.full_screen.copy(scaled_rect)
+            # Preserve the device pixel ratio on the cropped pixmap
+            cropped.setDevicePixelRatio(self.full_screen.devicePixelRatio())
+            result = (cropped, selection_rect)
         return result
 
     def save_to_file(self):
