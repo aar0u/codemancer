@@ -550,6 +550,13 @@ class ActionBar(QWidget):
         self.text_input: Optional[QLineEdit] = None
         self.text_input_pos: Optional[QPoint] = None
 
+        # Drawing state
+        self.drawing = False
+        self.last_point = QPoint()
+        self.draw_start_point = QPoint()
+        self.preview_rect: Optional[QRect] = None
+        self.preview_line: Optional[Tuple[QPoint, QPoint]] = None
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(TOOLBAR_MARGIN, TOOLBAR_MARGIN, TOOLBAR_MARGIN, TOOLBAR_MARGIN)
         layout.setSpacing(TOOLBAR_SPACING)
@@ -850,27 +857,27 @@ class ActionBar(QWidget):
         """Paint preview for rectangle/line drawing modes"""
         if not self.linked_widget:
             return
-        if self.linked_widget.preview_rect and self.get_active_draw_mode() == "rectangle":
+        if self.preview_rect and self.get_active_draw_mode() == "rectangle":
             painter.setPen(self._create_drawing_pen(Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin))
             painter.setBrush(QColor(self.current_pen_color.red(), self.current_pen_color.green(), self.current_pen_color.blue(), 50))
-            painter.drawRect(self.linked_widget.preview_rect)
+            painter.drawRect(self.preview_rect)
 
-        if self.linked_widget.preview_line and self.get_active_draw_mode() == "line":
+        if self.preview_line and self.get_active_draw_mode() == "line":
             painter.setPen(self._create_drawing_pen())
-            painter.drawLine(self.linked_widget.preview_line[0], self.linked_widget.preview_line[1])
+            painter.drawLine(self.preview_line[0], self.preview_line[1])
 
     def handle_mouse_press(self, event):
         """Start drawing or place text annotation based on draw mode"""
         if not self.linked_widget or not self.is_any_draw_tool_active():
             return False
- 
+
         pos = event.pos()
         if self.get_active_draw_mode() == "text":
             self._add_text_annotation(pos)
         else:
-            self.linked_widget.drawing = True
-            self.linked_widget.last_point = pos
-            self.linked_widget.draw_start_point = pos
+            self.drawing = True
+            self.last_point = pos
+            self.draw_start_point = pos
         return True
 
     def handle_mouse_move(self, event):
@@ -879,21 +886,21 @@ class ActionBar(QWidget):
             return False
 
         pos = event.pos()
-        if self.linked_widget.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
+        if self.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
             draw_mode = self.get_active_draw_mode()
-            
+
             if draw_mode == "pen":
                 # pen draws directly onto the screenshot
                 painter = QPainter(self.linked_widget.full_screen)
                 pen = self._create_drawing_pen()
                 painter.setPen(pen)
-                painter.drawLine(self.linked_widget.last_point, pos)
-                self.linked_widget.last_point = pos
+                painter.drawLine(self.last_point, pos)
+                self.last_point = pos
                 painter.end()
             elif draw_mode == "rectangle":
-                self.linked_widget.preview_rect = QRect(self.linked_widget.draw_start_point, pos).normalized()
+                self.preview_rect = QRect(self.draw_start_point, pos).normalized()
             elif draw_mode == "line":
-                self.linked_widget.preview_line = (self.linked_widget.draw_start_point, pos)
+                self.preview_line = (self.draw_start_point, pos)
             self.linked_widget.update()
         return True
 
@@ -942,14 +949,14 @@ class ActionBar(QWidget):
                 self.current_pen_color.blue(),
                 50
             ))
-            rect = QRect(self.linked_widget.draw_start_point, end_point).normalized()
+            rect = QRect(self.draw_start_point, end_point).normalized()
             painter.drawRect(rect)
-            self.linked_widget.preview_rect = None
+            self.preview_rect = None
         elif draw_mode == "line":
             pen = self._create_drawing_pen()
             painter.setPen(pen)
-            painter.drawLine(self.linked_widget.draw_start_point, end_point)
-            self.linked_widget.preview_line = None
+            painter.drawLine(self.draw_start_point, end_point)
+            self.preview_line = None
         painter.end()
         self.linked_widget._save_annotation_state()
         self.linked_widget.update()
@@ -1220,12 +1227,6 @@ class CaptureOverlay(QWidget):
         self.resize_edge: Optional[str] = None
         self.resize_handle_size = RESIZE_HANDLE_SIZE
 
-        # Drawing state
-        self.drawing = False
-        self.last_point = QPoint()
-        self.draw_start_point = QPoint()
-        self.preview_rect: Optional[QRect] = None
-        self.preview_line: Optional[Tuple[QPoint, QPoint]] = None
 
         # Hint message label for showing temporary notifications
         self.hint_label: Optional[QLabel] = None
@@ -1498,14 +1499,14 @@ class CaptureOverlay(QWidget):
             elif self.dragging_selection:
                 self.dragging_selection = False
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
-            elif self.drawing:
-                if self.overlay_selection_rect.contains(event.pos()):
-                    get_actionbar()._finalize_sharp(event.pos())
-                self.drawing = False
             elif self.selecting:
                 self.selecting = False
                 self.end_pos = event.pos()
                 self._finalize_selection()
+            elif get_actionbar().drawing:
+                if self.overlay_selection_rect.contains(event.pos()):
+                    get_actionbar()._finalize_sharp(event.pos())
+                get_actionbar().drawing = False
 
     def keyPressEvent(self, event):
         key = event.key()
