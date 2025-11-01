@@ -1168,6 +1168,115 @@ class CaptureOverlay(OverlayBase):
 
         self.setCursor(Qt.CursorShape.CrossCursor)
 
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self.full_screen)
+
+        get_actionbar()._paint_shape_preview(painter)
+
+        selection_rect = self.overlay_selection_rect
+        if selection_rect is not None:
+            self._paint_overlay_around_selection(painter, selection_rect)
+            self._paint_selection_border(painter, selection_rect)
+        else:
+            painter.fillRect(self.rect(), OVERLAY_COLOR)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+
+        # Handle history navigation keys (< and >)
+        if key == Qt.Key.Key_Comma:
+            self._navigate_snapshots(-1)
+            return
+        elif key == Qt.Key.Key_Period:
+            self._navigate_snapshots(1)
+            return
+
+        # Handle arrow keys for selection movement
+        arrow_keys = [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down]
+        if key in arrow_keys and self.overlay_selection_rect is not None:
+            self._handle_arrow_key_movement(event)
+            return
+
+        if get_actionbar().handle_key_press(event):
+            return
+
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        pos = event.pos()
+        selection_rect = self.overlay_selection_rect
+        if selection_rect is not None and not self.selecting:
+            resize_edge = self._get_resize_edge(pos, selection_rect)
+            if resize_edge:
+                self.resizing = True
+                self.resize_edge = resize_edge
+            elif selection_rect.contains(pos):
+                if get_actionbar().handle_mouse_press(event):
+                    return
+                self.dragging_selection = True
+                self.drag_offset = pos - selection_rect.topLeft()
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        else:
+            self.start_pos = event.pos()
+            self.end_pos = event.pos()
+            self.selecting = True
+
+    def mouseMoveEvent(self, event):
+        actionbar = get_actionbar()
+        if self.resizing:
+            self._apply_resize(event.pos().x(), event.pos().y())
+            actionbar._position_toolbar()
+            self.update()
+        elif self.dragging_selection:
+            selection_rect = self.overlay_selection_rect
+            if selection_rect is not None:
+                width = selection_rect.width()
+                height = selection_rect.height()
+                new_top_left = event.pos() - self.drag_offset
+
+                new_x = max(0, min(new_top_left.x(), self.width() - width))
+                new_y = max(0, min(new_top_left.y(), self.height() - height))
+
+                self.start_pos = QPoint(new_x, new_y)
+                self.end_pos = QPoint(new_x + width, new_y + height)
+                actionbar._position_toolbar()
+                self.update()
+        elif self.selecting:
+            self.end_pos = event.pos()
+            self.update()
+        elif self.overlay_selection_rect is not None:
+            self._update_cursor(event.pos())
+            if self.overlay_selection_rect.contains(event.pos()):
+                actionbar.handle_mouse_move(event)
+
+    def mouseReleaseEvent(self, event):
+        actionbar = get_actionbar()
+        if event.button() == Qt.MouseButton.LeftButton or event.button() == Qt.MouseButton.RightButton:
+            if self.resizing:
+                self.resizing = False
+                self.resize_edge = None
+            elif self.dragging_selection:
+                self.dragging_selection = False
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+            elif self.selecting:
+                self.selecting = False
+                self.end_pos = event.pos()
+                self._finalize_selection()
+            elif actionbar.drawing:
+                if self.overlay_selection_rect.contains(event.pos()):
+                    actionbar._finalize_sharp(event.pos())
+                actionbar.drawing = False
+
+    def wheelEvent(self, event):
+        """Handle mouse wheel events for font size adjustment when text input is active"""
+        # Don't do if the wheel event is over the toolbar
+        actionbar = get_actionbar()
+        if not actionbar.geometry().contains(event.position().toPoint()):
+            actionbar.handle_wheel_event(event)
+        else:
+            super().wheelEvent(event)
+
     def new_capture(self, full_screen: QPixmap):
         CaptureOverlay._display_counter += 1
 
@@ -1199,19 +1308,6 @@ class CaptureOverlay(OverlayBase):
         if self.start_pos is not None and self.end_pos is not None:
             return QRect(self.start_pos, self.end_pos).normalized()
         return None
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.drawPixmap(0, 0, self.full_screen)
-
-        get_actionbar()._paint_shape_preview(painter)
-
-        selection_rect = self.overlay_selection_rect
-        if selection_rect is not None:
-            self._paint_overlay_around_selection(painter, selection_rect)
-            self._paint_selection_border(painter, selection_rect)
-        else:
-            painter.fillRect(self.rect(), OVERLAY_COLOR)
 
     def _paint_overlay_around_selection(self, painter: QPainter, selection_rect: QRect):
         """Paint dark overlay around the selection area"""
@@ -1309,25 +1405,6 @@ class CaptureOverlay(OverlayBase):
         }
         return cursor_map.get(edge, Qt.CursorShape.ArrowCursor)
 
-    def mousePressEvent(self, event):
-        pos = event.pos()
-        selection_rect = self.overlay_selection_rect
-        if selection_rect is not None and not self.selecting:
-            resize_edge = self._get_resize_edge(pos, selection_rect)
-            if resize_edge:
-                self.resizing = True
-                self.resize_edge = resize_edge
-            elif selection_rect.contains(pos):
-                if get_actionbar().handle_mouse_press(event):
-                    return
-                self.dragging_selection = True
-                self.drag_offset = pos - selection_rect.topLeft()
-                self.setCursor(Qt.CursorShape.ClosedHandCursor)
-        else:
-            self.start_pos = event.pos()
-            self.end_pos = event.pos()
-            self.selecting = True
-
     def _update_cursor(self, pos):
         """Update cursor based on position relative to selection"""
         if get_actionbar().is_any_draw_tool_active():
@@ -1379,43 +1456,6 @@ class CaptureOverlay(OverlayBase):
         if self.resize_edge in resize_operations:
             resize_operations[self.resize_edge]()
 
-    def mouseMoveEvent(self, event):
-        actionbar = get_actionbar()
-        if self.resizing:
-            self._apply_resize(event.pos().x(), event.pos().y())
-            actionbar._position_toolbar()
-            self.update()
-        elif self.dragging_selection:
-            selection_rect = self.overlay_selection_rect
-            if selection_rect is not None:
-                width = selection_rect.width()
-                height = selection_rect.height()
-                new_top_left = event.pos() - self.drag_offset
-
-                new_x = max(0, min(new_top_left.x(), self.width() - width))
-                new_y = max(0, min(new_top_left.y(), self.height() - height))
-
-                self.start_pos = QPoint(new_x, new_y)
-                self.end_pos = QPoint(new_x + width, new_y + height)
-                actionbar._position_toolbar()
-                self.update()
-        elif self.selecting:
-            self.end_pos = event.pos()
-            self.update()
-        elif self.overlay_selection_rect is not None:
-            self._update_cursor(event.pos())
-            if self.overlay_selection_rect.contains(event.pos()):
-                actionbar.handle_mouse_move(event)
-
-    def wheelEvent(self, event):
-        """Handle mouse wheel events for font size adjustment when text input is active"""
-        # Don't do if the wheel event is over the toolbar
-        actionbar = get_actionbar()
-        if not actionbar.geometry().contains(event.position().toPoint()):
-            actionbar.handle_wheel_event(event)
-        else:
-            super().wheelEvent(event)
-
     def _finalize_selection(self):
         """Finalize selection and initialize toolbar with snapshot handling"""
         selection_rect = self.overlay_selection_rect
@@ -1448,46 +1488,6 @@ class CaptureOverlay(OverlayBase):
 
             # Reset snapshot index since we're now on a new screenshot
             self.current_snapshot_index = -1
-
-    def mouseReleaseEvent(self, event):
-        actionbar = get_actionbar()
-        if event.button() == Qt.MouseButton.LeftButton or event.button() == Qt.MouseButton.RightButton:
-            if self.resizing:
-                self.resizing = False
-                self.resize_edge = None
-            elif self.dragging_selection:
-                self.dragging_selection = False
-                self.setCursor(Qt.CursorShape.OpenHandCursor)
-            elif self.selecting:
-                self.selecting = False
-                self.end_pos = event.pos()
-                self._finalize_selection()
-            elif actionbar.drawing:
-                if self.overlay_selection_rect.contains(event.pos()):
-                    actionbar._finalize_sharp(event.pos())
-                actionbar.drawing = False
-
-    def keyPressEvent(self, event):
-        key = event.key()
-
-        # Handle history navigation keys (< and >)
-        if key == Qt.Key.Key_Comma:
-            self._navigate_snapshots(-1)
-            return
-        elif key == Qt.Key.Key_Period:
-            self._navigate_snapshots(1)
-            return
-
-        # Handle arrow keys for selection movement
-        arrow_keys = [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down]
-        if key in arrow_keys and self.overlay_selection_rect is not None:
-            self._handle_arrow_key_movement(event)
-            return
-
-        if get_actionbar().handle_key_press(event):
-            return
-
-        super().keyPressEvent(event)
 
     def _handle_arrow_key_movement(self, event):
         """Handle arrow key movement of selection"""
