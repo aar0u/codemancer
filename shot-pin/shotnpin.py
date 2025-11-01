@@ -40,6 +40,7 @@ MIN_VALID_RECT = 10
 ICON_SIZE = 24
 TOOLBAR_MARGIN = 5
 TOOLBAR_SPACING = 3
+SELECTION_BORDER_WIDTH = 3
 
 # Drawing Defaults
 DEFAULT_PEN_WIDTH = 2
@@ -534,6 +535,12 @@ class ActionBar(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.Tool |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.X11BypassWindowManagerHint
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setMouseTracking(True)
@@ -727,25 +734,27 @@ class ActionBar(QWidget):
 
     def _show_toolbar(self, linked: QWidget):
         """Show toolbar linked to a specific widget."""
+        logger.info(f"Showing toolbar linked to widget: {linked}")
         self.linked_widget = linked
         self._position_toolbar()
         self.show()
 
     def _position_toolbar(self):
         """Position toolbar at bottom right of selection area (in parent coordinates)"""
-        selection_rect = self.linked_widget.overlay_selection_rect
-        if selection_rect is not None:
-            # Align to right side, position below selection
-            toolbar_x = selection_rect.right() - self.width()
-            toolbar_y = selection_rect.bottom() + 5
-
-            # Keep toolbar on screen
+        if isinstance(self.linked_widget, CaptureOverlay):
+            selection_rect = self.linked_widget.overlay_selection_rect
+            toolbar_x = selection_rect.right() - self.width() + SELECTION_BORDER_WIDTH
+            toolbar_y = selection_rect.bottom() + TOOLBAR_MARGIN + SELECTION_BORDER_WIDTH
             toolbar_x = max(0, min(toolbar_x, self.linked_widget.width() - self.width()))
             toolbar_y = min(toolbar_y, self.linked_widget.height() - self.height())
-
-            # Move toolbar (it's a child widget, so coordinates are relative to parent)
             self.move(toolbar_x, toolbar_y)
-            self.raise_()  # Keep it on top of other child widgets
+        else:
+            toolbar_x = self.linked_widget.width() - self.width()
+            toolbar_y = self.linked_widget.height() + TOOLBAR_MARGIN
+            # self.move(toolbar_x, toolbar_y)
+            self.move(self.linked_widget.mapToGlobal(QPoint(toolbar_x, toolbar_y)))
+
+        self.raise_()  # Keep it on top of other child widgets
 
     def choose_color(self):
         """Open color picker dialog"""
@@ -1072,7 +1081,9 @@ class PinnedImageWindow(QWidget):
 
         # Keyboard shortcuts
         QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)
-        QShortcut(QKeySequence("Space"), self).activated.connect(self.reopen_capture)
+        QShortcut(QKeySequence("Space"), self).activated.connect(
+            lambda: (get_actionbar().setParent(None), get_actionbar()._show_toolbar(self))
+        )
 
     def _get_logical_size(self) -> Tuple[int, int]:
         """Get the logical size of the pixmap (accounting for device pixel ratio)"""
@@ -1206,8 +1217,87 @@ class PinnedImageWindow(QWidget):
 
         event.accept()
 
+class OverlayBase(QWidget):
+    """Base class for overlay widgets with annotation."""
 
-class CaptureOverlay(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.hint_label = None
+
+    def _init_annotation_states(self):
+        """Initialize annotation states for undo/redo functionality."""
+        self.annotation_states: List[dict] = []
+        self.undo_redo_index = -1
+
+    def _save_annotation_state(self):
+        """Save current annotation state to states list for undo/redo"""
+
+        # Remove any states after current index (for redo)
+        self.annotation_states = self.annotation_states[:self.undo_redo_index + 1]
+
+        # Add new state
+        cropped, selection_rect = self._get_cropped_selection()
+        self.annotation_states.append({
+            'screenshot': cropped,
+            'selection_rect': selection_rect
+        })
+        self.undo_redo_index += 1
+
+        if len(self.annotation_states) > MAX_HISTORY:
+            self.annotation_states.pop(0)
+            self.undo_redo_index -= 1
+        
+        logger.info(f"Annotation states: {len(self.annotation_states)}")
+
+    def undo_action(self):
+        """Undo last annotation"""
+        if self.undo_redo_index > 0:
+            self.undo_redo_index -= 1
+            self._restore_annotation_state(self.undo_redo_index)
+            self.update()
+
+    def redo_action(self):
+        """Redo annotation"""
+        if self.undo_redo_index < len(self.annotation_states) - 1:
+            self.undo_redo_index += 1
+            self._restore_annotation_state(self.undo_redo_index)
+            self.update()
+    
+    def _restore_annotation_state(self, index: int):
+        """Restore annotation state from index"""
+        state_item = self.annotation_states[index]
+        state_pixmap = state_item['screenshot']
+        selection_rect = state_item['selection_rect']
+        painter = QPainter(self.full_screen)
+        painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
+        painter.end()
+
+    def _show_hint(self, message: str, duration: int = 1000):
+        """Show a temporary hint message overlay on the screen."""
+        if self.hint_label is None:
+            self.hint_label = QLabel(message, self)
+            self.hint_label.setStyleSheet(
+                "background-color: rgba(0, 0, 0, 180); "
+                "color: white; "
+                "padding: 10px 20px; "
+                "border-radius: 5px; "
+                "font-size: 14px;"
+            )
+            self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        else:
+            self.hint_label.setText(message)
+
+        # Position at the center of the screen
+        self.hint_label.adjustSize()
+        x = (self.width() - self.hint_label.width()) // 2
+        y = (self.height() - self.hint_label.height()) // 2
+        self.hint_label.move(x, y)
+        self.hint_label.show()
+
+        # Hide after duration
+        QTimer.singleShot(duration, self.hint_label.hide)
+
+class CaptureOverlay(OverlayBase):
     """
     Fullscreen overlay for selecting and annotating screenshot areas.
 
@@ -1270,9 +1360,6 @@ class CaptureOverlay(QWidget):
         self.resize_handle_size = RESIZE_HANDLE_SIZE
 
 
-        # Hint message label for showing temporary notifications
-        self.hint_label: Optional[QLabel] = None
-
         # Current position in screenshot snapshots (-1 means not in snapshots)
         self.current_snapshot_index: int = -1
 
@@ -1324,7 +1411,7 @@ class CaptureOverlay(QWidget):
 
     def _paint_selection_border(self, painter: QPainter, selection_rect: QRect):
         """Paint the selection rectangle border"""
-        border_width = 3 if not self.selecting else 2
+        border_width = SELECTION_BORDER_WIDTH if not self.selecting else SELECTION_BORDER_WIDTH - 1
         pen = QPen(SELECTION_BORDER_COLOR, border_width, Qt.PenStyle.SolidLine)
         pen.setCapStyle(Qt.PenCapStyle.SquareCap)
         painter.setPen(pen)
@@ -1709,31 +1796,6 @@ class CaptureOverlay(QWidget):
             # Update current snapshot index
             self.current_snapshot_index = new_index
 
-    def _show_hint(self, message: str, duration: int = 1000):
-        """Show a temporary hint message overlay on the screen."""
-        if not hasattr(self, 'hint_label') or self.hint_label is None:
-            self.hint_label = QLabel(message, self)
-            self.hint_label.setStyleSheet(
-                "background-color: rgba(0, 0, 0, 180); "
-                "color: white; "
-                "padding: 10px 20px; "
-                "border-radius: 5px; "
-                "font-size: 14px;"
-            )
-            self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        else:
-            self.hint_label.setText(message)
-
-        # Position at the center of the screen
-        self.hint_label.adjustSize()
-        x = (self.width() - self.hint_label.width()) // 2
-        y = (self.height() - self.hint_label.height()) // 2
-        self.hint_label.move(x, y)
-        self.hint_label.show()
-
-        # Hide after duration
-        QTimer.singleShot(duration, self.hint_label.hide)
-
     def _restore_selection(self, screenshot, start_pos, end_pos, reset_annotation=True):
         """Restore screenshot selection and optional reset annotation states
 
@@ -1754,54 +1816,6 @@ class CaptureOverlay(QWidget):
         # Show toolbar if selection exists
         if self.overlay_selection_rect is not None:
             get_actionbar()._show_toolbar(self)
-
-    def _init_annotation_states(self):
-        """Initialize annotation states for undo/redo functionality."""
-        self.annotation_states: List[dict] = []
-        self.undo_redo_index = -1
-
-    def _save_annotation_state(self):
-        """Save current annotation state to states list for undo/redo"""
-
-        # Remove any states after current index (for redo)
-        self.annotation_states = self.annotation_states[:self.undo_redo_index + 1]
-
-        # Add new state
-        cropped, selection_rect = self._get_cropped_selection()
-        self.annotation_states.append({
-            'screenshot': cropped,
-            'selection_rect': selection_rect
-        })
-        self.undo_redo_index += 1
-
-        if len(self.annotation_states) > MAX_HISTORY:
-            self.annotation_states.pop(0)
-            self.undo_redo_index -= 1
-        
-        logger.info(f"Annotation states: {len(self.annotation_states)}")
-
-    def undo_action(self):
-        """Undo last annotation"""
-        if self.undo_redo_index > 0:
-            self.undo_redo_index -= 1
-            self._restore_annotation_state(self.undo_redo_index)
-            self.update()
-
-    def redo_action(self):
-        """Redo annotation"""
-        if self.undo_redo_index < len(self.annotation_states) - 1:
-            self.undo_redo_index += 1
-            self._restore_annotation_state(self.undo_redo_index)
-            self.update()
-    
-    def _restore_annotation_state(self, index: int):
-        """Restore annotation state from index"""
-        state_item = self.annotation_states[index]
-        state_pixmap = state_item['screenshot']
-        selection_rect = state_item['selection_rect']
-        painter = QPainter(self.full_screen)
-        painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
-        painter.end()
 
     def _scale_rect(self, rect: QRect) -> QRect:
         """
