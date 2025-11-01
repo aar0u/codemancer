@@ -213,7 +213,7 @@ class SingleInstance(QObject):
                 self.new_instance_detected.emit(message)
             connection.close()
 
-    def cleanup(self):
+    def _cleanup(self):
         """Clean up the server."""
         if self.server:
             self.server.close()
@@ -251,7 +251,7 @@ class AppController(QObject):
 
         # Managed window references
         self.capture_overlay = CaptureOverlay()
-        self.pinned_windows: List['PinnedImageWindow'] = []
+        self.pinned_windows: List['PinnedOverlay'] = []
 
         self._setup_about_window()
         self._setup_tray()
@@ -273,7 +273,7 @@ class AppController(QObject):
                 logger.error("Clipboard image is null or invalid.")
                 return
 
-            pinned = PinnedImageWindow(
+            pinned = PinnedOverlay(
                 pixmap,
                 position=QCursor.pos(),
                 selection_rect=QRect(0, 0, pixmap.width(), pixmap.height()),
@@ -514,7 +514,7 @@ class AppController(QObject):
 
         # Clean up single instance lock
         if self.single_instance:
-            self.single_instance.cleanup()
+            self.single_instance._cleanup()
 
         logger.info("Application quitting")
         QApplication.quit()
@@ -535,13 +535,9 @@ class ActionBar(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.Tool |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.X11BypassWindowManagerHint
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -754,7 +750,7 @@ class ActionBar(QWidget):
             # self.move(toolbar_x, toolbar_y)
             self.move(self.linked_widget.mapToGlobal(QPoint(toolbar_x, toolbar_y)))
 
-        self.raise_()  # Keep it on top of other child widgets
+        # self.raise_()  # Keep it on top of other child widgets
 
     def choose_color(self):
         """Open color picker dialog"""
@@ -1011,222 +1007,24 @@ class ActionBar(QWidget):
                 logger.info("Screenshot copied to clipboard")
             else:
                 logger.error("Clipboard not available")
-     
 
-class PinnedImageWindow(QWidget):
-    """
-    Pinned window for displaying captured and annotated screenshots.
-
-    Features:
-    - Always-on-top frameless window with glow effect
-    - Draggable with left mouse button
-    - Double-click to close
-    - Space key to reopen in edit mode
-    - Esc key to close
-    - Mouse scroll to adjust transparency
-    """
-
-    def __init__(self, pixmap: QPixmap, position: Optional[QPoint] = None,
-                 selection_rect: Optional[QRect] = None,
-                 saved_annotation_states: Optional[List[QPixmap]] = None,
-                 saved_state_index: int = -1):
-        super().__init__()
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-
-        self.pixmap = pixmap
-        self.selection_rect = selection_rect
-        self.saved_annotation_states = saved_annotation_states or []
-        self.saved_state_index = saved_state_index
-        self.glow_size = GLOW_SIZE
-
-        logical_width, logical_height = self._get_logical_size()
-
-        # Size includes padding for glow effect
-        self.setFixedSize(logical_width + 2 * self.glow_size,
-                         logical_height + 2 * self.glow_size)
-
-        # Position adjusted for glow effect
-        if position:
-            self.move(position.x() - self.glow_size, position.y() - self.glow_size)
-
-        # Dragging state
-        self.dragging = False
-        self.offset = QPoint()
-
-        # Transparency state
-        self.opacity = 1.0  # 100% opaque by default
-        self.setWindowOpacity(self.opacity)
-
-        # Opacity label (hidden by default)
-        self.opacity_label = QLabel(self)
-        self.opacity_label.setStyleSheet("""
-            QLabel {
-                background-color: rgba(0, 0, 0, 180);
-                color: white;
-                border: 1px solid #0078d4;
-                border-radius: 3px;
-                padding: 4px 8px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-        """)
-        self.opacity_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.opacity_label.hide()
-
-        # Timer to hide opacity label
-        self.opacity_timer = QTimer(self)
-        self.opacity_timer.setSingleShot(True)
-        self.opacity_timer.timeout.connect(self.opacity_label.hide)
-
-        # Keyboard shortcuts
-        QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)
-        QShortcut(QKeySequence("Space"), self).activated.connect(
-            lambda: (get_actionbar().setParent(None), get_actionbar()._show_toolbar(self))
-        )
-
-    def _get_logical_size(self) -> Tuple[int, int]:
-        """Get the logical size of the pixmap (accounting for device pixel ratio)"""
-        return (
-            int(self.pixmap.width() / self.pixmap.devicePixelRatio()),
-            int(self.pixmap.height() / self.pixmap.devicePixelRatio())
-        )
-
-    def paintEvent(self, event):
-        logical_width, logical_height = self._get_logical_size()
-
-        glow_base_color = (220, 220, 220)
-        glow_layers = [
-            (QColor(*glow_base_color, 80), 1),   # Inner
-            (QColor(*glow_base_color, 60), 2),
-            (QColor(*glow_base_color, 40), 3),
-            (QColor(*glow_base_color, 20), 5),
-            (QColor(*glow_base_color, 10), 9),   # Outer
-        ]
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-
-        # Draw glow effect expanding outward from the pixmap
-        for color, offset in glow_layers:
-            painter.setBrush(QBrush(color))
-            glow_rect = QRect(self.glow_size - offset, self.glow_size - offset,
-                            logical_width + offset * 2, logical_height + offset * 2)
-            painter.drawRect(glow_rect)
-
-        # Draw the pixmap at the center (glow expands outward)
-        painter.drawPixmap(self.glow_size, self.glow_size, self.pixmap)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = True
-            self.offset = event.pos()
-
-    def mouseMoveEvent(self, event):
-        if self.dragging:
-            self.move(self.mapToGlobal(event.pos() - self.offset))
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = False
-
-    def mouseDoubleClickEvent(self, event):
-        self.close()
-
-    def wheelEvent(self, event):
-        """Handle mouse wheel events to adjust window opacity/transparency"""
-        # Get wheel delta (positive = scroll up, negative = scroll down)
-        delta = event.angleDelta().y()
-
-        # Adjust opacity (scroll up = more opaque, scroll down = more transparent)
-        if delta > 0:
-            self.opacity = min(1.0, self.opacity + 0.05)  # Increase opacity (less transparent)
-        else:
-            self.opacity = max(0.1, self.opacity - 0.05)  # Decrease opacity (more transparent), min 10%
-
-        # Apply the new opacity
-        self.setWindowOpacity(self.opacity)
-
-        # Update and show the opacity label
-        opacity_percent = int(self.opacity * 100)
-        self.opacity_label.setText(f"{opacity_percent}%")
-        self.opacity_label.adjustSize()
-
-        # Position the label in the top-right corner with some margin
-        margin = 10
-        label_x = self.width() - self.opacity_label.width() - margin
-        label_y = margin
-        self.opacity_label.move(label_x, label_y)
-        self.opacity_label.show()
-        self.opacity_label.raise_()
-
-        # Restart timer to hide label after 1 second of no scrolling
-        self.opacity_timer.start(1000)
-
-        event.accept()
-
-    def reopen_capture(self):
-        """Reopen capture overlay with the saved annotation states restored"""
-        if not (self.saved_annotation_states and self.selection_rect):
-            return
-
-        app = QApplication.instance()
-        if not hasattr(app, 'controller') or not app.controller:
-            logger.error("AppController not available")
-            return
-        overlay = app.controller.capture_overlay
-        if not overlay:
-            logger.error("CaptureOverlay not available")
-            return
-
-        # Restore selection from current annotation state
-        overlay._restore_selection(
-            screenshot=self.saved_annotation_states[self.saved_state_index],
-            start_pos=self.selection_rect.topLeft(),
-            end_pos=self.selection_rect.bottomRight(),
-            reset_annotation=False
-        )
-
-        # Transfer saved annotation states reference, so close .clear() won't delete data
-        overlay.annotation_states = self.saved_annotation_states
-        self.saved_annotation_states = []
-        overlay.undo_redo_index = self.saved_state_index
-
-        overlay.show()
-
-        logger.info(f">>> [Overlay #{overlay.instance_id}] CaptureOverlay REOPENED from pinned window")
-
-        self.close()
-
-    def closeEvent(self, event):
-        """Clean up and remove from pinned windows list"""
-        # Remove this window from the controller's pinned windows list
-        app = QApplication.instance()
-        if hasattr(app, 'controller') and app.controller and self in app.controller.pinned_windows:
-            app.controller.pinned_windows.remove(self)
-            logger.info(f"Pinned window closed. Remaining: {len(app.controller.pinned_windows)}")
-
-        # Clean up timers
-        if hasattr(self, 'opacity_timer'):
-            self.opacity_timer.stop()
-
-        # Clear resources to release memory
-        self.saved_annotation_states.clear()
-        self.pixmap = None
-
-        event.accept()
 
 class OverlayBase(QWidget):
     """Base class for overlay widgets with annotation."""
 
     def __init__(self):
         super().__init__()
+        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocus()
+        self.setMouseTracking(True)
+
         self.hint_label = None
+        self.annotation_states: List[dict] = []
 
     def _init_annotation_states(self):
         """Initialize annotation states for undo/redo functionality."""
-        self.annotation_states: List[dict] = []
+        self.annotation_states = []
         self.undo_redo_index = -1
 
     def _save_annotation_state(self):
@@ -1297,6 +1095,10 @@ class OverlayBase(QWidget):
         # Hide after duration
         QTimer.singleShot(duration, self.hint_label.hide)
 
+    def closeEvent(self, event):
+        get_actionbar().hide()
+        self.annotation_states.clear()
+
 class CaptureOverlay(OverlayBase):
     """
     Fullscreen overlay for selecting and annotating screenshot areas.
@@ -1316,7 +1118,6 @@ class CaptureOverlay(OverlayBase):
 
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
 
         screens = QApplication.screens()
         if screens:
@@ -1336,9 +1137,6 @@ class CaptureOverlay(OverlayBase):
                 self.setGeometry(full_geometry)
 
         self.setCursor(Qt.CursorShape.CrossCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setFocus()
-        self.setMouseTracking(True)
 
     def new_capture(self, full_screen: QPixmap):
         CaptureOverlay._display_counter += 1
@@ -1855,7 +1653,7 @@ class CaptureOverlay(OverlayBase):
         """Pin the current selection"""
         cropped, selection_rect = self._get_cropped_selection()
         if cropped:
-            pinned_window = PinnedImageWindow(
+            pinned_window = PinnedOverlay(
                 cropped,
                 position=selection_rect.topLeft(),
                 selection_rect=selection_rect,
@@ -1874,13 +1672,216 @@ class CaptureOverlay(OverlayBase):
 
     def closeEvent(self, event):
         """Clean up toolbar and release resources when closing"""
-        get_actionbar().hide()
+        super().closeEvent(event)
 
-        # Clear resources to release memory
-        self.annotation_states.clear()
         self.full_screen = None
-
         logger.info(f"<<< [Overlay #{CaptureOverlay._display_counter}] CaptureOverlay HIDED")
+        event.accept()
+
+
+class PinnedOverlay(OverlayBase):
+    """
+    Pinned window for displaying captured and annotated screenshots.
+
+    Features:
+    - Always-on-top frameless window with glow effect
+    - Draggable with left mouse button
+    - Double-click to close
+    - Space key to reopen in edit mode
+    - Esc key to close
+    - Mouse scroll to adjust transparency
+    """
+
+    def __init__(self, pixmap: QPixmap, position: Optional[QPoint] = None,
+                 selection_rect: Optional[QRect] = None,
+                 saved_annotation_states: Optional[List[QPixmap]] = None,
+                 saved_state_index: int = -1):
+        super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        self.pixmap = pixmap
+        self.selection_rect = selection_rect
+        self.saved_annotation_states = saved_annotation_states or []
+        self.saved_state_index = saved_state_index
+        self.glow_size = GLOW_SIZE
+
+        logical_width, logical_height = self._get_logical_size()
+
+        # Size includes padding for glow effect
+        self.setFixedSize(logical_width + 2 * self.glow_size,
+                         logical_height + 2 * self.glow_size)
+
+        # Position adjusted for glow effect
+        if position:
+            self.move(position.x() - self.glow_size, position.y() - self.glow_size)
+
+        # Dragging state
+        self.dragging = False
+        self.offset = QPoint()
+
+        # Transparency state
+        self.opacity = 1.0  # 100% opaque by default
+        self.setWindowOpacity(self.opacity)
+
+        # Opacity label (hidden by default)
+        self.opacity_label = QLabel(self)
+        self.opacity_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 180);
+                color: white;
+                border: 1px solid #0078d4;
+                border-radius: 3px;
+                padding: 4px 8px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+        """)
+        self.opacity_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.opacity_label.hide()
+
+        # Timer to hide opacity label
+        self.opacity_timer = QTimer(self)
+        self.opacity_timer.setSingleShot(True)
+        self.opacity_timer.timeout.connect(self.opacity_label.hide)
+
+        # Keyboard shortcuts
+        QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)
+        QShortcut(QKeySequence("Space"), self).activated.connect(self._handle_space_shortcut)
+
+    def _handle_space_shortcut(self):
+        actionbar = get_actionbar()
+        if actionbar.isVisible():
+            actionbar.hide()
+        else:
+            actionbar.setParent(None)
+            actionbar._show_toolbar(self)
+
+    def _get_logical_size(self) -> Tuple[int, int]:
+        """Get the logical size of the pixmap (accounting for device pixel ratio)"""
+        return (
+            int(self.pixmap.width() / self.pixmap.devicePixelRatio()),
+            int(self.pixmap.height() / self.pixmap.devicePixelRatio())
+        )
+
+    def paintEvent(self, event):
+        logical_width, logical_height = self._get_logical_size()
+
+        glow_base_color = (220, 220, 220)
+        glow_layers = [
+            (QColor(*glow_base_color, 80), 1),   # Inner
+            (QColor(*glow_base_color, 60), 2),
+            (QColor(*glow_base_color, 40), 3),
+            (QColor(*glow_base_color, 20), 5),
+            (QColor(*glow_base_color, 10), 9),   # Outer
+        ]
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        # Draw glow effect expanding outward from the pixmap
+        for color, offset in glow_layers:
+            painter.setBrush(QBrush(color))
+            glow_rect = QRect(self.glow_size - offset, self.glow_size - offset,
+                            logical_width + offset * 2, logical_height + offset * 2)
+            painter.drawRect(glow_rect)
+
+        # Draw the pixmap at the center (glow expands outward)
+        painter.drawPixmap(self.glow_size, self.glow_size, self.pixmap)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.dragging = True
+            self.offset = event.pos()
+
+    def mouseMoveEvent(self, event):
+        if self.dragging:
+            self.move(self.mapToGlobal(event.pos() - self.offset))
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.dragging = False
+
+    def mouseDoubleClickEvent(self, event):
+        self.close()
+
+    def wheelEvent(self, event):
+        """Handle mouse wheel events to adjust window opacity/transparency"""
+        # Get wheel delta (positive = scroll up, negative = scroll down)
+        delta = event.angleDelta().y()
+
+        # Adjust opacity (scroll up = more opaque, scroll down = more transparent)
+        if delta > 0:
+            self.opacity = min(1.0, self.opacity + 0.05)  # Increase opacity (less transparent)
+        else:
+            self.opacity = max(0.1, self.opacity - 0.05)  # Decrease opacity (more transparent), min 10%
+
+        # Apply the new opacity
+        self.setWindowOpacity(self.opacity)
+
+        # Update and show the opacity label
+        opacity_percent = int(self.opacity * 100)
+        self.opacity_label.setText(f"{opacity_percent}%")
+        self.opacity_label.adjustSize()
+
+        # Position the label in the top-right corner with some margin
+        margin = 10
+        label_x = self.width() - self.opacity_label.width() - margin
+        label_y = margin
+        self.opacity_label.move(label_x, label_y)
+        self.opacity_label.show()
+        self.opacity_label.raise_()
+
+        # Restart timer to hide label after 1 second of no scrolling
+        self.opacity_timer.start(1000)
+
+        event.accept()
+
+    def reopen_capture(self):
+        """Reopen capture overlay with the saved annotation states restored"""
+        if not (self.saved_annotation_states and self.selection_rect):
+            return
+
+        app = QApplication.instance()
+        if not hasattr(app, 'controller') or not app.controller:
+            logger.error("AppController not available")
+            return
+        overlay = app.controller.capture_overlay
+        if not overlay:
+            logger.error("CaptureOverlay not available")
+            return
+
+        # Restore selection from current annotation state
+        overlay._restore_selection(
+            screenshot=self.saved_annotation_states[self.saved_state_index],
+            start_pos=self.selection_rect.topLeft(),
+            end_pos=self.selection_rect.bottomRight(),
+            reset_annotation=False
+        )
+
+        # Transfer saved annotation states reference, so close .clear() won't delete data
+        overlay.annotation_states = self.saved_annotation_states
+        self.saved_annotation_states = []
+        overlay.undo_redo_index = self.saved_state_index
+
+        overlay.show()
+
+        logger.info(f">>> [Overlay #{overlay.instance_id}] CaptureOverlay REOPENED from pinned window")
+
+        self.close()
+
+    def closeEvent(self, event):
+        """Clean up and remove from pinned windows list"""
+        super().closeEvent(event)
+
+        # Clean up timers
+        if hasattr(self, 'opacity_timer'):
+            self.opacity_timer.stop()
+
+        pinned_list = get_app_controller().pinned_windows
+        pinned_list.remove(self)
+        self.pixmap = None
+        logger.info(f"Pinned window closed. Remaining: {len(pinned_list)}")
         event.accept()
 
 
