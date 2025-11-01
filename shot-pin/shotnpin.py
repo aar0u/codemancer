@@ -546,6 +546,10 @@ class ActionBar(QWidget):
         self.font_size = DEFAULT_FONT_SIZE
         self.current_pen_color = DEFAULT_PEN_COLOR
 
+        # Text input state
+        self.text_input: Optional[QLineEdit] = None
+        self.text_input_pos: Optional[QPoint] = None
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(TOOLBAR_MARGIN, TOOLBAR_MARGIN, TOOLBAR_MARGIN, TOOLBAR_MARGIN)
         layout.setSpacing(TOOLBAR_SPACING)
@@ -756,16 +760,16 @@ class ActionBar(QWidget):
     def _add_text_annotation(self, pos: QPoint):
         """Add text annotation at the given position"""
         # Create a text input field at the clicked position
-        if self.linked_widget.text_input:
+        if self.text_input:
             self._finalize_text_input()
 
-        self.linked_widget.text_input_pos = pos
-        self.linked_widget.text_input = QLineEdit(self.linked_widget)
+        self.text_input_pos = pos
+        self.text_input = QLineEdit(self.linked_widget)
 
         # Style the text input
         font = QFont("Arial", self.font_size)
         font.setBold(True)
-        self.linked_widget.text_input.setFont(font)
+        self.text_input.setFont(font)
 
         # Calculate text color brightness to set contrasting background
         brightness = get_actionbar().current_pen_color.lightness()
@@ -773,7 +777,7 @@ class ActionBar(QWidget):
         text_color = get_actionbar().current_pen_color.name()
 
         # No border at all to avoid offset issues
-        self.linked_widget.text_input.setStyleSheet(f"""
+        self.text_input.setStyleSheet(f"""
             QLineEdit {{
                 background-color: {bg_color};
                 color: {text_color};
@@ -785,33 +789,34 @@ class ActionBar(QWidget):
         """)
 
         # Set all margins to 0
-        self.linked_widget.text_input.setTextMargins(0, 0, 0, 0)
-        self.linked_widget.text_input.setContentsMargins(0, 0, 0, 0)
+        self.text_input.setTextMargins(0, 0, 0, 0)
+        self.text_input.setContentsMargins(0, 0, 0, 0)
 
         # Position the input so it appears where the text will be drawn
-        self.linked_widget.text_input.setMinimumWidth(100)
-        self.linked_widget.text_input.adjustSize()
+        self.text_input.setMinimumWidth(100)
+        self.text_input.adjustSize()
 
         # Position at click location - we'll adjust the final text drawing to match
-        self.linked_widget.text_input.move(pos.x(), pos.y())
+        self.text_input.move(pos.x(), pos.y())
 
-        self.linked_widget.text_input.show()
-        self.linked_widget.text_input.setFocus()
+        self.text_input.show()
+        self.text_input.setFocus()
 
         # Connect signals
-        self.linked_widget.text_input.returnPressed.connect(lambda: self._finalize_text_input(font))
-        self.linked_widget.text_input.editingFinished.connect(lambda: self._finalize_text_input(font))
+        self.text_input.returnPressed.connect(lambda: self._finalize_text_input(font))
+        self.text_input.editingFinished.connect(lambda: self._finalize_text_input(font))
 
     def _finalize_text_input(self, font: Optional[QFont] = None):
         """Finalize the text input and draw it on the screenshot"""
-        if not self.linked_widget.text_input or not self.linked_widget.text_input_pos:
+        if not self.text_input or not self.text_input_pos:
             return
 
-        text = self.linked_widget.text_input.text()
+        text = self.text_input.text()
 
         if text:
             painter = QPainter(self.linked_widget.full_screen)
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            font.setPointSize(self.font_size)
             painter.setFont(font)
 
             # Set up pen for text
@@ -819,14 +824,14 @@ class ActionBar(QWidget):
 
             # Calculate text offset based on QLineEdit's content margins
             # QLineEdit has internal padding that varies by platform
-            content_margins = self.linked_widget.text_input.contentsMargins()
+            content_margins = self.text_input.contentsMargins()
             x_offset = content_margins.left() if content_margins.left() > 0 else 2
             y_offset = content_margins.top() if content_margins.top() > 0 else 1
 
             # Draw text with calculated offsets
             text_rect = QRect(
-                self.linked_widget.text_input_pos.x() + x_offset,
-                self.linked_widget.text_input_pos.y() + y_offset,
+                self.text_input_pos.x() + x_offset,
+                self.text_input_pos.y() + y_offset,
                 1000,  # Width (large enough for any text)
                 100    # Height (large enough for any font size)
             )
@@ -837,9 +842,9 @@ class ActionBar(QWidget):
             self.linked_widget.update()
 
         # Clean up
-        self.linked_widget.text_input.deleteLater()
-        self.linked_widget.text_input = None
-        self.linked_widget.text_input_pos = None
+        self.text_input.deleteLater()
+        self.text_input = None
+        self.text_input_pos = None
 
     def _paint_shape_preview(self, painter: QPainter):
         """Paint preview for rectangle/line drawing modes"""
@@ -892,6 +897,28 @@ class ActionBar(QWidget):
             self.linked_widget.update()
         return True
 
+    def handle_wheel_event(self, event):
+        """Finalize drawing on mouse release"""
+        if not self.linked_widget or not self.is_any_draw_tool_active():
+            return False
+
+        if self.text_input and self.text_input.isVisible():
+            # Get wheel delta (positive = scroll up, negative = scroll down)
+            delta = event.angleDelta().y()
+            # Adjust font size (scroll up = larger, scroll down = smaller)
+            if delta > 0:
+                self.font_size = min(72, self.font_size + 2)  # Max font size: 72
+            else:
+                self.font_size = max(8, self.font_size - 2)   # Min font size: 8
+
+            font = self.text_input.font()
+            font.setPointSize(self.font_size)
+            self.text_input.setFont(font)
+            self.text_input.adjustSize()
+
+            event.accept()
+        return True
+
     def _create_drawing_pen(self, cap_style=Qt.PenCapStyle.RoundCap, join_style=Qt.PenJoinStyle.RoundJoin) -> QPen:
         """Create a standard pen for drawing operations"""
         return QPen(
@@ -926,6 +953,7 @@ class ActionBar(QWidget):
         painter.end()
         self.linked_widget._save_annotation_state()
         self.linked_widget.update()
+
 
 class PinnedImageWindow(QWidget):
     """
@@ -1078,7 +1106,6 @@ class PinnedImageWindow(QWidget):
 
         event.accept()
 
-
     def reopen_capture(self):
         """Reopen capture overlay with the saved annotation states restored"""
         if not (self.saved_annotation_states and self.selection_rect):
@@ -1200,10 +1227,6 @@ class CaptureOverlay(QWidget):
         self.preview_rect: Optional[QRect] = None
         self.preview_line: Optional[Tuple[QPoint, QPoint]] = None
 
-        # Text input state
-        self.text_input: Optional[QLineEdit] = None
-        self.text_input_pos: Optional[QPoint] = None
-
         # Hint message label for showing temporary notifications
         self.hint_label: Optional[QLabel] = None
 
@@ -1231,7 +1254,6 @@ class CaptureOverlay(QWidget):
             self._paint_selection_border(painter, selection_rect)
         else:
             painter.fillRect(self.rect(), OVERLAY_COLOR)
-
 
     def _paint_overlay_around_selection(self, painter: QPainter, selection_rect: QRect):
         """Paint dark overlay around the selection area"""
@@ -1348,7 +1370,6 @@ class CaptureOverlay(QWidget):
             self.end_pos = event.pos()
             self.selecting = True
 
-
     def _update_cursor(self, pos):
         """Update cursor based on position relative to selection"""
         if get_actionbar().is_any_draw_tool_active():
@@ -1430,29 +1451,9 @@ class CaptureOverlay(QWidget):
 
     def wheelEvent(self, event):
         """Handle mouse wheel events for font size adjustment when text input is active"""
-        # Check if mouse is over the toolbar - if so, let toolbar handle the event
-        if self.toolbar and self.toolbar.geometry().contains(event.position().toPoint()):
-            super().wheelEvent(event)
-            return
-
-        # Only handle wheel events when text input is active
-        if self.text_input and self.text_input.isVisible():
-            # Get wheel delta (positive = scroll up, negative = scroll down)
-            delta = event.angleDelta().y()
-
-            # Adjust font size (scroll up = larger, scroll down = smaller)
-            if delta > 0:
-                self.font_size = min(72, self.font_size + 2)  # Max font size: 72
-            else:
-                self.font_size = max(8, self.font_size - 2)   # Min font size: 8
-
-            # Update the text input font immediately
-            font = QFont("Arial", self.font_size)
-            font.setBold(True)
-            self.text_input.setFont(font)
-            self.text_input.adjustSize()
-
-            event.accept()  # Event handled
+        # Don't do if the wheel event is over the toolbar
+        if not get_actionbar().geometry().contains(event.position().toPoint()):
+            get_actionbar().handle_wheel_event(event)
         else:
             super().wheelEvent(event)
 
@@ -1546,13 +1547,13 @@ class CaptureOverlay(QWidget):
     def _handle_escape_key(self):
         """Handle Escape key press - cancel text input or annotation mode, or close"""
         # If text input is active, cancel it
-        if self.text_input:
-            self.text_input.deleteLater()
-            self.text_input = None
-            self.text_input_pos = None
+        toolbar = get_actionbar()
+        if toolbar.text_input:
+            toolbar.text_input.deleteLater()
+            toolbar.text_input = None
+            toolbar.text_input_pos = None
             return
 
-        toolbar = get_actionbar()
         if toolbar.is_any_draw_tool_active():
             toolbar.deactivate_all_draw_tools()
         else:
