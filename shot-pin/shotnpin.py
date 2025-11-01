@@ -779,9 +779,9 @@ class ActionBar(QWidget):
         self.text_input.setFont(font)
 
         # Calculate text color brightness to set contrasting background
-        brightness = get_actionbar().current_pen_color.lightness()
+        brightness = self.current_pen_color.lightness()
         bg_color = "rgba(255, 255, 255, 180)" if brightness < 128 else "rgba(0, 0, 0, 180)"
-        text_color = get_actionbar().current_pen_color.name()
+        text_color = self.current_pen_color.name()
 
         # No border at all to avoid offset issues
         self.text_input.setStyleSheet(f"""
@@ -827,7 +827,7 @@ class ActionBar(QWidget):
             painter.setFont(font)
 
             # Set up pen for text
-            painter.setPen(get_actionbar().current_pen_color)
+            painter.setPen(self.current_pen_color)
 
             # Calculate text offset based on QLineEdit's content margins
             # QLineEdit has internal padding that varies by platform
@@ -1465,10 +1465,10 @@ class CaptureOverlay(QWidget):
             resize_operations[self.resize_edge]()
 
     def mouseMoveEvent(self, event):
-        toolbar = get_actionbar()
+        actionbar = get_actionbar()
         if self.resizing:
             self._apply_resize(event.pos().x(), event.pos().y())
-            toolbar._position_toolbar()
+            actionbar._position_toolbar()
             self.update()
         elif self.dragging_selection:
             selection_rect = self.overlay_selection_rect
@@ -1482,7 +1482,7 @@ class CaptureOverlay(QWidget):
 
                 self.start_pos = QPoint(new_x, new_y)
                 self.end_pos = QPoint(new_x + width, new_y + height)
-                toolbar._position_toolbar()
+                actionbar._position_toolbar()
                 self.update()
         elif self.selecting:
             self.end_pos = event.pos()
@@ -1490,13 +1490,14 @@ class CaptureOverlay(QWidget):
         elif self.overlay_selection_rect is not None:
             self._update_cursor(event.pos())
             if self.overlay_selection_rect.contains(event.pos()):
-                toolbar.handle_mouse_move(event)
+                actionbar.handle_mouse_move(event)
 
     def wheelEvent(self, event):
         """Handle mouse wheel events for font size adjustment when text input is active"""
         # Don't do if the wheel event is over the toolbar
-        if not get_actionbar().geometry().contains(event.position().toPoint()):
-            get_actionbar().handle_wheel_event(event)
+        actionbar = get_actionbar()
+        if not actionbar.geometry().contains(event.position().toPoint()):
+            actionbar.handle_wheel_event(event)
         else:
             super().wheelEvent(event)
 
@@ -1515,9 +1516,9 @@ class CaptureOverlay(QWidget):
         self.end_pos = selection_rect.bottomRight()
         self.update()
 
-        toolbar = get_actionbar()
-        toolbar.setParent(self)
-        toolbar._show_toolbar(self)
+        actionbar = get_actionbar()
+        actionbar.setParent(self)
+        actionbar._show_toolbar(self)
 
         self._save_annotation_state()
         # Save screenshot with selection to snapshots
@@ -1534,6 +1535,7 @@ class CaptureOverlay(QWidget):
             self.current_snapshot_index = -1
 
     def mouseReleaseEvent(self, event):
+        actionbar = get_actionbar()
         if event.button() == Qt.MouseButton.LeftButton or event.button() == Qt.MouseButton.RightButton:
             if self.resizing:
                 self.resizing = False
@@ -1545,10 +1547,10 @@ class CaptureOverlay(QWidget):
                 self.selecting = False
                 self.end_pos = event.pos()
                 self._finalize_selection()
-            elif get_actionbar().drawing:
+            elif actionbar.drawing:
                 if self.overlay_selection_rect.contains(event.pos()):
-                    get_actionbar()._finalize_sharp(event.pos())
-                get_actionbar().drawing = False
+                    actionbar._finalize_sharp(event.pos())
+                actionbar.drawing = False
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -1625,12 +1627,13 @@ class CaptureOverlay(QWidget):
     def _handle_ctrl_shortcuts(self, key) -> bool:
         """Handle Ctrl+key shortcuts."""
         # Shortcuts that require selection
+        actionbar = get_actionbar()
         if self.overlay_selection_rect is not None:
             shortcuts = {
                 Qt.Key.Key_Z: self.undo_action,
                 Qt.Key.Key_Y: self.redo_action,
-                Qt.Key.Key_S: get_actionbar().save_to_file,
-                Qt.Key.Key_C: get_actionbar().copy_to_clipboard,
+                Qt.Key.Key_S: actionbar.save_to_file,
+                Qt.Key.Key_C: actionbar.copy_to_clipboard,
                 Qt.Key.Key_T: self.pin_to_display,
             }
             if key in shortcuts:
