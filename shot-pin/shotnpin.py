@@ -1097,7 +1097,7 @@ class OverlayBase(QWidget):
         state_item = self.annotation_states[index]
         state_pixmap = state_item['screenshot']
         selection_rect = state_item['selection_rect']
-        painter = QPainter(self.full_screen)
+        painter = QPainter(self.base_pixmap)
         painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
         painter.end()
 
@@ -1183,6 +1183,9 @@ class CaptureOverlay(OverlayBase):
             painter.fillRect(self.rect(), OVERLAY_COLOR)
 
     def keyPressEvent(self, event):
+        if get_actionbar().handle_key_press(event):
+            return
+
         key = event.key()
 
         # Handle history navigation keys (< and >)
@@ -1197,9 +1200,6 @@ class CaptureOverlay(OverlayBase):
         arrow_keys = [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down]
         if key in arrow_keys and self.overlay_selection_rect is not None:
             self._handle_arrow_key_movement(event)
-            return
-
-        if get_actionbar().handle_key_press(event):
             return
 
         super().keyPressEvent(event)
@@ -1230,17 +1230,9 @@ class CaptureOverlay(OverlayBase):
             actionbar._position_toolbar()
             self.update()
         elif self.dragging_selection:
-            selection_rect = self.overlay_selection_rect
-            if selection_rect is not None:
-                width = selection_rect.width()
-                height = selection_rect.height()
+            if self.overlay_selection_rect is not None:
                 new_top_left = event.pos() - self.drag_offset
-
-                new_x = max(0, min(new_top_left.x(), self.width() - width))
-                new_y = max(0, min(new_top_left.y(), self.height() - height))
-
-                self.start_pos = QPoint(new_x, new_y)
-                self.end_pos = QPoint(new_x + width, new_y + height)
+                self._move_selection(new_top_left.x(), new_top_left.y())
                 actionbar._position_toolbar()
                 self.update()
         elif self.selecting:
@@ -1457,6 +1449,26 @@ class CaptureOverlay(OverlayBase):
         if self.resize_edge in resize_operations:
             resize_operations[self.resize_edge]()
 
+    def _move_selection(self, new_x: int, new_y: int):
+        """
+        Move selection to a new position while maintaining its size.
+        
+        Args:
+            new_x: New x coordinate for the top-left corner
+            new_y: New y coordinate for the top-left corner
+        """
+        # Calculate the delta (offset) from start to end
+        delta_x = self.end_pos.x() - self.start_pos.x()
+        delta_y = self.end_pos.y() - self.start_pos.y()
+        
+        # Clamp to screen boundaries
+        new_x = max(0, min(new_x, self.width() - abs(delta_x)))
+        new_y = max(0, min(new_y, self.height() - abs(delta_y)))
+        
+        # Update positions using deltas to preserve exact size
+        self.start_pos = QPoint(new_x, new_y)
+        self.end_pos = QPoint(new_x + delta_x, new_y + delta_y)
+
     def _finalize_selection(self):
         """Finalize selection and initialize toolbar with snapshot handling"""
         selection_rect = self.overlay_selection_rect
@@ -1492,8 +1504,6 @@ class CaptureOverlay(OverlayBase):
 
     def _handle_arrow_key_movement(self, event):
         """Handle arrow key movement of selection"""
-        width = abs(self.end_pos.x() - self.start_pos.x())
-        height = abs(self.end_pos.y() - self.start_pos.y())
         current_x = self.start_pos.x()
         current_y = self.start_pos.y()
         step = KEYBOARD_STEP_LARGE if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else KEYBOARD_STEP_SMALL
@@ -1507,11 +1517,10 @@ class CaptureOverlay(OverlayBase):
         }
 
         delta_x, delta_y = key_to_delta.get(event.key(), (0, 0))
-        new_x = max(0, min(self.width() - width, current_x + delta_x))
-        new_y = max(0, min(self.height() - height, current_y + delta_y))
+        new_x = current_x + delta_x
+        new_y = current_y + delta_y
 
-        self.start_pos = QPoint(new_x, new_y)
-        self.end_pos = QPoint(new_x + width, new_y + height)
+        self._move_selection(new_x, new_y)
         get_actionbar()._position_toolbar()
         self.update()
 
