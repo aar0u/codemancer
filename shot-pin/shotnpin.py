@@ -872,11 +872,25 @@ class ActionBar(QWidget):
             painter.drawLine(self.preview_line[0], self.preview_line[1])
 
     def handle_key_press(self, event):
-        # Handle number keys for toolbar shortcuts (1-9)
         if not self.linked_widget:
             return False
 
         key = event.key()
+        # Handle Ctrl modifier
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            shortcuts = {
+                Qt.Key.Key_Z: self.linked_widget.undo_action,
+                Qt.Key.Key_Y: self.linked_widget.redo_action,
+                Qt.Key.Key_S: self.save_to_file,
+                Qt.Key.Key_C: self.copy_to_clipboard,
+                Qt.Key.Key_T: self.linked_widget.pin_to_display,
+            }
+            if key in shortcuts:
+                shortcuts[key]()
+                return True
+            return False
+
+        # Handle number keys for toolbar shortcuts (1-9)
         if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
             button_index = key - Qt.Key.Key_1
             if button_index < len(self.button_actions):
@@ -1021,6 +1035,22 @@ class OverlayBase(QWidget):
 
         self.hint_label = None
         self.annotation_states: List[dict] = []
+
+        QShortcut(QKeySequence("Esc"), self).activated.connect(self._handle_esc_shortcut)
+
+    def _handle_esc_shortcut(self):
+        """Esc can happen before actionbar is shown, so handle here."""
+        actionbar = get_actionbar()
+        if actionbar.text_input:
+            actionbar.text_input.deleteLater()
+            actionbar.text_input = None
+            actionbar.text_input_pos = None
+            return
+
+        if actionbar.is_any_draw_tool_active():
+            actionbar.deactivate_all_draw_tools()
+        else:
+            self.close()
 
     def _init_annotation_states(self):
         """Initialize annotation states for undo/redo functionality."""
@@ -1440,11 +1470,6 @@ class CaptureOverlay(OverlayBase):
     def keyPressEvent(self, event):
         key = event.key()
 
-        # Handle Escape key - special case with nested logic
-        if key == Qt.Key.Key_Escape:
-            self._handle_escape_key()
-            return
-
         # Handle history navigation keys (< and >)
         if key == Qt.Key.Key_Comma:
             self._navigate_snapshots(-1)
@@ -1459,30 +1484,10 @@ class CaptureOverlay(OverlayBase):
             self._handle_arrow_key_movement(event)
             return
 
-        # Handle keyboard shortcuts with Ctrl modifier
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            if self._handle_ctrl_shortcuts(key):
-                return
-
         if get_actionbar().handle_key_press(event):
             return
 
         super().keyPressEvent(event)
-
-    def _handle_escape_key(self):
-        """Handle Escape key press - cancel text input or annotation mode, or close"""
-        # If text input is active, cancel it
-        toolbar = get_actionbar()
-        if toolbar.text_input:
-            toolbar.text_input.deleteLater()
-            toolbar.text_input = None
-            toolbar.text_input_pos = None
-            return
-
-        if toolbar.is_any_draw_tool_active():
-            toolbar.deactivate_all_draw_tools()
-        else:
-            self.close()
 
     def _handle_arrow_key_movement(self, event):
         """Handle arrow key movement of selection"""
@@ -1508,24 +1513,6 @@ class CaptureOverlay(OverlayBase):
         self.end_pos = QPoint(new_x + width, new_y + height)
         get_actionbar()._position_toolbar()
         self.update()
-
-    def _handle_ctrl_shortcuts(self, key) -> bool:
-        """Handle Ctrl+key shortcuts."""
-        # Shortcuts that require selection
-        actionbar = get_actionbar()
-        if self.overlay_selection_rect is not None:
-            shortcuts = {
-                Qt.Key.Key_Z: self.undo_action,
-                Qt.Key.Key_Y: self.redo_action,
-                Qt.Key.Key_S: actionbar.save_to_file,
-                Qt.Key.Key_C: actionbar.copy_to_clipboard,
-                Qt.Key.Key_T: self.pin_to_display,
-            }
-            if key in shortcuts:
-                shortcuts[key]()
-                return True
-
-        return False
 
     def _find_current_snapshot_index(self, screenshot_snapshots):
         """
@@ -1745,7 +1732,6 @@ class PinnedOverlay(OverlayBase):
         self.opacity_timer.timeout.connect(self.opacity_label.hide)
 
         # Keyboard shortcuts
-        QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)
         QShortcut(QKeySequence("Space"), self).activated.connect(self._handle_space_shortcut)
 
     def _handle_space_shortcut(self):
