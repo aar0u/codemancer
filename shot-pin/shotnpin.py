@@ -663,10 +663,10 @@ class ActionBar(QWidget):
         layout.addWidget(self.redo_btn)
 
         # Action buttons
-        self.copy_btn = self._create_button('copy', "Copy to Clipboard (Ctrl+C)", lambda: self.linked_widget.copy_to_clipboard())
+        self.copy_btn = self._create_button('copy', "Copy to Clipboard (Ctrl+C)", lambda: self.copy_to_clipboard())
         layout.addWidget(self.copy_btn)
 
-        self.save_btn = self._create_button('save', "Save to File (Ctrl+S)", lambda: self.linked_widget.save_to_file())
+        self.save_btn = self._create_button('save', "Save to File (Ctrl+S)", lambda: self.save_to_file())
         layout.addWidget(self.save_btn)
 
         self.pin_btn = self._create_button('pin', "Pin (Ctrl+T)", lambda: self.linked_widget.pin_to_display())
@@ -866,6 +866,18 @@ class ActionBar(QWidget):
             painter.setPen(self._create_drawing_pen())
             painter.drawLine(self.preview_line[0], self.preview_line[1])
 
+    def handle_key_press(self, event):
+        # Handle number keys for toolbar shortcuts (1-9)
+        if not self.linked_widget:
+            return False
+
+        key = event.key()
+        if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
+            button_index = key - Qt.Key.Key_1
+            if button_index < len(self.button_actions):
+                self.button_actions[button_index]()
+            return True
+
     def handle_mouse_press(self, event):
         """Start drawing or place text annotation based on draw mode"""
         if not self.linked_widget or not self.is_any_draw_tool_active():
@@ -961,6 +973,36 @@ class ActionBar(QWidget):
         self.linked_widget._save_annotation_state()
         self.linked_widget.update()
 
+    def save_to_file(self):
+        """Save the current selection to a file"""
+        cropped, _ = self.linked_widget._get_cropped_selection()
+        self.linked_widget.close()
+        if cropped:
+            # Open save dialog
+            file_path, _ = QFileDialog.getSaveFileName(
+                None,
+                "Save Screenshot",
+                "",
+                "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;All Files (*)"
+            )
+            if file_path:
+                if cropped.save(file_path):
+                    logger.info(f"Screenshot saved to {file_path}")
+                else:
+                    logger.error(f"Failed to save screenshot to {file_path}")
+
+    def copy_to_clipboard(self):
+        """Copy the current selection to clipboard"""
+        cropped, _ = self.linked_widget._get_cropped_selection()
+        self.linked_widget.close()
+        if cropped:
+            clipboard = QApplication.clipboard()
+            if clipboard:
+                clipboard.setPixmap(cropped)
+                logger.info("Screenshot copied to clipboard")
+            else:
+                logger.error("Clipboard not available")
+     
 
 class PinnedImageWindow(QWidget):
     """
@@ -1530,18 +1572,13 @@ class CaptureOverlay(QWidget):
             self._handle_arrow_key_movement(event)
             return
 
-        toolbar = get_actionbar()
-        # Handle number keys for toolbar shortcuts (1-9)
-        if Qt.Key.Key_1 <= key <= Qt.Key.Key_9 and toolbar:
-            button_index = key - Qt.Key.Key_1
-            if button_index < len(toolbar.button_actions):
-                toolbar.button_actions[button_index]()
-            return
-
         # Handle keyboard shortcuts with Ctrl modifier
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             if self._handle_ctrl_shortcuts(key):
                 return
+
+        if get_actionbar().handle_key_press(event):
+            return
 
         super().keyPressEvent(event)
 
@@ -1584,6 +1621,23 @@ class CaptureOverlay(QWidget):
         self.end_pos = QPoint(new_x + width, new_y + height)
         get_actionbar()._position_toolbar()
         self.update()
+
+    def _handle_ctrl_shortcuts(self, key) -> bool:
+        """Handle Ctrl+key shortcuts."""
+        # Shortcuts that require selection
+        if self.overlay_selection_rect is not None:
+            shortcuts = {
+                Qt.Key.Key_Z: self.undo_action,
+                Qt.Key.Key_Y: self.redo_action,
+                Qt.Key.Key_S: get_actionbar().save_to_file,
+                Qt.Key.Key_C: get_actionbar().copy_to_clipboard,
+                Qt.Key.Key_T: self.pin_to_display,
+            }
+            if key in shortcuts:
+                shortcuts[key]()
+                return True
+
+        return False
 
     def _find_current_snapshot_index(self, screenshot_snapshots):
         """
@@ -1698,34 +1752,6 @@ class CaptureOverlay(QWidget):
         if self.overlay_selection_rect is not None:
             get_actionbar()._show_toolbar(self)
 
-    def _handle_ctrl_shortcuts(self, key) -> bool:
-        """
-        Handle Ctrl+key shortcuts.
-
-        Returns True if the shortcut was handled, False otherwise.
-        """
-        # Shortcuts that require selection
-        if self.overlay_selection_rect is not None:
-            shortcuts = {
-                Qt.Key.Key_S: self.save_to_file,
-                Qt.Key.Key_C: self.copy_to_clipboard,
-                Qt.Key.Key_T: self.pin_to_display,
-            }
-            if key in shortcuts:
-                shortcuts[key]()
-                return True
-
-        # Shortcuts that work without selection
-        global_shortcuts = {
-            Qt.Key.Key_Z: self.undo_action,
-            Qt.Key.Key_Y: self.redo_action,
-        }
-        if key in global_shortcuts:
-            global_shortcuts[key]()
-            return True
-
-        return False
-
     def _init_annotation_states(self):
         """Initialize annotation states for undo/redo functionality."""
         self.annotation_states: List[dict] = []
@@ -1807,42 +1833,6 @@ class CaptureOverlay(QWidget):
             cropped.setDevicePixelRatio(self.full_screen.devicePixelRatio())
             result = (cropped, selection_rect)
         return result
-
-    def save_to_file(self):
-        """Save the current selection to a file"""
-        cropped, _ = self._get_cropped_selection()
-        self.close()
-        if cropped:
-            # Open save dialog
-            file_path, _ = QFileDialog.getSaveFileName(
-                None,
-                "Save Screenshot",
-                "",
-                "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;All Files (*)"
-            )
-            if file_path:
-                try:
-                    if cropped.save(file_path):
-                        logger.info(f"Screenshot saved to {file_path}")
-                    else:
-                        logger.error(f"Failed to save screenshot to {file_path}")
-                except Exception as e:
-                    logger.error(f"Error saving screenshot: {e}")
-
-    def copy_to_clipboard(self):
-        """Copy the current selection to clipboard"""
-        cropped, _ = self._get_cropped_selection()
-        self.close()
-        if cropped:
-            try:
-                clipboard = QApplication.clipboard()
-                if clipboard:
-                    clipboard.setPixmap(cropped)
-                    logger.info("Screenshot copied to clipboard")
-                else:
-                    logger.error("Clipboard not available")
-            except Exception as e:
-                logger.error(f"Error copying to clipboard: {e}")
 
     def pin_to_display(self):
         """Pin the current selection"""
