@@ -542,7 +542,7 @@ class ActionBar(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.ArrowCursor)
 
-        self.linked_widget = None
+        self.linked_widget: Optional["OverlayBase"] = None
         # List to store button actions in order for keyboard shortcuts
         self.button_actions = []
 
@@ -826,7 +826,7 @@ class ActionBar(QWidget):
         text = self.text_input.text()
 
         if text:
-            painter = QPainter(self.linked_widget.full_screen)
+            painter = QPainter(self.linked_widget.base_pixmap)
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
             font.setPointSize(self.font_size)
             painter.setFont(font)
@@ -922,7 +922,7 @@ class ActionBar(QWidget):
 
             if draw_mode == "pen":
                 # pen draws directly onto the screenshot
-                painter = QPainter(self.linked_widget.full_screen)
+                painter = QPainter(self.linked_widget.base_pixmap)
                 pen = self._create_drawing_pen()
                 painter.setPen(pen)
                 painter.drawLine(self.last_point, pos)
@@ -969,7 +969,7 @@ class ActionBar(QWidget):
 
     def _finalize_sharp(self, end_point: QPoint):
         """Draw the shape to the pixmap based on current draw mode"""
-        painter = QPainter(self.linked_widget.full_screen)
+        painter = QPainter(self.linked_widget.base_pixmap)
         draw_mode = self.get_active_draw_mode()
         if draw_mode == "rectangle":
             pen = self._create_drawing_pen(Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin)
@@ -1033,6 +1033,7 @@ class OverlayBase(QWidget):
         self.setFocus()
         self.setMouseTracking(True)
 
+        self.base_pixmap: Optional[QPixmap] = None
         self.hint_label = None
         self.annotation_states: List[dict] = []
 
@@ -1170,7 +1171,7 @@ class CaptureOverlay(OverlayBase):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.drawPixmap(0, 0, self.full_screen)
+        painter.drawPixmap(0, 0, self.base_pixmap)
 
         get_actionbar()._paint_shape_preview(painter)
 
@@ -1280,7 +1281,7 @@ class CaptureOverlay(OverlayBase):
     def new_capture(self, full_screen: QPixmap):
         CaptureOverlay._display_counter += 1
 
-        self.full_screen = full_screen
+        self.base_pixmap = full_screen
 
         # Selection state
         self.start_pos: Optional[QPoint] = None
@@ -1480,7 +1481,7 @@ class CaptureOverlay(OverlayBase):
         app = QApplication.instance()
         if hasattr(app, 'controller') and app.controller:
             app.controller._add_to_screenshot_snapshots(
-                self.full_screen,
+                self.base_pixmap,
                 self.start_pos,
                 self.end_pos
             )
@@ -1530,7 +1531,7 @@ class CaptureOverlay(OverlayBase):
         # Try to find by comparing screenshot data
         for i, snapshot_item in enumerate(screenshot_snapshots):
             snapshot_screenshot = snapshot_item['screenshot']
-            if snapshot_screenshot.cacheKey() == self.full_screen.cacheKey():
+            if snapshot_screenshot.cacheKey() == self.base_pixmap.cacheKey():
                 return i
 
         # If not found, for navigation purposes, set to len so previous index is the last one
@@ -1590,7 +1591,7 @@ class CaptureOverlay(OverlayBase):
             end_pos: Ending position for the selection
             reset_annotation: If True, reset annotation states (default True)
         """
-        self.full_screen = screenshot.copy()
+        self.base_pixmap = screenshot.copy()
         self.start_pos = start_pos
         self.end_pos = end_pos
 
@@ -1609,13 +1610,13 @@ class CaptureOverlay(OverlayBase):
         When drawing with QPainter on a pixmap with devicePixelRatio set,
         Qt automatically handles the scaling, so use logical coordinates.
         """
-        if self.full_screen.devicePixelRatio() <= 1.0:
+        if self.base_pixmap.devicePixelRatio() <= 1.0:
             return rect
         return QRect(
-            int(rect.x() * self.full_screen.devicePixelRatio()),
-            int(rect.y() * self.full_screen.devicePixelRatio()),
-            int(rect.width() * self.full_screen.devicePixelRatio()),
-            int(rect.height() * self.full_screen.devicePixelRatio())
+            int(rect.x() * self.base_pixmap.devicePixelRatio()),
+            int(rect.y() * self.base_pixmap.devicePixelRatio()),
+            int(rect.width() * self.base_pixmap.devicePixelRatio()),
+            int(rect.height() * self.base_pixmap.devicePixelRatio())
         )
 
     def _get_cropped_selection(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
@@ -1630,9 +1631,9 @@ class CaptureOverlay(OverlayBase):
         if selection_rect is not None and selection_rect.width() > MIN_VALID_RECT and selection_rect.height() > MIN_VALID_RECT:
             # Scale the selection rect for high DPI displays
             scaled_rect = self._scale_rect(selection_rect)
-            cropped = self.full_screen.copy(scaled_rect)
+            cropped = self.base_pixmap.copy(scaled_rect)
             # Preserve the device pixel ratio on the cropped pixmap
-            cropped.setDevicePixelRatio(self.full_screen.devicePixelRatio())
+            cropped.setDevicePixelRatio(self.base_pixmap.devicePixelRatio())
             result = (cropped, selection_rect)
         return result
 
@@ -1661,7 +1662,7 @@ class CaptureOverlay(OverlayBase):
         """Clean up toolbar and release resources when closing"""
         super().closeEvent(event)
 
-        self.full_screen = None
+        self.base_pixmap = None
         logger.info(f"<<< [Overlay #{CaptureOverlay._display_counter}] CaptureOverlay HIDED")
         event.accept()
 
@@ -1686,7 +1687,7 @@ class PinnedOverlay(OverlayBase):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
-        self.pixmap = pixmap
+        self.base_pixmap = pixmap
         self.selection_rect = selection_rect
         self.saved_annotation_states = saved_annotation_states or []
         self.saved_state_index = saved_state_index
@@ -1745,8 +1746,8 @@ class PinnedOverlay(OverlayBase):
     def _get_logical_size(self) -> Tuple[int, int]:
         """Get the logical size of the pixmap (accounting for device pixel ratio)"""
         return (
-            int(self.pixmap.width() / self.pixmap.devicePixelRatio()),
-            int(self.pixmap.height() / self.pixmap.devicePixelRatio())
+            int(self.base_pixmap.width() / self.base_pixmap.devicePixelRatio()),
+            int(self.base_pixmap.height() / self.base_pixmap.devicePixelRatio())
         )
 
     def paintEvent(self, event):
@@ -1773,7 +1774,7 @@ class PinnedOverlay(OverlayBase):
             painter.drawRect(glow_rect)
 
         # Draw the pixmap at the center (glow expands outward)
-        painter.drawPixmap(self.glow_size, self.glow_size, self.pixmap)
+        painter.drawPixmap(self.glow_size, self.glow_size, self.base_pixmap)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1866,7 +1867,7 @@ class PinnedOverlay(OverlayBase):
 
         pinned_list = get_app_controller().pinned_windows
         pinned_list.remove(self)
-        self.pixmap = None
+        self.base_pixmap = None
         logger.info(f"Pinned window closed. Remaining: {len(pinned_list)}")
         event.accept()
 
