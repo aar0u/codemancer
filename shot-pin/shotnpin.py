@@ -704,12 +704,8 @@ class ActionBar(QWidget):
         """
         sender = self.sender()
         if sender.isChecked():
-            # Uncheck all others
-            for btn in self.tool_buttons:
-                if btn is not sender:
-                    btn.setChecked(False)
+            self.deactivate_draw_tools(exclude_btn=sender)
         else:
-            # Allow all to be unselected
             sender.setChecked(False)
 
     def get_active_draw_mode(self) -> Optional[str]:
@@ -723,15 +719,24 @@ class ActionBar(QWidget):
         """Check if any of the drawing tool buttons (pen, rectangle, line, text) are pressed."""
         return any(btn.isChecked() for btn in self.tool_buttons)
     
-    def deactivate_all_draw_tools(self):
-        """Deactivate all drawing tool buttons."""
+    def deactivate_draw_tools(self, exclude_btn: Optional[QPushButton] = None):
+        """Deactivate all drawing tool buttons except the excluded one."""
         for btn in self.tool_buttons:
-            btn.setChecked(False)
+            if btn is not exclude_btn:
+                btn.setChecked(False)
 
     def _show_toolbar(self, linked: QWidget):
         """Show toolbar linked to a specific widget."""
         logger.info(f"Showing toolbar linked to widget: {linked}")
         self.linked_widget = linked
+        if isinstance(linked, PinnedOverlay):
+            self.pin_btn.setVisible(False)
+            self.pin_btn.setEnabled(False)
+            self.setParent(None)
+        else:
+            self.pin_btn.setVisible(True)
+            self.pin_btn.setEnabled(True)
+            self.setParent(linked)
         self._position_toolbar()
         self.show()
 
@@ -840,10 +845,12 @@ class ActionBar(QWidget):
             x_offset = content_margins.left() if content_margins.left() > 0 else 2
             y_offset = content_margins.top() if content_margins.top() > 0 else 1
 
+            x, y = self._window_to_pixmap_pos(self.text_input_pos)
+
             # Draw text with calculated offsets
             text_rect = QRect(
-                self.text_input_pos.x() + x_offset,
-                self.text_input_pos.y() + y_offset,
+                x + x_offset,
+                y + y_offset,
                 1000,  # Width (large enough for any text)
                 100    # Height (large enough for any font size)
             )
@@ -872,7 +879,7 @@ class ActionBar(QWidget):
             painter.drawLine(self.preview_line[0], self.preview_line[1])
 
     def handle_key_press(self, event):
-        if not self.linked_widget:
+        if not self.isVisible():
             return False
 
         key = event.key()
@@ -883,7 +890,7 @@ class ActionBar(QWidget):
                 Qt.Key.Key_Y: self.linked_widget.redo_action,
                 Qt.Key.Key_S: self.save_to_file,
                 Qt.Key.Key_C: self.copy_to_clipboard,
-                Qt.Key.Key_T: self.linked_widget.pin_to_display,
+                Qt.Key.Key_T: self.pin_btn.click,
             }
             if key in shortcuts:
                 shortcuts[key]()
@@ -929,9 +936,11 @@ class ActionBar(QWidget):
                 self.last_point = pos
                 painter.end()
             elif draw_mode == "rectangle":
-                self.preview_rect = QRect(self.draw_start_point, pos).normalized()
+                clamped_pos = self._clamp_pos_to_only_pixmap(pos)
+                self.preview_rect = QRect(self.draw_start_point, clamped_pos).normalized()
             elif draw_mode == "line":
-                self.preview_line = (self.draw_start_point, pos)
+                clamped_pos = self._clamp_pos_to_only_pixmap(pos)
+                self.preview_line = (self.draw_start_point, clamped_pos)
             self.linked_widget.update()
         return True
 
@@ -967,6 +976,29 @@ class ActionBar(QWidget):
             join_style
         )
 
+    def _window_to_pixmap_pos(self, pos: QPoint) -> QPoint:
+        if hasattr(self.linked_widget, 'glow_size'):
+            return pos.x() - self.linked_widget.glow_size, pos.y() - self.linked_widget.glow_size
+        return pos.x(), pos.y()
+
+    def _clamp_pos_to_only_pixmap(self, pos: QPoint, for_container_window: bool = True) -> QPoint:
+        if not self.linked_widget or not self.linked_widget.base_pixmap:
+            return pos
+        dpr = self.linked_widget.base_pixmap.devicePixelRatio()
+        logical_width = self.linked_widget.base_pixmap.width() / dpr
+        logical_height = self.linked_widget.base_pixmap.height() / dpr
+        # Convert to pixmap coordinates
+        x, y = self._window_to_pixmap_pos(pos)
+        # Clamp
+        clamped_pos = QPoint(
+            int(max(0, min(x, logical_width - 1))),
+            int(max(0, min(y, logical_height - 1)))
+        )
+        # Convert back to window coordinates
+        if hasattr(self.linked_widget, 'glow_size') and for_container_window:
+            return clamped_pos + QPoint(self.linked_widget.glow_size, self.linked_widget.glow_size)
+        return clamped_pos
+
     def _finalize_sharp(self, end_point: QPoint):
         """Draw the shape to the pixmap based on current draw mode"""
         painter = QPainter(self.linked_widget.base_pixmap)
@@ -980,13 +1012,17 @@ class ActionBar(QWidget):
                 self.current_pen_color.blue(),
                 50
             ))
-            rect = QRect(self.draw_start_point, end_point).normalized()
+            pixmap_start_point = self._clamp_pos_to_only_pixmap(self.draw_start_point, False)
+            clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
+            rect = QRect(pixmap_start_point, clamped_end_point).normalized()
             painter.drawRect(rect)
             self.preview_rect = None
         elif draw_mode == "line":
             pen = self._create_drawing_pen()
             painter.setPen(pen)
-            painter.drawLine(self.draw_start_point, end_point)
+            pixmap_start_point = self._clamp_pos_to_only_pixmap(self.draw_start_point, False)
+            clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
+            painter.drawLine(pixmap_start_point, clamped_end_point)
             self.preview_line = None
         painter.end()
         self.linked_widget._save_annotation_state()
@@ -1037,7 +1073,16 @@ class OverlayBase(QWidget):
         self.hint_label = None
         self.annotation_states: List[dict] = []
 
+        # Dragging state
+        self.dragging = False
+        self.drag_offset = QPoint()
+
+        self.resizing = False
+
         QShortcut(QKeySequence("Esc"), self).activated.connect(self._handle_esc_shortcut)
+
+    def keyPressEvent(self, event):
+        get_actionbar().handle_key_press(event)
 
     def _handle_esc_shortcut(self):
         """Esc can happen before actionbar is shown, so handle here."""
@@ -1049,7 +1094,7 @@ class OverlayBase(QWidget):
             return
 
         if actionbar.is_any_draw_tool_active():
-            actionbar.deactivate_all_draw_tools()
+            actionbar.deactivate_draw_tools()
         else:
             self.close()
 
@@ -1183,9 +1228,6 @@ class CaptureOverlay(OverlayBase):
             painter.fillRect(self.rect(), OVERLAY_COLOR)
 
     def keyPressEvent(self, event):
-        if get_actionbar().handle_key_press(event):
-            return
-
         key = event.key()
 
         # Handle history navigation keys (< and >)
@@ -1215,7 +1257,7 @@ class CaptureOverlay(OverlayBase):
             elif selection_rect.contains(pos):
                 if get_actionbar().handle_mouse_press(event):
                     return
-                self.dragging_selection = True
+                self.dragging = True
                 self.drag_offset = pos - selection_rect.topLeft()
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
         else:
@@ -1229,7 +1271,7 @@ class CaptureOverlay(OverlayBase):
             self._apply_resize(event.pos().x(), event.pos().y())
             actionbar._position_toolbar()
             self.update()
-        elif self.dragging_selection:
+        elif self.dragging:
             if self.overlay_selection_rect is not None:
                 new_top_left = event.pos() - self.drag_offset
                 self._move_selection(new_top_left.x(), new_top_left.y())
@@ -1249,8 +1291,8 @@ class CaptureOverlay(OverlayBase):
             if self.resizing:
                 self.resizing = False
                 self.resize_edge = None
-            elif self.dragging_selection:
-                self.dragging_selection = False
+            elif self.dragging:
+                self.dragging = False
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             elif self.selecting:
                 self.selecting = False
@@ -1280,12 +1322,7 @@ class CaptureOverlay(OverlayBase):
         self.end_pos: Optional[QPoint] = None
         self.selecting = False
 
-        # Dragging state
-        self.dragging_selection = False
-        self.drag_offset = QPoint()
-
         # Resizing state
-        self.resizing = False
         self.resize_edge: Optional[str] = None
         self.resize_handle_size = RESIZE_HANDLE_SIZE
 
@@ -1485,7 +1522,6 @@ class CaptureOverlay(OverlayBase):
         self.update()
 
         actionbar = get_actionbar()
-        actionbar.setParent(self)
         actionbar._show_toolbar(self)
 
         self._save_annotation_state()
@@ -1712,10 +1748,6 @@ class PinnedOverlay(OverlayBase):
         if position:
             self.move(position.x() - self.glow_size, position.y() - self.glow_size)
 
-        # Dragging state
-        self.dragging = False
-        self.offset = QPoint()
-
         # Transparency state
         self.opacity = 1.0  # 100% opaque by default
         self.setWindowOpacity(self.opacity)
@@ -1741,15 +1773,17 @@ class PinnedOverlay(OverlayBase):
         self.opacity_timer.setSingleShot(True)
         self.opacity_timer.timeout.connect(self.opacity_label.hide)
 
+        self._init_annotation_states()
+
         # Keyboard shortcuts
         QShortcut(QKeySequence("Space"), self).activated.connect(self._handle_space_shortcut)
 
     def _handle_space_shortcut(self):
         actionbar = get_actionbar()
         if actionbar.isVisible():
+            actionbar.deactivate_draw_tools()
             actionbar.hide()
         else:
-            actionbar.setParent(None)
             actionbar._show_toolbar(self)
 
     def _get_logical_size(self) -> Tuple[int, int]:
@@ -1785,17 +1819,29 @@ class PinnedOverlay(OverlayBase):
         # Draw the pixmap at the center (glow expands outward)
         painter.drawPixmap(self.glow_size, self.glow_size, self.base_pixmap)
 
+        get_actionbar()._paint_shape_preview(painter)
+
     def mousePressEvent(self, event):
+        if get_actionbar().handle_mouse_press(event):
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self.dragging = True
-            self.offset = event.pos()
+            self.drag_offset = event.pos()
 
     def mouseMoveEvent(self, event):
+        actionbar = get_actionbar()
         if self.dragging:
-            self.move(self.mapToGlobal(event.pos() - self.offset))
+            self.move(self.mapToGlobal(event.pos() - self.drag_offset))
+            actionbar._position_toolbar()
+            return
+        actionbar.handle_mouse_move(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        actionbar = get_actionbar()
+        if actionbar.drawing:
+            actionbar._finalize_sharp(event.pos())
+            actionbar.drawing = False
+        elif event.button() == Qt.MouseButton.LeftButton:
             self.dragging = False
 
     def mouseDoubleClickEvent(self, event):
@@ -1832,6 +1878,9 @@ class PinnedOverlay(OverlayBase):
         self.opacity_timer.start(1000)
 
         event.accept()
+
+    def _get_cropped_selection(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
+        return (self.base_pixmap, None)
 
     def reopen_capture(self):
         """Reopen capture overlay with the saved annotation states restored"""
