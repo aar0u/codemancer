@@ -118,7 +118,7 @@ def get_app_icon() -> QIcon:
     icon_path = str(Path(__file__).parent / ICON_FILENAME)
     return QIcon(icon_path)
 
-def get_app_controller():
+def get_app_controller() -> Optional["AppController"]:
     """
     Safely get the global AppController from QApplication instance.
     """
@@ -493,7 +493,7 @@ class AppController(QObject):
             # Remove oldest screenshot
             self.screenshot_snapshots.pop(0)
 
-        logger.debug(f"Screenshot added to snapshots. Total: {len(self.screenshot_snapshots)}")
+        logger.debug(f"Snapshots added. Total: {len(self.screenshot_snapshots)}")
 
     def quit_application(self):
         """Quit the application and clean up all resources."""
@@ -725,7 +725,7 @@ class ActionBar(QWidget):
             if btn is not exclude_btn:
                 btn.setChecked(False)
 
-    def _show_toolbar(self, linked: QWidget):
+    def popup_for(self, linked: QWidget):
         """Show toolbar linked to a specific widget."""
         logger.info(f"Showing toolbar linked to widget: {linked}")
         self.linked_widget = linked
@@ -737,23 +737,28 @@ class ActionBar(QWidget):
             self.pin_btn.setVisible(True)
             self.pin_btn.setEnabled(True)
             self.setParent(linked)
-        self._position_toolbar()
+        self._position()
         self.show()
+    
+    def dismiss(self):
+        """Hide the toolbar and unlink from any widget."""
+        self.deactivate_draw_tools()
+        self.hide()
 
-    def _position_toolbar(self):
+    def _position(self):
         """Position toolbar at bottom right of selection area (in parent coordinates)"""
         if isinstance(self.linked_widget, CaptureOverlay):
             selection_rect = self.linked_widget.overlay_selection_rect
-            toolbar_x = selection_rect.right() - self.width() + SELECTION_BORDER_WIDTH
-            toolbar_y = selection_rect.bottom() + TOOLBAR_MARGIN + SELECTION_BORDER_WIDTH
-            toolbar_x = max(0, min(toolbar_x, self.linked_widget.width() - self.width()))
-            toolbar_y = min(toolbar_y, self.linked_widget.height() - self.height())
-            self.move(toolbar_x, toolbar_y)
+            x = selection_rect.right() - self.width() + SELECTION_BORDER_WIDTH
+            y = selection_rect.bottom() + TOOLBAR_MARGIN + SELECTION_BORDER_WIDTH
+            x = max(0, min(x, self.linked_widget.width() - self.width()))
+            y = min(y, self.linked_widget.height() - self.height())
+            self.move(x, y)
         else:
-            toolbar_x = self.linked_widget.width() - self.width()
-            toolbar_y = self.linked_widget.height() + TOOLBAR_MARGIN
+            x = self.linked_widget.width() - self.width()
+            y = self.linked_widget.height() + TOOLBAR_MARGIN
             # self.move(toolbar_x, toolbar_y)
-            self.move(self.linked_widget.mapToGlobal(QPoint(toolbar_x, toolbar_y)))
+            self.move(self.linked_widget.mapToGlobal(QPoint(x, y)))
 
         # self.raise_()  # Keep it on top of other child widgets
 
@@ -1030,7 +1035,7 @@ class ActionBar(QWidget):
 
     def save_to_file(self):
         """Save the current selection to a file"""
-        cropped, _ = self.linked_widget._get_cropped_selection()
+        cropped, _ = self.linked_widget._get_content_for_export()
         self.linked_widget.close()
         if cropped:
             # Open save dialog
@@ -1048,7 +1053,7 @@ class ActionBar(QWidget):
 
     def copy_to_clipboard(self):
         """Copy the current selection to clipboard"""
-        cropped, _ = self.linked_widget._get_cropped_selection()
+        cropped, _ = self.linked_widget._get_content_for_export()
         self.linked_widget.close()
         if cropped:
             clipboard = QApplication.clipboard()
@@ -1098,6 +1103,13 @@ class OverlayBase(QWidget):
         else:
             self.close()
 
+    def _get_content_for_export(self):
+        """Get pixmap for export (save/copy)"""
+        raise NotImplementedError
+
+    def pin_to_display(self):
+        raise NotImplementedError
+
     def _init_annotation_states(self):
         """Initialize annotation states for undo/redo functionality."""
         self.annotation_states = []
@@ -1110,7 +1122,7 @@ class OverlayBase(QWidget):
         self.annotation_states = self.annotation_states[:self.undo_redo_index + 1]
 
         # Add new state
-        cropped, selection_rect = self._get_cropped_selection()
+        cropped, selection_rect = self._get_content_for_export()
         self.annotation_states.append({
             'screenshot': cropped,
             'selection_rect': selection_rect
@@ -1120,8 +1132,8 @@ class OverlayBase(QWidget):
         if len(self.annotation_states) > MAX_HISTORY:
             self.annotation_states.pop(0)
             self.undo_redo_index -= 1
-        
-        logger.info(f"Annotation states: {len(self.annotation_states)}")
+ 
+        logger.info(f"Saved annotation state: {self.undo_redo_index + 1} of {len(self.annotation_states)}")
 
     def undo_action(self):
         """Undo last annotation"""
@@ -1139,12 +1151,17 @@ class OverlayBase(QWidget):
     
     def _restore_annotation_state(self, index: int):
         """Restore annotation state from index"""
+        logger.info(f"Restoring annotation state to: {index + 1} of {len(self.annotation_states)}")
         state_item = self.annotation_states[index]
         state_pixmap = state_item['screenshot']
         selection_rect = state_item['selection_rect']
-        painter = QPainter(self.base_pixmap)
-        painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
-        painter.end()
+    
+        if isinstance(self, CaptureOverlay) and selection_rect is not None:
+            painter = QPainter(self.base_pixmap)
+            painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
+            painter.end()
+        else:
+            self.base_pixmap = state_pixmap.copy()
 
     def _show_hint(self, message: str, duration: int = 1000):
         """Show a temporary hint message overlay on the screen."""
@@ -1269,13 +1286,13 @@ class CaptureOverlay(OverlayBase):
         actionbar = get_actionbar()
         if self.resizing:
             self._apply_resize(event.pos().x(), event.pos().y())
-            actionbar._position_toolbar()
+            actionbar._position()
             self.update()
         elif self.dragging:
             if self.overlay_selection_rect is not None:
                 new_top_left = event.pos() - self.drag_offset
                 self._move_selection(new_top_left.x(), new_top_left.y())
-                actionbar._position_toolbar()
+                actionbar._position()
                 self.update()
         elif self.selecting:
             self.end_pos = event.pos()
@@ -1329,8 +1346,6 @@ class CaptureOverlay(OverlayBase):
 
         # Current position in screenshot snapshots (-1 means not in snapshots)
         self.current_snapshot_index: int = -1
-
-        self._init_annotation_states()
 
     @property
     def overlay_selection_rect(self) -> Optional[QRect]:
@@ -1522,21 +1537,19 @@ class CaptureOverlay(OverlayBase):
         self.update()
 
         actionbar = get_actionbar()
-        actionbar._show_toolbar(self)
+        actionbar.popup_for(self)
 
+        self._init_annotation_states()
         self._save_annotation_state()
-        # Save screenshot with selection to snapshots
-        app = QApplication.instance()
-        if hasattr(app, 'controller') and app.controller:
-            app.controller._add_to_screenshot_snapshots(
+
+        get_app_controller()._add_to_screenshot_snapshots(
                 self.base_pixmap,
                 self.start_pos,
                 self.end_pos
             )
-            logger.debug(f"Added screenshot to snapshots with selection: {self.start_pos} -> {self.end_pos}")
-
-            # Reset snapshot index since we're now on a new screenshot
-            self.current_snapshot_index = -1
+        logger.debug(f"Added screenshot to snapshots with selection: {self.start_pos} -> {self.end_pos}")
+        # Reset snapshot index since we're now on a new screenshot
+        self.current_snapshot_index = -1
 
     def _handle_arrow_key_movement(self, event):
         """Handle arrow key movement of selection"""
@@ -1557,7 +1570,7 @@ class CaptureOverlay(OverlayBase):
         new_y = current_y + delta_y
 
         self._move_selection(new_x, new_y)
-        get_actionbar()._position_toolbar()
+        get_actionbar()._position()
         self.update()
 
     def _find_current_snapshot_index(self, screenshot_snapshots):
@@ -1646,7 +1659,7 @@ class CaptureOverlay(OverlayBase):
 
         # Show toolbar if selection exists
         if self.overlay_selection_rect is not None:
-            get_actionbar()._show_toolbar(self)
+            get_actionbar().popup_for(self)
 
     def _scale_rect(self, rect: QRect) -> QRect:
         """
@@ -1664,7 +1677,7 @@ class CaptureOverlay(OverlayBase):
             int(rect.height() * self.base_pixmap.devicePixelRatio())
         )
 
-    def _get_cropped_selection(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
+    def _get_content_for_export(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
         """
         Get the cropped annotated screenshot from current selection.
 
@@ -1684,23 +1697,22 @@ class CaptureOverlay(OverlayBase):
 
     def pin_to_display(self):
         """Pin the current selection"""
-        cropped, selection_rect = self._get_cropped_selection()
+        cropped, selection_rect = self._get_content_for_export()
         if cropped:
             pinned_window = PinnedOverlay(
                 cropped,
                 position=selection_rect.topLeft(),
                 selection_rect=selection_rect,
-                saved_annotation_states=self.annotation_states,
-                saved_state_index=self.undo_redo_index
+                annotation_states=self.annotation_states,
+                undo_redo_index=self.undo_redo_index
             )
             # Transfer annotation states reference, so close .clear() won't delete data
             self.annotation_states = []
             pinned_window.show()
 
-            app = QApplication.instance()
-            if hasattr(app, 'controller') and app.controller:
-                app.controller.pinned_windows.append(pinned_window)
-                logger.info(f"Screenshot pinned to screen. Total pinned: {len(app.controller.pinned_windows)}")
+            get_app_controller().pinned_windows.append(pinned_window)
+            logger.info(f"Screenshot pinned to screen. Total pinned: {len(get_app_controller().pinned_windows)}")
+        get_actionbar().dismiss()
         self.close()
 
     def closeEvent(self, event):
@@ -1727,15 +1739,15 @@ class PinnedOverlay(OverlayBase):
 
     def __init__(self, pixmap: QPixmap, position: Optional[QPoint] = None,
                  selection_rect: Optional[QRect] = None,
-                 saved_annotation_states: Optional[List[QPixmap]] = None,
-                 saved_state_index: int = -1):
+                 annotation_states: Optional[List[QPixmap]] = None,
+                 undo_redo_index: int = -1):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         self.base_pixmap = pixmap
         self.selection_rect = selection_rect
-        self.saved_annotation_states = saved_annotation_states or []
-        self.saved_state_index = saved_state_index
+        self.annotation_states = annotation_states or []
+        self.undo_redo_index = undo_redo_index
         self.glow_size = GLOW_SIZE
 
         logical_width, logical_height = self._get_logical_size()
@@ -1773,18 +1785,15 @@ class PinnedOverlay(OverlayBase):
         self.opacity_timer.setSingleShot(True)
         self.opacity_timer.timeout.connect(self.opacity_label.hide)
 
-        self._init_annotation_states()
-
         # Keyboard shortcuts
         QShortcut(QKeySequence("Space"), self).activated.connect(self._handle_space_shortcut)
 
     def _handle_space_shortcut(self):
         actionbar = get_actionbar()
         if actionbar.isVisible():
-            actionbar.deactivate_draw_tools()
-            actionbar.hide()
+            actionbar.dismiss()
         else:
-            actionbar._show_toolbar(self)
+            actionbar.popup_for(self)
 
     def _get_logical_size(self) -> Tuple[int, int]:
         """Get the logical size of the pixmap (accounting for device pixel ratio)"""
@@ -1832,7 +1841,7 @@ class PinnedOverlay(OverlayBase):
         actionbar = get_actionbar()
         if self.dragging:
             self.move(self.mapToGlobal(event.pos() - self.drag_offset))
-            actionbar._position_toolbar()
+            actionbar._position()
             return
         actionbar.handle_mouse_move(event)
 
@@ -1879,12 +1888,12 @@ class PinnedOverlay(OverlayBase):
 
         event.accept()
 
-    def _get_cropped_selection(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
+    def _get_content_for_export(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
         return (self.base_pixmap, None)
 
     def reopen_capture(self):
         """Reopen capture overlay with the saved annotation states restored"""
-        if not (self.saved_annotation_states and self.selection_rect):
+        if not (self.annotation_states and self.selection_rect):
             return
 
         app = QApplication.instance()
@@ -1898,16 +1907,16 @@ class PinnedOverlay(OverlayBase):
 
         # Restore selection from current annotation state
         overlay._restore_selection(
-            screenshot=self.saved_annotation_states[self.saved_state_index],
+            screenshot=self.annotation_states[self.undo_redo_index],
             start_pos=self.selection_rect.topLeft(),
             end_pos=self.selection_rect.bottomRight(),
             reset_annotation=False
         )
 
         # Transfer saved annotation states reference, so close .clear() won't delete data
-        overlay.annotation_states = self.saved_annotation_states
-        self.saved_annotation_states = []
-        overlay.undo_redo_index = self.saved_state_index
+        overlay.annotation_states = self.annotation_states
+        self.annotation_states = []
+        overlay.undo_redo_index = self.undo_redo_index
 
         overlay.show()
 
