@@ -561,10 +561,6 @@ class ActionBar(QWidget):
         self._init_buttons(layout)
         self.adjustSize()
 
-        # Ensure all children have arrow cursor
-        for child in self.findChildren(QWidget):
-            child.setCursor(Qt.CursorShape.ArrowCursor)
-
     def _setup_styles(self):
         """Apply stylesheet to actionbar and its widgets."""
         self.setStyleSheet(f"""
