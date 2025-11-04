@@ -33,7 +33,6 @@ logger = logging.getLogger('ShotNPin')
 # ============================================================================
 
 # Dimensions & Sizes
-GLOW_SIZE = 5
 RESIZE_HANDLE_SIZE = 8
 MIN_SELECTION_SIZE = 20
 MIN_VALID_RECT = 10
@@ -1727,6 +1726,15 @@ class PinnedOverlay(OverlayBase):
     - Mouse scroll to adjust transparency
     """
 
+    # Glow layers configuration
+    GLOW_LAYERS = [
+        (QColor(220, 220, 220, 80), 1),   # Inner
+        (QColor(220, 220, 220, 60), 2),
+        (QColor(220, 220, 220, 40), 3),
+        (QColor(220, 220, 220, 20), 5),
+        (QColor(220, 220, 220, 10), 9),   # Outer
+    ]
+
     _instance_counter = 0
 
     def __init__(self, pixmap: QPixmap, position: Optional[QPoint] = None,
@@ -1734,19 +1742,20 @@ class PinnedOverlay(OverlayBase):
                  annotation_states: Optional[List[QPixmap]] = None,
                  undo_redo_index: int = -1):
         super().__init__()
-        
+
         PinnedOverlay._instance_counter += 1
         self.display_id = PinnedOverlay._instance_counter
-        
+
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         self.base_pixmap = pixmap
         self.selection_rect = selection_rect
-        self.glow_size = GLOW_SIZE
+        # Calculate glow_size dynamically from the max offset in glow_layers
+        self.glow_size = max(offset for _, offset in self.GLOW_LAYERS)
 
         logical_width, logical_height = self._get_logical_size()
 
-        # Size includes padding for glow effect
+        # Size includes padding for the full glow effect
         self.setFixedSize(logical_width + 2 * self.glow_size,
                          logical_height + 2 * self.glow_size)
 
@@ -1809,21 +1818,12 @@ class PinnedOverlay(OverlayBase):
     def paintEvent(self, event):
         logical_width, logical_height = self._get_logical_size()
 
-        glow_base_color = (220, 220, 220)
-        glow_layers = [
-            (QColor(*glow_base_color, 80), 1),   # Inner
-            (QColor(*glow_base_color, 60), 2),
-            (QColor(*glow_base_color, 40), 3),
-            (QColor(*glow_base_color, 20), 5),
-            (QColor(*glow_base_color, 10), 9),   # Outer
-        ]
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
 
         # Draw glow effect expanding outward from the pixmap
-        for color, offset in glow_layers:
+        for color, offset in self.GLOW_LAYERS:
             painter.setBrush(QBrush(color))
             glow_rect = QRect(self.glow_size - offset, self.glow_size - offset,
                             logical_width + offset * 2, logical_height + offset * 2)
