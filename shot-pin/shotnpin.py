@@ -34,8 +34,7 @@ logger = logging.getLogger('ShotNPin')
 
 # Dimensions & Sizes
 RESIZE_HANDLE_SIZE = 8
-MIN_SELECTION_SIZE = 20
-MIN_VALID_RECT = 10
+MIN_SIZE = 2
 ICON_SIZE = 24
 TOOLBAR_MARGIN = 5
 TOOLBAR_SPACING = 3
@@ -620,7 +619,7 @@ class ActionBar(QWidget):
                 callback=self.tool_button_handler,
                 checkable=True
             )
-            btn.setProperty("mode", mode) 
+            btn.setProperty("mode", mode)
             layout.addWidget(btn)
             self.tool_buttons.append(btn)
             self.button_actions.append(lambda b=btn: b.click())
@@ -706,7 +705,7 @@ class ActionBar(QWidget):
     def is_any_draw_tool_active(self) -> bool:
         """Check if any of the drawing tool buttons (pen, rectangle, line, text) are pressed."""
         return any(btn.isChecked() for btn in self.tool_buttons)
-    
+
     def deactivate_draw_tools(self, exclude_btn: Optional[QPushButton] = None):
         """Deactivate all drawing tool buttons except the excluded one."""
         for btn in self.tool_buttons:
@@ -727,7 +726,7 @@ class ActionBar(QWidget):
             self.setParent(None)
         self._position()
         self.show()
-    
+
     def dismiss(self):
         """Hide the actionbar."""
         self.deactivate_draw_tools()
@@ -1154,7 +1153,7 @@ class OverlayBase(QWidget):
         }
         return cursor_map.get(edge, Qt.CursorShape.ArrowCursor)
 
-    def _apply_resize(self, mouse_x, mouse_y):
+    def _apply_resize(self, mouse_x, mouse_y, keep_aspect=False):
         raise NotImplementedError
 
     @property
@@ -1191,7 +1190,9 @@ class OverlayBase(QWidget):
             actionbar._position()
             return
         elif self.resizing:
-            self._apply_resize(event.pos().x(), event.pos().y())
+            # Pass modifier state for aspect ratio preservation
+            keep_aspect = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._apply_resize(event.pos().x(), event.pos().y(), keep_aspect)
             actionbar._position()
         actionbar.handle_mouse_move(event)
 
@@ -1250,7 +1251,7 @@ class OverlayBase(QWidget):
         if len(self.annotation_states) > MAX_HISTORY:
             self.annotation_states.pop(0)
             self.undo_redo_index -= 1
- 
+
         logger.debug(f"[{self.display_name}] Saved annotation state: {self.undo_redo_index + 1}")
 
     def undo_action(self):
@@ -1266,14 +1267,14 @@ class OverlayBase(QWidget):
             self.undo_redo_index += 1
             self._restore_annotation_state(self.undo_redo_index)
             self.update()
-    
+
     def _restore_annotation_state(self, index: int):
         """Restore annotation state from index"""
         logger.debug(f"[{self.display_name}] Restoring state {index + 1} of {len(self.annotation_states)}")
         state_item = self.annotation_states[index]
         state_pixmap = state_item['screenshot']
         selection_rect = state_item['selection_rect']
-    
+
         if isinstance(self, CaptureOverlay) and selection_rect is not None:
             painter = QPainter(self.base_pixmap)
             painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
@@ -1477,31 +1478,29 @@ class CaptureOverlay(OverlayBase):
         painter.drawLine(selection_rect.right() + half, selection_rect.top() - half,
                         selection_rect.right() + half, selection_rect.bottom() + half)
 
-    def _apply_resize(self, mouse_x, mouse_y):
+    def _apply_resize(self, mouse_x, mouse_y, keep_aspect=False):
         """Apply resize transformation based on current resize edge"""
-        min_size = MIN_SELECTION_SIZE
-
         # Map edge names to resize operations
         resize_operations = {
-            'left': lambda: self.start_pos.setX(min(mouse_x, self.end_pos.x() - min_size)),
-            'right': lambda: self.end_pos.setX(max(mouse_x, self.start_pos.x() + min_size)),
-            'top': lambda: self.start_pos.setY(min(mouse_y, self.end_pos.y() - min_size)),
-            'bottom': lambda: self.end_pos.setY(max(mouse_y, self.start_pos.y() + min_size)),
+            'left': lambda: self.start_pos.setX(min(mouse_x, self.end_pos.x() - MIN_SIZE)),
+            'right': lambda: self.end_pos.setX(max(mouse_x, self.start_pos.x() + MIN_SIZE)),
+            'top': lambda: self.start_pos.setY(min(mouse_y, self.end_pos.y() - MIN_SIZE)),
+            'bottom': lambda: self.end_pos.setY(max(mouse_y, self.start_pos.y() + MIN_SIZE)),
             'top-left': lambda: (
-                self.start_pos.setX(min(mouse_x, self.end_pos.x() - min_size)),
-                self.start_pos.setY(min(mouse_y, self.end_pos.y() - min_size))
+                self.start_pos.setX(min(mouse_x, self.end_pos.x() - MIN_SIZE)),
+                self.start_pos.setY(min(mouse_y, self.end_pos.y() - MIN_SIZE))
             ),
             'top-right': lambda: (
-                self.end_pos.setX(max(mouse_x, self.start_pos.x() + min_size)),
-                self.start_pos.setY(min(mouse_y, self.end_pos.y() - min_size))
+                self.end_pos.setX(max(mouse_x, self.start_pos.x() + MIN_SIZE)),
+                self.start_pos.setY(min(mouse_y, self.end_pos.y() - MIN_SIZE))
             ),
             'bottom-left': lambda: (
-                self.start_pos.setX(min(mouse_x, self.end_pos.x() - min_size)),
-                self.end_pos.setY(max(mouse_y, self.start_pos.y() + min_size))
+                self.start_pos.setX(min(mouse_x, self.end_pos.x() - MIN_SIZE)),
+                self.end_pos.setY(max(mouse_y, self.start_pos.y() + MIN_SIZE))
             ),
             'bottom-right': lambda: (
-                self.end_pos.setX(max(mouse_x, self.start_pos.x() + min_size)),
-                self.end_pos.setY(max(mouse_y, self.start_pos.y() + min_size))
+                self.end_pos.setX(max(mouse_x, self.start_pos.x() + MIN_SIZE)),
+                self.end_pos.setY(max(mouse_y, self.start_pos.y() + MIN_SIZE))
             ),
         }
 
@@ -1527,7 +1526,7 @@ class CaptureOverlay(OverlayBase):
         selection_rect = self.content_rect
 
         # Selection too small, clear it to allow new selection
-        if selection_rect is None or selection_rect.width() <= MIN_VALID_RECT or selection_rect.height() <= MIN_VALID_RECT:
+        if selection_rect is None or selection_rect.width() <= MIN_SIZE or selection_rect.height() <= MIN_SIZE:
             self.start_pos = None
             self.end_pos = None
             self.update()
@@ -1675,7 +1674,7 @@ class CaptureOverlay(OverlayBase):
         """
         result: Tuple[Optional[QPixmap], Optional[QRect]] = (None, None)
         selection_rect = self.content_rect
-        if selection_rect is not None and selection_rect.width() > MIN_VALID_RECT and selection_rect.height() > MIN_VALID_RECT:
+        if selection_rect is not None and selection_rect.width() > MIN_SIZE and selection_rect.height() > MIN_SIZE:
             # Scale the selection rect for high DPI displays
             scaled_rect = self._scale_rect(selection_rect)
             cropped = self.base_pixmap.copy(scaled_rect)
@@ -1745,6 +1744,10 @@ class PinnedOverlay(OverlayBase):
         self.display_id = PinnedOverlay._instance_counter
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+        # Store original pixmap for high-quality resizing
+        self.original_pixmap = pixmap.copy()
+        self.aspect_ratio = self.original_pixmap.width() / self.original_pixmap.height()
 
         self.base_pixmap = pixmap
         # Calculate glow_size dynamically from the max offset in glow_layers
@@ -1867,8 +1870,74 @@ class PinnedOverlay(OverlayBase):
 
         event.accept()
 
-    def _apply_resize(self, mouse_x, mouse_y):
-        raise NotImplementedError
+    def _apply_resize(self, mouse_x, mouse_y, keep_aspect=False):
+        """Apply resize transformation to the pinned overlay's base_pixmap."""
+        # Adjust mouse coordinates to account for glow_size offset
+        content_x = mouse_x - self.glow_size
+        content_y = mouse_y - self.glow_size
+
+        # Get current logical dimensions
+        current_width = int(self.base_pixmap.width() / self.base_pixmap.devicePixelRatio())
+        current_height = int(self.base_pixmap.height() / self.base_pixmap.devicePixelRatio())
+
+        # Calculate new dimensions based on resize edge
+        new_width = current_width
+        new_height = current_height
+
+        # Determine new dimensions based on which edge/corner is being dragged
+        if 'right' in self.resize_edge:
+            new_width = max(MIN_SIZE, content_x)
+        elif 'left' in self.resize_edge:
+            new_width = max(MIN_SIZE, current_width - content_x)
+
+        if 'bottom' in self.resize_edge:
+            new_height = max(MIN_SIZE, content_y)
+        elif 'top' in self.resize_edge:
+            new_height = max(MIN_SIZE, current_height - content_y)
+
+        # Apply aspect ratio constraint if Shift is held
+        if keep_aspect:
+            aspect_ratio = self.aspect_ratio
+            # For corner resize, determine which dimension to prioritize
+            if 'right' in self.resize_edge or 'left' in self.resize_edge:
+                # Width changed, adjust height to maintain aspect ratio
+                new_height = int(new_width / aspect_ratio)
+            elif 'bottom' in self.resize_edge or 'top' in self.resize_edge:
+                # Height changed, adjust width to maintain aspect ratio
+                new_width = int(new_height * aspect_ratio)
+
+        # Only resize if dimensions actually changed
+        if new_width != current_width or new_height != current_height:
+            # Get device pixel ratio for proper scaling
+            dpr = self.original_pixmap.devicePixelRatio()
+
+            # IMPORTANT: Always scale from original_pixmap to avoid quality degradation
+            self.base_pixmap = self.original_pixmap.scaled(
+                int(new_width * dpr),
+                int(new_height * dpr),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.base_pixmap.setDevicePixelRatio(dpr)
+
+            # Update window size to accommodate new pixmap size plus glow
+            self.setFixedSize(new_width + 2 * self.glow_size,
+                            new_height + 2 * self.glow_size)
+
+            # Adjust window position for top/left resizing to keep opposite corner fixed
+            if 'left' in self.resize_edge or 'top' in self.resize_edge:
+                current_pos = self.pos()
+                new_x = current_pos.x()
+                new_y = current_pos.y()
+
+                if 'left' in self.resize_edge:
+                    new_x = current_pos.x() + (current_width - new_width)
+                if 'top' in self.resize_edge:
+                    new_y = current_pos.y() + (current_height - new_height)
+
+                self.move(new_x, new_y)
+
+            self.update()
 
     def _get_content_for_export(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
         return (self.base_pixmap, None)
@@ -1885,6 +1954,7 @@ class PinnedOverlay(OverlayBase):
         pinned_list = get_app_controller().pinned_windows
         pinned_list.remove(self)
         self.base_pixmap = None
+        self.original_pixmap = None
         logger.info(f"<<< [{self.display_name}] CLOSED. Remaining: {len(pinned_list)}")
         event.accept()
 
