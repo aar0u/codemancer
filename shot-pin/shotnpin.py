@@ -549,6 +549,7 @@ class ActionBar(QWidget):
         # Drawing state
         self.drawing = False
         self.last_point = QPoint()
+        self.last_point_clamped = False
         self.draw_start_point = QPoint()
         self.preview_rect: Optional[QRect] = None
         self.preview_line: Optional[Tuple[QPoint, QPoint]] = None
@@ -836,12 +837,12 @@ class ActionBar(QWidget):
             x_offset = content_margins.left() if content_margins.left() > 0 else 2
             y_offset = content_margins.top() if content_margins.top() > 0 else 1
 
-            x, y = self._window_to_pixmap_pos(self.text_input_pos)
+            pos = self._window_to_pixmap_pos(self.text_input_pos)
 
             # Draw text with calculated offsets
             text_rect = QRect(
-                x + x_offset,
-                y + y_offset,
+                pos.x() + x_offset,
+                pos.y() + y_offset,
                 1000,  # Width (large enough for any text)
                 100    # Height (large enough for any font size)
             )
@@ -906,6 +907,7 @@ class ActionBar(QWidget):
         else:
             self.drawing = True
             self.last_point = pos
+            self.last_point_clamped = False
             self.draw_start_point = pos
         return True
 
@@ -919,7 +921,13 @@ class ActionBar(QWidget):
             draw_mode = self.get_active_draw_mode()
 
             if draw_mode == "pen":
+                if self.last_point_clamped:
+                    return
                 # pen draws directly onto the screenshot
+                overlay_rect = getattr(self.linked_widget, 'overlay_selection_rect', None)
+                if overlay_rect and not overlay_rect.contains(event.pos()):
+                    pos = self._clamp_pos_to_only_pixmap(pos)
+                    self.last_point_clamped = True
                 painter = QPainter(self.linked_widget.base_pixmap)
                 pen = self._create_drawing_pen()
                 painter.setPen(pen)
@@ -969,26 +977,30 @@ class ActionBar(QWidget):
 
     def _window_to_pixmap_pos(self, pos: QPoint) -> QPoint:
         if hasattr(self.linked_widget, 'glow_size'):
-            return pos.x() - self.linked_widget.glow_size, pos.y() - self.linked_widget.glow_size
-        return pos.x(), pos.y()
+            return QPoint(pos.x() - self.linked_widget.glow_size, pos.y() - self.linked_widget.glow_size)
+        return pos
 
     def _clamp_pos_to_only_pixmap(self, pos: QPoint, for_container_window: bool = True) -> QPoint:
-        if not self.linked_widget or not self.linked_widget.base_pixmap:
+        if not self.linked_widget:
             return pos
-        dpr = self.linked_widget.base_pixmap.devicePixelRatio()
-        logical_width = self.linked_widget.base_pixmap.width() / dpr
-        logical_height = self.linked_widget.base_pixmap.height() / dpr
-        # Convert to pixmap coordinates
-        x, y = self._window_to_pixmap_pos(pos)
+
+        if isinstance(self.linked_widget, CaptureOverlay):
+            selection_rect = self.linked_widget.overlay_selection_rect
+        else:
+            logical_width, logical_height = self.linked_widget._get_logical_size()
+            selection_rect = QRect(self.linked_widget.glow_size, self.linked_widget.glow_size, logical_width, logical_height)
+
         # Clamp
         clamped_pos = QPoint(
-            int(max(0, min(x, logical_width - 1))),
-            int(max(0, min(y, logical_height - 1)))
+            int(max(selection_rect.left(), min(pos.x(), selection_rect.right() - 1))),
+            int(max(selection_rect.top(), min(pos.y(), selection_rect.bottom() - 1)))
         )
-        # Convert back to window coordinates
-        if hasattr(self.linked_widget, 'glow_size') and for_container_window:
-            return clamped_pos + QPoint(self.linked_widget.glow_size, self.linked_widget.glow_size)
-        return clamped_pos
+
+        if for_container_window:
+            return clamped_pos
+        else:
+            # Convert to pixmap coordinates
+            return self._window_to_pixmap_pos(clamped_pos)
 
     def _finalize_sharp(self, end_point: QPoint):
         """Draw the shape to the pixmap based on current draw mode"""
@@ -1288,8 +1300,7 @@ class CaptureOverlay(OverlayBase):
             self.update()
         elif self.overlay_selection_rect is not None:
             self._update_cursor(event.pos())
-            if self.overlay_selection_rect.contains(event.pos()):
-                actionbar.handle_mouse_move(event)
+            actionbar.handle_mouse_move(event)
 
     def mouseReleaseEvent(self, event):
         actionbar = get_actionbar()
@@ -1305,8 +1316,7 @@ class CaptureOverlay(OverlayBase):
                 self.end_pos = event.pos()
                 self._finalize_selection()
             elif actionbar.drawing:
-                if self.overlay_selection_rect.contains(event.pos()):
-                    actionbar._finalize_sharp(event.pos())
+                actionbar._finalize_sharp(event.pos())
                 actionbar.drawing = False
 
     def wheelEvent(self, event):
