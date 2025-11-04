@@ -1085,6 +1085,24 @@ class OverlayBase(QWidget):
 
         QShortcut(QKeySequence("Esc"), self).activated.connect(self._handle_esc_shortcut)
 
+    def _update_cursor(self, pos: QPoint):
+        """Update cursor based on position and current state. Override in subclasses."""
+        pressed = QApplication.mouseButtons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)
+
+        selection_rect = getattr(self, 'overlay_selection_rect', None)
+        if selection_rect is not None:
+            resize_edge = self._get_resize_edge(pos, selection_rect)
+            if resize_edge:
+                self.setCursor(self._get_resize_cursor(resize_edge))
+                return
+
+        if pressed and (self.dragging or self.resizing):
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        elif get_actionbar().is_any_draw_tool_active():
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
     @property
     def display_name(self):
         return f"{type(self).__name__[:-7]} #{self.display_id}"
@@ -1235,14 +1253,14 @@ class CaptureOverlay(OverlayBase):
         painter = QPainter(self)
         painter.drawPixmap(0, 0, self.base_pixmap)
 
-        get_actionbar()._paint_shape_preview(painter)
-
         selection_rect = self.overlay_selection_rect
         if selection_rect is not None:
             self._paint_overlay_around_selection(painter, selection_rect)
             self._paint_selection_border(painter, selection_rect)
         else:
             painter.fillRect(self.rect(), OVERLAY_COLOR)
+
+        get_actionbar()._paint_shape_preview(painter)
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -1276,11 +1294,11 @@ class CaptureOverlay(OverlayBase):
                     return
                 self.dragging = True
                 self.drag_offset = pos - selection_rect.topLeft()
-                self.setCursor(Qt.CursorShape.ClosedHandCursor)
         else:
             self.start_pos = event.pos()
             self.end_pos = event.pos()
             self.selecting = True
+        self._update_cursor(event.pos())
 
     def mouseMoveEvent(self, event):
         actionbar = get_actionbar()
@@ -1298,25 +1316,24 @@ class CaptureOverlay(OverlayBase):
             self.end_pos = event.pos()
             self.update()
         elif self.overlay_selection_rect is not None:
-            self._update_cursor(event.pos())
             actionbar.handle_mouse_move(event)
+        self._update_cursor(event.pos())
 
     def mouseReleaseEvent(self, event):
         actionbar = get_actionbar()
-        if event.button() == Qt.MouseButton.LeftButton or event.button() == Qt.MouseButton.RightButton:
-            if self.resizing:
-                self.resizing = False
-                self.resize_edge = None
-            elif self.dragging:
-                self.dragging = False
-                self.setCursor(Qt.CursorShape.OpenHandCursor)
-            elif self.selecting:
-                self.selecting = False
-                self.end_pos = event.pos()
-                self._finalize_selection()
-            elif actionbar.drawing:
-                actionbar._finalize_sharp(event.pos())
-                actionbar.drawing = False
+        if self.resizing:
+            self.resizing = False
+            self.resize_edge = None
+        elif self.dragging:
+            self.dragging = False
+        elif self.selecting:
+            self.selecting = False
+            self.end_pos = event.pos()
+            self._finalize_selection()
+        elif actionbar.drawing:
+            actionbar._finalize_sharp(event.pos())
+            actionbar.drawing = False
+        self._update_cursor(event.pos())
 
     def wheelEvent(self, event):
         """Handle mouse wheel events for font size adjustment when text input is active"""
@@ -1383,15 +1400,20 @@ class CaptureOverlay(OverlayBase):
         pen.setCapStyle(Qt.PenCapStyle.SquareCap)
         painter.setPen(pen)
 
-        # Draw four sides of the border
-        painter.drawLine(selection_rect.left(), selection_rect.top(),
-                       selection_rect.right(), selection_rect.top())
-        painter.drawLine(selection_rect.left(), selection_rect.bottom(),
-                       selection_rect.right(), selection_rect.bottom())
-        painter.drawLine(selection_rect.left(), selection_rect.top(),
-                       selection_rect.left(), selection_rect.bottom())
-        painter.drawLine(selection_rect.right(), selection_rect.top(),
-                       selection_rect.right(), selection_rect.bottom())
+        # Draw four sides of the border, offset to be outside the selection rect
+        half = border_width // 2
+        # Top
+        painter.drawLine(selection_rect.left() - half, selection_rect.top() - half,
+                        selection_rect.right() + half, selection_rect.top() - half)
+        # Bottom
+        painter.drawLine(selection_rect.left() - half, selection_rect.bottom() + half,
+                        selection_rect.right() + half, selection_rect.bottom() + half)
+        # Left
+        painter.drawLine(selection_rect.left() - half, selection_rect.top() - half,
+                        selection_rect.left() - half, selection_rect.bottom() + half)
+        # Right
+        painter.drawLine(selection_rect.right() + half, selection_rect.top() - half,
+                        selection_rect.right() + half, selection_rect.bottom() + half)
 
     def _get_resize_edge(self, pos: QPoint, rect: QRect) -> Optional[str]:
         """
@@ -1447,26 +1469,6 @@ class CaptureOverlay(OverlayBase):
             'bottom-left': Qt.CursorShape.SizeBDiagCursor,
         }
         return cursor_map.get(edge, Qt.CursorShape.ArrowCursor)
-
-    def _update_cursor(self, pos):
-        """Update cursor based on position relative to selection"""
-        if get_actionbar().is_any_draw_tool_active():
-            self.setCursor(Qt.CursorShape.CrossCursor)
-            return
-
-        selection_rect = self.overlay_selection_rect
-        if selection_rect is None:
-            self.setCursor(Qt.CursorShape.CrossCursor)
-            return
-
-        resize_edge = self._get_resize_edge(pos, selection_rect)
-
-        if resize_edge:
-            self.setCursor(self._get_resize_cursor(resize_edge))
-        elif selection_rect.contains(pos):
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
-        else:
-            self.setCursor(Qt.CursorShape.CrossCursor)
 
     def _apply_resize(self, mouse_x, mouse_y):
         """Apply resize transformation based on current resize edge"""
@@ -1837,9 +1839,9 @@ class PinnedOverlay(OverlayBase):
     def mousePressEvent(self, event):
         if get_actionbar().handle_mouse_press(event):
             return
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = True
-            self.drag_offset = event.pos()
+        self.dragging = True
+        self.drag_offset = event.pos()
+        self._update_cursor(event.pos())
 
     def mouseMoveEvent(self, event):
         actionbar = get_actionbar()
@@ -1847,6 +1849,7 @@ class PinnedOverlay(OverlayBase):
             self.move(self.mapToGlobal(event.pos() - self.drag_offset))
             actionbar._position()
             return
+        self._update_cursor(event.pos())
         actionbar.handle_mouse_move(event)
 
     def mouseReleaseEvent(self, event):
@@ -1854,8 +1857,9 @@ class PinnedOverlay(OverlayBase):
         if actionbar.drawing:
             actionbar._finalize_sharp(event.pos())
             actionbar.drawing = False
-        elif event.button() == Qt.MouseButton.LeftButton:
+        elif self.dragging:
             self.dragging = False
+        self._update_cursor(event.pos())
 
     def mouseDoubleClickEvent(self, event):
         self.close()
