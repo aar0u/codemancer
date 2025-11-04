@@ -737,7 +737,7 @@ class ActionBar(QWidget):
     def _position(self):
         """Position actionbar at bottom right of selection area (in parent coordinates)"""
         if isinstance(self.linked_widget, CaptureOverlay):
-            selection_rect = self.linked_widget.overlay_selection_rect
+            selection_rect = self.linked_widget.content_rect
             x = selection_rect.right() - self.width() + SELECTION_BORDER_WIDTH
             y = selection_rect.bottom() + TOOLBAR_MARGIN + SELECTION_BORDER_WIDTH
             x = max(0, min(x, self.linked_widget.width() - self.width()))
@@ -923,8 +923,8 @@ class ActionBar(QWidget):
                 if self.last_point_clamped:
                     return
                 # pen draws directly onto the screenshot
-                overlay_rect = getattr(self.linked_widget, 'overlay_selection_rect', None)
-                if overlay_rect and not overlay_rect.contains(event.pos()):
+                content_rect = self.linked_widget.content_rect
+                if content_rect and not content_rect.contains(event.pos()):
                     pos = self._clamp_pos_to_only_pixmap(pos)
                     self.last_point_clamped = True
                 painter = QPainter(self.linked_widget.base_pixmap)
@@ -983,16 +983,12 @@ class ActionBar(QWidget):
         if not self.linked_widget:
             return pos
 
-        if isinstance(self.linked_widget, CaptureOverlay):
-            selection_rect = self.linked_widget.overlay_selection_rect
-        else:
-            logical_width, logical_height = self.linked_widget._get_logical_size()
-            selection_rect = QRect(self.linked_widget.glow_size, self.linked_widget.glow_size, logical_width, logical_height)
+        content_rect = self.linked_widget.content_rect
 
         # Clamp
         clamped_pos = QPoint(
-            int(max(selection_rect.left(), min(pos.x(), selection_rect.right() - 1))),
-            int(max(selection_rect.top(), min(pos.y(), selection_rect.bottom() - 1)))
+            int(max(content_rect.left(), min(pos.x(), content_rect.right() - 1))),
+            int(max(content_rect.top(), min(pos.y(), content_rect.bottom() - 1)))
         )
 
         if for_container_window:
@@ -1085,13 +1081,17 @@ class OverlayBase(QWidget):
 
         QShortcut(QKeySequence("Esc"), self).activated.connect(self._handle_esc_shortcut)
 
+    @property
+    def content_rect(self) -> Optional[QRect]:
+        """Get the current selection rectangle. Override in subclasses if applicable."""
+        return None
+
     def _update_cursor(self, pos: QPoint):
-        """Update cursor based on position and current state. Override in subclasses."""
+        """Update cursor based on position and current state."""
         pressed = QApplication.mouseButtons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)
 
-        selection_rect = getattr(self, 'overlay_selection_rect', None)
-        if selection_rect is not None:
-            resize_edge = self._get_resize_edge(pos, selection_rect)
+        if hasattr(self, "_get_resize_edge") and self.content_rect is not None:
+            resize_edge = self._get_resize_edge(pos, self.content_rect)
             if resize_edge:
                 self.setCursor(self._get_resize_cursor(resize_edge))
                 return
@@ -1253,10 +1253,9 @@ class CaptureOverlay(OverlayBase):
         painter = QPainter(self)
         painter.drawPixmap(0, 0, self.base_pixmap)
 
-        selection_rect = self.overlay_selection_rect
-        if selection_rect is not None:
-            self._paint_overlay_around_selection(painter, selection_rect)
-            self._paint_selection_border(painter, selection_rect)
+        if self.content_rect is not None:
+            self._paint_overlay_around_selection(painter, self.content_rect)
+            self._paint_selection_border(painter, self.content_rect)
         else:
             painter.fillRect(self.rect(), OVERLAY_COLOR)
 
@@ -1275,7 +1274,7 @@ class CaptureOverlay(OverlayBase):
 
         # Handle arrow keys for selection movement
         arrow_keys = [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down]
-        if key in arrow_keys and self.overlay_selection_rect is not None:
+        if key in arrow_keys and self.content_rect is not None:
             self._handle_arrow_key_movement(event)
             return
 
@@ -1283,7 +1282,7 @@ class CaptureOverlay(OverlayBase):
 
     def mousePressEvent(self, event):
         pos = event.pos()
-        selection_rect = self.overlay_selection_rect
+        selection_rect = self.content_rect
         if selection_rect is not None and not self.selecting:
             resize_edge = self._get_resize_edge(pos, selection_rect)
             if resize_edge:
@@ -1306,16 +1305,15 @@ class CaptureOverlay(OverlayBase):
             self._apply_resize(event.pos().x(), event.pos().y())
             actionbar._position()
             self.update()
-        elif self.dragging:
-            if self.overlay_selection_rect is not None:
+        elif self.selecting:
+            self.end_pos = event.pos()
+            self.update()
+        elif self.content_rect is not None:
+            if self.dragging:
                 new_top_left = event.pos() - self.drag_offset
                 self._move_selection(new_top_left.x(), new_top_left.y())
                 actionbar._position()
                 self.update()
-        elif self.selecting:
-            self.end_pos = event.pos()
-            self.update()
-        elif self.overlay_selection_rect is not None:
             actionbar.handle_mouse_move(event)
         self._update_cursor(event.pos())
 
@@ -1363,7 +1361,7 @@ class CaptureOverlay(OverlayBase):
         self.current_snapshot_index: int = -1
 
     @property
-    def overlay_selection_rect(self) -> Optional[QRect]:
+    def content_rect(self) -> Optional[QRect]:
         """Get the current selection rectangle, normalized. Returns None if selection is not valid."""
         if self.start_pos is not None and self.end_pos is not None:
             return QRect(self.start_pos, self.end_pos).normalized()
@@ -1523,7 +1521,7 @@ class CaptureOverlay(OverlayBase):
 
     def _finalize_selection(self):
         """Finalize selection and initialize actionbar with snapshot handling"""
-        selection_rect = self.overlay_selection_rect
+        selection_rect = self.content_rect
 
         # Selection too small, clear it to allow new selection
         if selection_rect is None or selection_rect.width() <= MIN_VALID_RECT or selection_rect.height() <= MIN_VALID_RECT:
@@ -1649,7 +1647,7 @@ class CaptureOverlay(OverlayBase):
             self._init_annotation_states()
             self._save_annotation_state()
 
-        if self.overlay_selection_rect is not None:
+        if self.content_rect is not None:
             get_actionbar().popup_for(self)
 
     def _scale_rect(self, rect: QRect) -> QRect:
@@ -1676,7 +1674,7 @@ class CaptureOverlay(OverlayBase):
             Tuple of (cropped_pixmap, selection_rect) or (None, None) if invalid.
         """
         result: Tuple[Optional[QPixmap], Optional[QRect]] = (None, None)
-        selection_rect = self.overlay_selection_rect
+        selection_rect = self.content_rect
         if selection_rect is not None and selection_rect.width() > MIN_VALID_RECT and selection_rect.height() > MIN_VALID_RECT:
             # Scale the selection rect for high DPI displays
             scaled_rect = self._scale_rect(selection_rect)
@@ -1755,11 +1753,9 @@ class PinnedOverlay(OverlayBase):
         # Calculate glow_size dynamically from the max offset in glow_layers
         self.glow_size = max(offset for _, offset in self.GLOW_LAYERS)
 
-        logical_width, logical_height = self._get_logical_size()
-
         # Size includes padding for the full glow effect
-        self.setFixedSize(logical_width + 2 * self.glow_size,
-                         logical_height + 2 * self.glow_size)
+        self.setFixedSize(self.content_rect.width() + 2 * self.glow_size,
+                         self.content_rect.height() + 2 * self.glow_size)
 
         # Position adjusted for glow effect
         if position:
@@ -1803,6 +1799,13 @@ class PinnedOverlay(OverlayBase):
         # Keyboard shortcuts
         QShortcut(QKeySequence("Space"), self).activated.connect(self._handle_space_shortcut)
 
+    @property
+    def content_rect(self) -> Optional[QRect]:
+        """Get the content rectangle accounting for glow effect."""
+        logical_width = int(self.base_pixmap.width() / self.base_pixmap.devicePixelRatio())
+        logical_height = int(self.base_pixmap.height() / self.base_pixmap.devicePixelRatio())
+        return QRect(self.glow_size, self.glow_size, logical_width, logical_height)
+
     def _handle_space_shortcut(self):
         actionbar = get_actionbar()
         if actionbar.isVisible():
@@ -1810,16 +1813,7 @@ class PinnedOverlay(OverlayBase):
         else:
             actionbar.popup_for(self)
 
-    def _get_logical_size(self) -> Tuple[int, int]:
-        """Get the logical size of the pixmap (accounting for device pixel ratio)"""
-        return (
-            int(self.base_pixmap.width() / self.base_pixmap.devicePixelRatio()),
-            int(self.base_pixmap.height() / self.base_pixmap.devicePixelRatio())
-        )
-
     def paintEvent(self, event):
-        logical_width, logical_height = self._get_logical_size()
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -1827,8 +1821,7 @@ class PinnedOverlay(OverlayBase):
         # Draw glow effect expanding outward from the pixmap
         for color, offset in self.GLOW_LAYERS:
             painter.setBrush(QBrush(color))
-            glow_rect = QRect(self.glow_size - offset, self.glow_size - offset,
-                            logical_width + offset * 2, logical_height + offset * 2)
+            glow_rect = self.content_rect.adjusted(-offset, -offset, offset, offset)
             painter.drawRect(glow_rect)
 
         # Draw the pixmap at the center (glow expands outward)
