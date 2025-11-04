@@ -273,7 +273,6 @@ class AppController(QObject):
             pinned = PinnedOverlay(
                 pixmap,
                 position=QCursor.pos(),
-                selection_rect=QRect(0, 0, pixmap.width(), pixmap.height()),
             )
             pinned.show()
 
@@ -1691,7 +1690,6 @@ class CaptureOverlay(OverlayBase):
             pinned_window = PinnedOverlay(
                 cropped,
                 position=selection_rect.topLeft(),
-                selection_rect=selection_rect,
                 annotation_states=self.annotation_states,
                 undo_redo_index=self.undo_redo_index
             )
@@ -1738,7 +1736,6 @@ class PinnedOverlay(OverlayBase):
     _instance_counter = 0
 
     def __init__(self, pixmap: QPixmap, position: Optional[QPoint] = None,
-                 selection_rect: Optional[QRect] = None,
                  annotation_states: Optional[List[QPixmap]] = None,
                  undo_redo_index: int = -1):
         super().__init__()
@@ -1749,7 +1746,6 @@ class PinnedOverlay(OverlayBase):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         self.base_pixmap = pixmap
-        self.selection_rect = selection_rect
         # Calculate glow_size dynamically from the max offset in glow_layers
         self.glow_size = max(offset for _, offset in self.GLOW_LAYERS)
 
@@ -1757,9 +1753,8 @@ class PinnedOverlay(OverlayBase):
         self.setFixedSize(self.content_rect.width() + 2 * self.glow_size,
                          self.content_rect.height() + 2 * self.glow_size)
 
-        # Position adjusted for glow effect
-        if position:
-            self.move(position.x() - self.glow_size, position.y() - self.glow_size)
+        # Store initial position for showEvent
+        self.initial_position = position
 
         # Transparency state
         self.opacity = 1.0  # 100% opaque by default
@@ -1798,6 +1793,13 @@ class PinnedOverlay(OverlayBase):
 
         # Keyboard shortcuts
         QShortcut(QKeySequence("Space"), self).activated.connect(self._handle_space_shortcut)
+
+    def showEvent(self, event):
+        """Handle show event to position the window with glow effect adjustment."""
+        super().showEvent(event)
+        if self.initial_position:
+            self.move(self.initial_position.x() - self.glow_size, self.initial_position.y() - self.glow_size)
+            self.initial_position = None  # Clear after use
 
     @property
     def content_rect(self) -> Optional[QRect]:
