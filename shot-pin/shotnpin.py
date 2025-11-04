@@ -1286,6 +1286,14 @@ class OverlayBase(QWidget):
 
         if isinstance(self, PinnedOverlay):
             self.base_pixmap = state_pixmap.copy()
+            
+            # Update window size based on the restored pixmap
+            self._update_window_size_from_pixmap()
+                
+            # Reposition actionbar if visible
+            actionbar = get_actionbar()
+            if actionbar.isVisible() and actionbar.linked_widget == self:
+                actionbar._position()
         else:
             painter = QPainter(self.base_pixmap)
             painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
@@ -1763,8 +1771,7 @@ class PinnedOverlay(OverlayBase):
         self.glow_size = max(offset for _, offset in self.GLOW_LAYERS)
 
         # Size includes padding for the full glow effect
-        self.setFixedSize(self.content_rect.width() + 2 * self.glow_size,
-                         self.content_rect.height() + 2 * self.glow_size)
+        self._update_window_size_from_pixmap()
 
         # Store initial position for showEvent
         self.initial_position = position
@@ -1820,6 +1827,12 @@ class PinnedOverlay(OverlayBase):
         logical_width = int(self.base_pixmap.width() / self.base_pixmap.devicePixelRatio())
         logical_height = int(self.base_pixmap.height() / self.base_pixmap.devicePixelRatio())
         return QRect(self.glow_size, self.glow_size, logical_width, logical_height)
+
+    def _update_window_size_from_pixmap(self):
+        """Update window size based on current base_pixmap dimensions plus glow."""
+        content = self.content_rect
+        self.setFixedSize(content.width() + 2 * self.glow_size,
+                         content.height() + 2 * self.glow_size)
 
     def _handle_space_shortcut(self):
         actionbar = get_actionbar()
@@ -1930,8 +1943,7 @@ class PinnedOverlay(OverlayBase):
             self.base_pixmap.setDevicePixelRatio(dpr)
 
             # Update window size to accommodate new pixmap size plus glow
-            self.setFixedSize(new_width + 2 * self.glow_size,
-                            new_height + 2 * self.glow_size)
+            self._update_window_size_from_pixmap()
 
             # Adjust window position for top/left resizing to keep opposite corner fixed
             if 'left' in self.resize_edge or 'top' in self.resize_edge:
