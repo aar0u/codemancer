@@ -716,14 +716,14 @@ class ActionBar(QWidget):
         """Show actionbar for a specific widget."""
         logger.info(f"[ActionBar] Showing -> {linked.display_name}")
         self.linked_widget = linked
-        if isinstance(linked, CaptureOverlay):
-            self.pin_btn.setVisible(True)
-            self.pin_btn.setEnabled(True)
-            self.setParent(linked)
-        else:
+        if isinstance(linked, PinnedOverlay):
             self.pin_btn.setVisible(False)
             self.pin_btn.setEnabled(False)
             self.setParent(None)
+        else:
+            self.pin_btn.setVisible(True)
+            self.pin_btn.setEnabled(True)
+            self.setParent(linked)
         self._position()
         self.show()
 
@@ -734,17 +734,17 @@ class ActionBar(QWidget):
 
     def _position(self):
         """Position actionbar at bottom right of selection area (in parent coordinates)"""
-        if isinstance(self.linked_widget, CaptureOverlay):
+        if isinstance(self.linked_widget, PinnedOverlay):
+            x = self.linked_widget.width() - self.width()
+            y = self.linked_widget.height() + TOOLBAR_MARGIN
+            self.move(self.linked_widget.mapToGlobal(QPoint(x, y)))
+        else:
             selection_rect = self.linked_widget.content_rect
             x = selection_rect.right() - self.width() + SELECTION_BORDER_WIDTH
             y = selection_rect.bottom() + TOOLBAR_MARGIN + SELECTION_BORDER_WIDTH
             x = max(0, min(x, self.linked_widget.width() - self.width()))
             y = min(y, self.linked_widget.height() - self.height())
             self.move(x, y)
-        else:
-            x = self.linked_widget.width() - self.width()
-            y = self.linked_widget.height() + TOOLBAR_MARGIN
-            self.move(self.linked_widget.mapToGlobal(QPoint(x, y)))
 
     def choose_color(self):
         """Open color picker dialog"""
@@ -925,10 +925,15 @@ class ActionBar(QWidget):
                 if content_rect and not content_rect.contains(event.pos()):
                     pos = self._clamp_pos_to_only_pixmap(pos)
                     self.last_point_clamped = True
+                
+                # Convert window coordinates to pixmap coordinates before drawing
+                pixmap_last_point = self._window_to_pixmap_pos(self.last_point)
+                pixmap_pos = self._window_to_pixmap_pos(pos)
+                
                 painter = QPainter(self.linked_widget.base_pixmap)
                 pen = self._create_drawing_pen()
                 painter.setPen(pen)
-                painter.drawLine(self.last_point, pos)
+                painter.drawLine(pixmap_last_point, pixmap_pos)
                 self.last_point = pos
                 painter.end()
             elif draw_mode == "rectangle":
@@ -1021,6 +1026,7 @@ class ActionBar(QWidget):
             painter.drawLine(pixmap_start_point, clamped_end_point)
             self.preview_line = None
         painter.end()
+
         self.linked_widget._save_annotation_state()
         self.linked_widget.update()
 
@@ -1091,22 +1097,22 @@ class OverlayBase(QWidget):
         """Update cursor based on position and current state."""
         pressed = QApplication.mouseButtons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)
 
-        if hasattr(self, "_get_resize_edge") and self.content_rect is not None:
-            resize_edge = self._get_resize_edge(pos, self.content_rect)
-            if resize_edge:
-                self.setCursor(self._get_resize_cursor(resize_edge))
-                return
-
-        if pressed and (self.dragging or self.resizing):
+        resize_edge = self._get_resize_edge(pos)
+        if resize_edge:
+            self.setCursor(self._get_resize_cursor(resize_edge))
+        elif pressed and (self.dragging or self.resizing):
             self.setCursor(Qt.CursorShape.SizeAllCursor)
         elif get_actionbar().is_any_draw_tool_active():
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
 
-    def _get_resize_edge(self, pos: QPoint, rect: QRect) -> Optional[str]:
+    def _get_resize_edge(self, pos: QPoint) -> Optional[str]:
         """Detect which edge/corner of the selection is under the cursor."""
         margin = self.resize_handle_size
+        rect = self.content_rect
+        if rect is None:
+            return None
         expanded = rect.adjusted(-margin, -margin, margin, margin)
         if not expanded.contains(pos):
             return None
@@ -1166,7 +1172,7 @@ class OverlayBase(QWidget):
     def mousePressEvent(self, event):
         pos = event.pos()
         self._update_cursor(pos)
-        resize_edge = self._get_resize_edge(pos, self.content_rect)
+        resize_edge = self._get_resize_edge(pos)
         if resize_edge:
             self.resizing = True
             self.resize_edge = resize_edge
@@ -1174,19 +1180,20 @@ class OverlayBase(QWidget):
             if get_actionbar().handle_mouse_press(event):
                 return
             self.dragging = True
-            self.drag_offset = pos
-            if isinstance(self, CaptureOverlay):
-                self.drag_offset -= self.content_rect.topLeft()
+            if isinstance(self, PinnedOverlay):
+                self.drag_offset = pos
+            else:
+                self.drag_offset = pos - self.content_rect.topLeft()
 
     def mouseMoveEvent(self, event):
         self._update_cursor(event.pos())
         actionbar = get_actionbar()
         if self.dragging:
             new_top_left = event.pos() - self.drag_offset
-            if isinstance(self, CaptureOverlay):
-                self._move_selection(new_top_left)
-            else:
+            if isinstance(self, PinnedOverlay):
                 self.move(self.mapToGlobal(new_top_left))
+            else:
+                self._move_selection(new_top_left)
             actionbar._position()
             return
         elif self.resizing:
@@ -1207,6 +1214,8 @@ class OverlayBase(QWidget):
         elif self.resizing:
             self.resizing = False
             self.resize_edge = None
+            if isinstance(self, PinnedOverlay):
+                self._save_annotation_state()
 
     def _handle_esc_shortcut(self):
         """Esc can happen before actionbar is shown, so handle here."""
@@ -1275,12 +1284,12 @@ class OverlayBase(QWidget):
         state_pixmap = state_item['screenshot']
         selection_rect = state_item['selection_rect']
 
-        if isinstance(self, CaptureOverlay) and selection_rect is not None:
+        if isinstance(self, PinnedOverlay):
+            self.base_pixmap = state_pixmap.copy()
+        else:
             painter = QPainter(self.base_pixmap)
             painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
             painter.end()
-        else:
-            self.base_pixmap = state_pixmap.copy()
 
     def _show_hint(self, message: str, duration: int = 1000):
         """Show a temporary hint message overlay on the screen."""
