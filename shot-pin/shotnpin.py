@@ -937,11 +937,11 @@ class ActionBar(QWidget):
                 if content_rect and not content_rect.contains(event.pos()):
                     pos = self._clamp_pos_to_only_pixmap(pos)
                     self.last_point_clamped = True
-                
+
                 # Convert window coordinates to pixmap coordinates before drawing
                 pixmap_last_point = self._window_to_pixmap_pos(self.last_point)
                 pixmap_pos = self._window_to_pixmap_pos(pos)
-                
+
                 painter = QPainter(self.linked_widget.base_pixmap)
                 pen = self._create_drawing_pen()
                 painter.setPen(pen)
@@ -1226,8 +1226,7 @@ class OverlayBase(QWidget):
         elif self.resizing:
             self.resizing = False
             self.resize_edge = None
-            if isinstance(self, PinnedOverlay):
-                self._save_annotation_state()
+            self._save_annotation_state()
 
     def _handle_esc_shortcut(self):
         """Esc can happen before actionbar is shown, so handle here."""
@@ -1298,10 +1297,10 @@ class OverlayBase(QWidget):
 
         if isinstance(self, PinnedOverlay):
             self.base_pixmap = state_pixmap.copy()
-            
+
             # Update window size based on the restored pixmap
             self._update_window_size_from_pixmap()
-                
+
             # Reposition actionbar if visible
             actionbar = get_actionbar()
             if actionbar.isVisible() and actionbar.linked_widget == self:
@@ -1904,21 +1903,17 @@ class PinnedOverlay(OverlayBase):
 
         event.accept()
 
-    def _apply_resize(self, mouse_x, mouse_y, keep_aspect=False):
+    def _calculate_new_size(self, mouse_x: int, mouse_y: int, keep_aspect: bool) -> Tuple[int, int, int, int]:
         """Apply resize transformation to the pinned overlay's base_pixmap."""
-        # Adjust mouse coordinates to account for glow_size offset
         content_x = mouse_x - self.glow_size
         content_y = mouse_y - self.glow_size
 
-        # Get current logical dimensions
         current_width = int(self.base_pixmap.width() / self.base_pixmap.devicePixelRatio())
         current_height = int(self.base_pixmap.height() / self.base_pixmap.devicePixelRatio())
 
-        # Calculate new dimensions based on resize edge
         new_width = current_width
         new_height = current_height
 
-        # Determine new dimensions based on which edge/corner is being dragged
         if 'right' in self.resize_edge:
             new_width = max(MIN_SIZE, content_x)
         elif 'left' in self.resize_edge:
@@ -1929,48 +1924,43 @@ class PinnedOverlay(OverlayBase):
         elif 'top' in self.resize_edge:
             new_height = max(MIN_SIZE, current_height - content_y)
 
-        # Apply aspect ratio constraint if Shift is held
         if keep_aspect:
-            aspect_ratio = self.aspect_ratio
-            # For corner resize, determine which dimension to prioritize
             if 'right' in self.resize_edge or 'left' in self.resize_edge:
-                # Width changed, adjust height to maintain aspect ratio
-                new_height = int(new_width / aspect_ratio)
+                new_height = int(new_width / self.aspect_ratio)
             elif 'bottom' in self.resize_edge or 'top' in self.resize_edge:
-                # Height changed, adjust width to maintain aspect ratio
-                new_width = int(new_height * aspect_ratio)
+                new_width = int(new_height * self.aspect_ratio)
 
-        # Only resize if dimensions actually changed
-        if new_width != current_width or new_height != current_height:
-            # Get device pixel ratio for proper scaling
-            dpr = self.original_pixmap.devicePixelRatio()
+        return current_width, current_height, new_width, new_height
 
-            # IMPORTANT: Always scale from original_pixmap to avoid quality degradation
-            self.base_pixmap = self.original_pixmap.scaled(
-                int(new_width * dpr),
-                int(new_height * dpr),
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.base_pixmap.setDevicePixelRatio(dpr)
+    def _apply_resize(self, mouse_x: int, mouse_y: int, keep_aspect: bool = False):
+        """Apply resize transformation to the pinned overlay's base_pixmap."""
+        current_width, current_height, new_width, new_height = self._calculate_new_size(
+            mouse_x, mouse_y, keep_aspect
+        )
 
-            # Update window size to accommodate new pixmap size plus glow
-            self._update_window_size_from_pixmap()
+        if new_width == current_width and new_height == current_height:
+            return
 
-            # Adjust window position for top/left resizing to keep opposite corner fixed
-            if 'left' in self.resize_edge or 'top' in self.resize_edge:
-                current_pos = self.pos()
-                new_x = current_pos.x()
-                new_y = current_pos.y()
+        # IMPORTANT: Always scale from original_pixmap to avoid quality degradation
+        dpr = self.original_pixmap.devicePixelRatio()
+        self.base_pixmap = self.original_pixmap.scaled(
+            int(new_width * dpr),
+            int(new_height * dpr),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.base_pixmap.setDevicePixelRatio(dpr)
 
-                if 'left' in self.resize_edge:
-                    new_x = current_pos.x() + (current_width - new_width)
-                if 'top' in self.resize_edge:
-                    new_y = current_pos.y() + (current_height - new_height)
+        self._update_window_size_from_pixmap()
 
-                self.move(new_x, new_y)
+        # Adjust window position for top/left resizing to keep opposite corner fixed
+        if 'left' in self.resize_edge or 'top' in self.resize_edge:
+            current_pos = self.pos()
+            new_x = current_pos.x() + (current_width - new_width) if 'left' in self.resize_edge else current_pos.x()
+            new_y = current_pos.y() + (current_height - new_height) if 'top' in self.resize_edge else current_pos.y()
+            self.move(new_x, new_y)
 
-            self.update()
+        self.update()
 
     def _get_content_for_export(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
         return (self.base_pixmap, None)
