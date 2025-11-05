@@ -8,6 +8,7 @@ import sys
 import logging
 from pathlib import Path
 from typing import Optional, Tuple, List, Callable
+from dataclasses import dataclass
 
 from pynput import keyboard
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject
@@ -80,19 +81,30 @@ SVG_ICONS = {
     'text': "M4 7V4h16v3M9 20h6M12 4v16",
 }
 
+# ============================================================================
+# Data Classes
+# ============================================================================
+
+@dataclass
+class SnapshotItem:
+    """Represents a screenshot snapshot with selection state."""
+    screenshot: QPixmap
+    start_pos: Optional[QPoint] = None
+    end_pos: Optional[QPoint] = None
+
+@dataclass
+class AnnotationState:
+    """Represents an annotation state for undo/redo."""
+    screenshot: QPixmap
+    selection_rect: Optional[QRect] = None
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
 
 def create_svg_icon(path_data: str, color: str = "#ffffff", size: int = ICON_SIZE) -> QIcon:
-    """
-    Create a QIcon from SVG path data.
-
-    Args:
-        path_data: SVG path definition
-        color: Stroke color (hex format)
-        size: Icon size in pixels
-
-    Returns:
-        QIcon object rendered from SVG
-    """
+    """Create a QIcon from SVG path data."""
     svg_template = f'''<?xml version="1.0" encoding="UTF-8"?>
     <svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="{path_data}" stroke="{color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -109,36 +121,22 @@ def create_svg_icon(path_data: str, color: str = "#ffffff", size: int = ICON_SIZ
     return QIcon(pixmap)
 
 def get_app_icon() -> QIcon:
-    """
-    Get the application icon with correct path resolution.
-    """
+    """Get the application icon with correct path resolution."""
     icon_path = str(Path(__file__).parent / ICON_FILENAME)
     return QIcon(icon_path)
 
 def get_app_controller() -> Optional["AppController"]:
-    """
-    Safely get the global AppController from QApplication instance.
-    """
+    """Safely get the global AppController from QApplication instance."""
     app = QApplication.instance()
     return getattr(app, 'controller', None)
 
 def get_actionbar() -> Optional["ActionBar"]:
-    """
-    Safely get the shared global actionbar from the AppController.
-    """
+    """Safely get the shared global actionbar from the AppController."""
     controller = get_app_controller()
     return getattr(controller, 'actionbar', None)
 
 def get_virtual_desktop_bounds(screens) -> Tuple[int, int, int, int]:
-    """
-    Calculate the virtual desktop bounds from multiple screens.
-
-    Args:
-        screens: List of QScreen objects
-
-    Returns:
-        Tuple of (min_x, min_y, max_x, max_y) representing the virtual desktop bounds
-    """
+    """Calculate the virtual desktop bounds from multiple screens."""
     if not screens:
         return (0, 0, 0, 0)
 
@@ -156,46 +154,34 @@ def get_virtual_desktop_bounds(screens) -> Tuple[int, int, int, int]:
 
 
 class SingleInstance(QObject):
-    """
-    Uses QLocalServer/QLocalSocket for inter-process communication.
-    """
+    """Uses QLocalServer/QLocalSocket for inter-process communication."""
 
-    # Signal emitted when a new instance tries to start
     new_instance_detected = pyqtSignal(str)
 
     def __init__(self, key: str = 'shotnpin_single_instance'):
-        """
-        Initialize single instance checker.
-        """
         super().__init__()
         self.key = key
         self.server = None
 
     def is_already_running(self) -> bool:
-        """
-        Check if another instance is already running.
-        """
-        # Try to connect to existing instance
+        """Check if another instance is already running."""
         socket = QLocalSocket()
         socket.connectToServer(self.key)
 
         if socket.waitForConnected(500):
-            # Another instance is running, send a message
             socket.write(b"new_instance")
             socket.waitForBytesWritten(1000)
             socket.disconnectFromServer()
             logger.info(f"Another instance is already running (connected to '{self.key}')")
             return True
 
-        # First remove any stale server (from crashed previous instance)
         QLocalServer.removeServer(self.key)
 
         self.server = QLocalServer()
         if not self.server.listen(self.key):
             logger.error(f"Failed to create local server: {self.server.errorString()}")
-            return True  # Assume another instance is running to be safe
+            return True
 
-        # Connect signal to handle new instances trying to connect
         self.server.newConnection.connect(self._handle_new_connection)
         logger.info(f"Single instance server started (key: '{self.key}')")
         return False
@@ -224,14 +210,8 @@ class SingleInstance(QObject):
 
 
 class AppController(QObject):
-    """
-    Main application controller managing system tray and screenshot functionality.
+    """Main application controller managing system tray and screenshot functionality."""
 
-    Handles all application-level logic including tray menu, screenshot capture,
-    global hotkey registration, single instance management, and application lifecycle.
-    """
-
-    # Signal for thread-safe
     screenshot_triggered = pyqtSignal()
     pin_clipboard_triggered = pyqtSignal()
 
@@ -241,12 +221,9 @@ class AppController(QObject):
         self.tray_icon = None
         self.single_instance = single_instance
 
-        # Global screenshot snapshots with state
-        self.screenshot_snapshots: List[dict] = []  # Each item: {'screenshot': QPixmap, 'start_pos': QPoint, 'end_pos': QPoint}
-
+        self.screenshot_snapshots: List[SnapshotItem] = []
         self.actionbar = ActionBar()
 
-        # Managed window references
         self.capture_overlay = CaptureOverlay()
         self.pinned_windows: List['PinnedOverlay'] = []
 
@@ -255,7 +232,6 @@ class AppController(QObject):
         self._setup_hotkey()
         self._setup_single_instance_handler()
 
-        # Connect signals to slots
         self.screenshot_triggered.connect(self.prepare_fullscreen_capture)
         self.pin_clipboard_triggered.connect(self.pin_clipboard_image)
 
@@ -269,10 +245,7 @@ class AppController(QObject):
                 logger.error("Clipboard image is null or invalid.")
                 return
 
-            pinned = PinnedOverlay(
-                pixmap,
-                position=QCursor.pos(),
-            )
+            pinned = PinnedOverlay(pixmap, position=QCursor.pos())
             pinned.show()
 
             self.pinned_windows.append(pinned)
@@ -286,65 +259,32 @@ class AppController(QObject):
 
     def _setup_tray(self):
         """Create and configure system tray icon and menu."""
-        # Create system tray icon
         self.tray_icon = QSystemTrayIcon()
         self.tray_icon.setIcon(get_app_icon())
         self.tray_icon.setToolTip("ShotNPin - Screenshot Tool")
 
-        # Create tray menu
         tray_menu = QMenu()
-
-        # Take Screenshot action
-        screenshot_action = tray_menu.addAction("Take Screenshot")
-        screenshot_action.triggered.connect(self.prepare_fullscreen_capture)
-
-        # About action
-        about_action = tray_menu.addAction("&About")
-        about_action.triggered.connect(self.show_about)
-
+        tray_menu.addAction("Take Screenshot").triggered.connect(self.prepare_fullscreen_capture)
+        tray_menu.addAction("&About").triggered.connect(self.show_about)
         tray_menu.addSeparator()
-
-        # Exit action
-        exit_action = tray_menu.addAction("&Exit")
-        exit_action.triggered.connect(self.quit_application)
+        tray_menu.addAction("&Exit").triggered.connect(self.quit_application)
 
         self.tray_icon.setContextMenu(tray_menu)
-
-        # Double-click to take screenshot
         self.tray_icon.activated.connect(self.tray_icon_activated)
-
-        # Show the tray icon
         self.tray_icon.show()
 
-        # Verify the icon is visible
         if self.tray_icon.isVisible():
             logger.info("System tray icon created and visible")
         else:
             logger.warning("System tray icon created but not visible, retrying...")
-            # Try again after a short delay
             QTimer.singleShot(500, self._ensure_tray_visible)
-
-    def _retry_tray_setup(self):
-        """Retry setting up the system tray if it wasn't available initially."""
-        if QSystemTrayIcon.isSystemTrayAvailable():
-            logger.info("System tray now available, setting up...")
-            self._setup_tray()
-        else:
-            logger.error("System tray still not available, giving up")
-            QMessageBox.warning(
-                None,
-                "ShotNPin",
-                "System tray is not available.\nThe application will still work via the global hotkey."
-            )
 
     def _ensure_tray_visible(self):
         """Ensure the tray icon is visible."""
         if self.tray_icon and not self.tray_icon.isVisible():
             logger.warning("Tray icon not visible, attempting to show again...")
-            self.tray_icon.hide()  # Hide first
-            QTimer.singleShot(100, lambda: self.tray_icon.show())  # Then show
-
-            # Final check
+            self.tray_icon.hide()
+            QTimer.singleShot(100, lambda: self.tray_icon.show())
             QTimer.singleShot(300, self._final_tray_check)
 
     def _final_tray_check(self):
@@ -354,7 +294,6 @@ class AppController(QObject):
                 logger.info("Tray icon is now visible")
             else:
                 logger.error("Failed to show tray icon after retries")
-                # Show a notification message
                 if self.tray_icon.supportsMessages():
                     self.tray_icon.showMessage(
                         "ShotNPin",
@@ -379,7 +318,7 @@ class AppController(QObject):
             logger.info(f"Registered global hotkeys: {', '.join(hotkeys.keys())}")
         except Exception as e:
             logger.error(f"Hotkey registration failed: {e}")
-            if sys.platform == "darwin":  # macOS
+            if sys.platform == "darwin":
                 logger.info("On macOS: Please grant Accessibility permissions in System Preferences > Security & Privacy > Privacy & Accessibility")
                 QMessageBox.warning(
                     None,
@@ -404,7 +343,6 @@ class AppController(QObject):
 
     def prepare_fullscreen_capture(self):
         """Prepare fullscreen capture for user selection."""
-        # Check if a CaptureOverlay is already open
         if self.capture_overlay and self.capture_overlay.isVisible():
             logger.debug("Capture already in progress, ignoring")
             return
@@ -418,7 +356,6 @@ class AppController(QObject):
         if full_screen and not full_screen.isNull():
             self.capture_overlay.new_capture(full_screen)
             self.capture_overlay.show()
-
             logger.info(f">>> [{self.capture_overlay.display_name}] OPENED")
         else:
             logger.error("Failed to capture full_screen")
@@ -428,18 +365,14 @@ class AppController(QObject):
         if not screens:
             return None
 
-        # Calculate the virtual desktop bounds
         min_x, min_y, max_x, max_y = get_virtual_desktop_bounds(screens)
-
         virtual_width = max_x - min_x + 1
         virtual_height = max_y - min_y + 1
 
         logger.debug(f"Virtual desktop bounds: {min_x}, {min_y}, {virtual_width}x{virtual_height}")
 
-        # Get the maximum device pixel ratio among all screens
         max_dpr = max(screen.devicePixelRatio() for screen in screens)
 
-        # Create a pixmap for the entire virtual desktop with proper DPI scaling
         combined_pixmap = QPixmap(int(virtual_width * max_dpr), int(virtual_height * max_dpr))
         combined_pixmap.fill(Qt.GlobalColor.transparent)
         combined_pixmap.setDevicePixelRatio(max_dpr)
@@ -447,17 +380,14 @@ class AppController(QObject):
         painter = QPainter(combined_pixmap)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Capture each screen and paste it at the correct position
         for screen in screens:
             screen_geometry = screen.geometry()
             screen_pixmap = screen.grabWindow(0)
 
             if not screen_pixmap.isNull():
-                # Calculate position relative to virtual desktop
                 x_offset = screen_geometry.left() - min_x
                 y_offset = screen_geometry.top() - min_y
 
-                # Scale the screen pixmap to match the combined pixmap's DPR
                 if screen.devicePixelRatio() != max_dpr:
                     scaled_pixmap = screen_pixmap.scaled(
                         int(screen_geometry.width() * max_dpr),
@@ -475,39 +405,32 @@ class AppController(QObject):
 
     def _add_to_screenshot_snapshots(self, screenshot: QPixmap, start_pos: Optional[QPoint] = None, end_pos: Optional[QPoint] = None):
         """Add screenshot to snapshots with size limit."""
-        # Add to snapshots with state
-        snapshot_item = {
-            'screenshot': screenshot.copy(),
-            'start_pos': start_pos,
-            'end_pos': end_pos
-        }
-        self.screenshot_snapshots.append(snapshot_item)
+        snapshot = SnapshotItem(
+            screenshot=screenshot.copy(),
+            start_pos=start_pos,
+            end_pos=end_pos
+        )
+        self.screenshot_snapshots.append(snapshot)
 
-        # Limit snapshots size
         if len(self.screenshot_snapshots) > MAX_HISTORY:
-            # Remove oldest screenshot
             self.screenshot_snapshots.pop(0)
 
         logger.debug(f"Snapshots added: {len(self.screenshot_snapshots)}")
 
     def quit_application(self):
         """Quit the application and clean up all resources."""
-
-        # Close all managed windows
         if self.capture_overlay:
             try:
                 self.capture_overlay.close()
             except Exception as e:
                 logger.debug(f"Error closing capture overlay: {e}")
 
-        # Close all pinned windows
-        for pinned_window in self.pinned_windows[:]:  # Use slice to create a copy for safe iteration
+        for pinned_window in self.pinned_windows[:]:
             try:
                 pinned_window.close()
             except Exception as e:
                 logger.debug(f"Error closing pinned window: {e}")
 
-        # Clean up single instance lock
         if self.single_instance:
             self.single_instance._cleanup()
 
@@ -533,7 +456,6 @@ class ActionBar(QWidget):
         self.setCursor(Qt.CursorShape.ArrowCursor)
 
         self.linked_widget: Optional["OverlayBase"] = None
-        # List to store button actions in order for keyboard shortcuts
         self.button_actions = []
 
         self.font_size = DEFAULT_FONT_SIZE
@@ -604,15 +526,16 @@ class ActionBar(QWidget):
 
     def _init_buttons(self, layout: QHBoxLayout):
         """Create and add all actionbar buttons to the layout."""
-
-        tool_names = [
+        # Tool buttons
+        tool_configs = [
             ("pen", "Pen Tool"),
             ("rectangle", "Rectangle Tool"),
             ("line", "Line Tool"),
             ("text", "Text Tool"),
         ]
+
         self.tool_buttons = []
-        for idx, (mode, label) in enumerate(tool_names, start=1):
+        for idx, (mode, label) in enumerate(tool_configs, start=1):
             btn = self._create_button(
                 icon_name=mode,
                 tooltip=f"{label} ({idx})",
@@ -638,32 +561,28 @@ class ActionBar(QWidget):
 
         self.pen_width_slider = QSlider(Qt.Orientation.Horizontal)
         self.pen_width_slider.setRange(1, 20)
-        self.pen_width_slider.setValue(1)
         self.pen_width_slider.setFixedWidth(60)
         self.pen_width_slider.setSingleStep(1)
         self.pen_width_slider.valueChanged.connect(self.pen_width_label.setNum)
         self.pen_width_slider.setValue(DEFAULT_PEN_WIDTH)
         layout.addWidget(self.pen_width_slider)
 
-        # Undo/Redo buttons
-        self.undo_btn = self._create_button('undo', "Undo (Ctrl+Z)", lambda: self.linked_widget.undo_action())
-        layout.addWidget(self.undo_btn)
-
-        self.redo_btn = self._create_button('redo', "Redo (Ctrl+Y)", lambda: self.linked_widget.redo_action())
-        layout.addWidget(self.redo_btn)
-
         # Action buttons
-        self.copy_btn = self._create_button('copy', "Copy to Clipboard (Ctrl+C)", lambda: self.copy_to_clipboard())
-        layout.addWidget(self.copy_btn)
+        buttons_config = [
+            ('undo', "Undo (Ctrl+Z)", lambda: self.linked_widget.undo_action()),
+            ('redo', "Redo (Ctrl+Y)", lambda: self.linked_widget.redo_action()),
+            ('copy', "Copy to Clipboard (Ctrl+C)", self.copy_to_clipboard),
+            ('save', "Save to File (Ctrl+S)", self.save_to_file),
+            ('pin', "Pin (Ctrl+T)", lambda: self.linked_widget.pin_to_screen()),
+            ('close', "Close (Esc)", lambda: self.linked_widget.close()),
+        ]
 
-        self.save_btn = self._create_button('save', "Save to File (Ctrl+S)", lambda: self.save_to_file())
-        layout.addWidget(self.save_btn)
+        self.undo_btn, self.redo_btn, self.copy_btn, self.save_btn, self.pin_btn, self.close_btn = [
+            self._create_button(icon, tooltip, callback) for icon, tooltip, callback in buttons_config
+        ]
 
-        self.pin_btn = self._create_button('pin', "Pin (Ctrl+T)", lambda: self.linked_widget.pin_to_screen())
-        layout.addWidget(self.pin_btn)
-
-        self.close_btn = self._create_button('close', "Close (Esc)", lambda: self.linked_widget.close())
-        layout.addWidget(self.close_btn)
+        for btn in [self.undo_btn, self.redo_btn, self.copy_btn, self.save_btn, self.pin_btn, self.close_btn]:
+            layout.addWidget(btn)
 
         # Install event filter on all child widgets to prevent focus stealing
         for child in self.findChildren(QWidget):
@@ -689,10 +608,7 @@ class ActionBar(QWidget):
         return btn
 
     def tool_button_handler(self):
-        """
-        Handler for drawing tool buttons to ensure mutual exclusion,
-        but allow all to be unselected.
-        """
+        """Handler for drawing tool buttons to ensure mutual exclusion."""
         sender = self.sender()
         if sender.isChecked():
             self.deactivate_draw_tools(exclude_btn=sender)
@@ -707,7 +623,7 @@ class ActionBar(QWidget):
         return None
 
     def is_any_draw_tool_active(self) -> bool:
-        """Check if any of the drawing tool buttons (pen, rectangle, line, text) are pressed."""
+        """Check if any of the drawing tool buttons are pressed."""
         return any(btn.isChecked() for btn in self.tool_buttons)
 
     def deactivate_draw_tools(self, exclude_btn: Optional[QPushButton] = None):
@@ -720,6 +636,7 @@ class ActionBar(QWidget):
         """Show actionbar for a specific widget."""
         logger.info(f"[ActionBar] Showing -> {linked.display_name}")
         self.linked_widget = linked
+
         if isinstance(linked, PinnedOverlay):
             self.pin_btn.setVisible(False)
             self.pin_btn.setEnabled(False)
@@ -728,6 +645,7 @@ class ActionBar(QWidget):
             self.pin_btn.setVisible(True)
             self.pin_btn.setEnabled(True)
             self.setParent(linked)
+
         self._position()
         self.show()
 
@@ -737,7 +655,7 @@ class ActionBar(QWidget):
         self.hide()
 
     def _position(self):
-        """Position actionbar at bottom right of selection area (in parent coordinates)"""
+        """Position actionbar at bottom right of selection area."""
         if isinstance(self.linked_widget, PinnedOverlay):
             x = self.linked_widget.width() - self.width()
             y = self.linked_widget.height() + TOOLBAR_MARGIN
@@ -751,7 +669,7 @@ class ActionBar(QWidget):
             self.move(x, y)
 
     def choose_color(self):
-        """Open color picker dialog"""
+        """Open color picker dialog."""
         color = QColorDialog.getColor(self.current_pen_color, self.linked_widget, "Choose Pen Color")
         if color.isValid():
             self.current_pen_color = color
@@ -768,25 +686,21 @@ class ActionBar(QWidget):
         )
 
     def _add_text_annotation(self, pos: QPoint):
-        """Add text annotation at the given position"""
-        # Create a text input field at the clicked position
+        """Add text annotation at the given position."""
         if self.text_input:
             self._finalize_text_input()
 
         self.text_input_pos = pos
         self.text_input = QLineEdit(self.linked_widget)
 
-        # Style the text input
         font = QFont("Arial", self.font_size)
         font.setBold(True)
         self.text_input.setFont(font)
 
-        # Calculate text color brightness to set contrasting background
         brightness = self.current_pen_color.lightness()
         bg_color = "rgba(255, 255, 255, 180)" if brightness < 128 else "rgba(0, 0, 0, 180)"
         text_color = self.current_pen_color.name()
 
-        # No border at all to avoid offset issues
         self.text_input.setStyleSheet(f"""
             QLineEdit {{
                 background-color: {bg_color};
@@ -798,26 +712,19 @@ class ActionBar(QWidget):
             }}
         """)
 
-        # Set all margins to 0
         self.text_input.setTextMargins(0, 0, 0, 0)
         self.text_input.setContentsMargins(0, 0, 0, 0)
-
-        # Position the input so it appears where the text will be drawn
         self.text_input.setMinimumWidth(100)
         self.text_input.adjustSize()
-
-        # Position at click location - we'll adjust the final text drawing to match
         self.text_input.move(pos.x(), pos.y())
-
         self.text_input.show()
         self.text_input.setFocus()
 
-        # Connect signals
         self.text_input.returnPressed.connect(lambda: self._finalize_text_input(font))
         self.text_input.editingFinished.connect(lambda: self._finalize_text_input(font))
 
     def _finalize_text_input(self, font: Optional[QFont] = None):
-        """Finalize the text input and draw it on the screenshot"""
+        """Finalize the text input and draw it on the screenshot."""
         if not self.text_input or not self.text_input_pos:
             return
 
@@ -828,40 +735,30 @@ class ActionBar(QWidget):
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
             font.setPointSize(self.font_size)
             painter.setFont(font)
-
-            # Set up pen for text
             painter.setPen(self.current_pen_color)
 
-            # Calculate text offset based on QLineEdit's content margins
-            # QLineEdit has internal padding that varies by platform
             content_margins = self.text_input.contentsMargins()
             x_offset = content_margins.left() if content_margins.left() > 0 else 2
             y_offset = content_margins.top() if content_margins.top() > 0 else 1
 
             pos = self._window_to_pixmap_pos(self.text_input_pos)
 
-            # Draw text with calculated offsets
-            text_rect = QRect(
-                pos.x() + x_offset,
-                pos.y() + y_offset,
-                1000,  # Width (large enough for any text)
-                100    # Height (large enough for any font size)
-            )
+            text_rect = QRect(pos.x() + x_offset, pos.y() + y_offset, 1000, 100)
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, text)
             painter.end()
 
             self.linked_widget._save_annotation_state()
             self.linked_widget.update()
 
-        # Clean up
         self.text_input.deleteLater()
         self.text_input = None
         self.text_input_pos = None
 
     def _paint_shape_preview(self, painter: QPainter):
-        """Paint preview for rectangle/line drawing modes"""
+        """Paint preview for rectangle/line drawing modes."""
         if not self.linked_widget:
             return
+
         if self.preview_rect and self.get_active_draw_mode() == "rectangle":
             painter.setPen(self._create_drawing_pen(Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin))
             painter.setBrush(QColor(self.current_pen_color.red(), self.current_pen_color.green(), self.current_pen_color.blue(), 50))
@@ -872,7 +769,7 @@ class ActionBar(QWidget):
             painter.drawLine(self.preview_line[0], self.preview_line[1])
 
     def eventFilter(self, obj, event):
-        """Intercept focus events to ensures linked_widget (PinnedOverlay) maintains focus for shortcuts."""
+        """Intercept focus events to ensure linked_widget maintains focus for shortcuts."""
         if event.type() == event.Type.FocusIn and self.linked_widget:
             self.linked_widget.setFocus()
             self.linked_widget.activateWindow()
@@ -880,11 +777,11 @@ class ActionBar(QWidget):
         return False
 
     def handle_key_press(self, event):
+        """Handle key press events for shortcuts."""
         if not self.isVisible():
             return False
 
         key = event.key()
-        # Handle Ctrl modifier
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             shortcuts = {
                 Qt.Key.Key_Z: self.linked_widget.undo_action,
@@ -898,7 +795,6 @@ class ActionBar(QWidget):
                 return True
             return False
 
-        # Handle number keys
         if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
             button_index = key - Qt.Key.Key_1
             if button_index < len(self.button_actions):
@@ -906,7 +802,7 @@ class ActionBar(QWidget):
             return True
 
     def handle_mouse_press(self, event):
-        """Start drawing or place text annotation based on draw mode"""
+        """Start drawing or place text annotation based on draw mode."""
         if not self.linked_widget or not self.is_any_draw_tool_active():
             return False
 
@@ -921,7 +817,7 @@ class ActionBar(QWidget):
         return True
 
     def handle_mouse_move(self, event):
-        """Handle mouse move for drawing preview"""
+        """Handle mouse move for drawing preview."""
         if not self.linked_widget or not self.is_any_draw_tool_active():
             return False
 
@@ -932,13 +828,12 @@ class ActionBar(QWidget):
             if draw_mode == "pen":
                 if self.last_point_clamped:
                     return
-                # pen draws directly onto the screenshot
+
                 content_rect = self.linked_widget.content_rect
                 if content_rect and not content_rect.contains(event.pos()):
                     pos = self._clamp_pos_to_only_pixmap(pos)
                     self.last_point_clamped = True
 
-                # Convert window coordinates to pixmap coordinates before drawing
                 pixmap_last_point = self._window_to_pixmap_pos(self.last_point)
                 pixmap_pos = self._window_to_pixmap_pos(pos)
 
@@ -958,29 +853,24 @@ class ActionBar(QWidget):
         return True
 
     def handle_wheel_event(self, event):
-        """Finalize drawing on mouse release"""
+        """Adjust font size when scrolling with text input active."""
         if not self.linked_widget or not self.is_any_draw_tool_active():
-            return False
+            return
 
         if self.text_input and self.text_input.isVisible():
-            # Get wheel delta (positive = scroll up, negative = scroll down)
             delta = event.angleDelta().y()
-            # Adjust font size (scroll up = larger, scroll down = smaller)
             if delta > 0:
-                self.font_size = min(72, self.font_size + 2)  # Max font size: 72
+                self.font_size = min(72, self.font_size + 2)
             else:
-                self.font_size = max(8, self.font_size - 2)   # Min font size: 8
+                self.font_size = max(8, self.font_size - 2)
 
             font = self.text_input.font()
             font.setPointSize(self.font_size)
             self.text_input.setFont(font)
             self.text_input.adjustSize()
 
-            event.accept()
-        return True
-
     def _create_drawing_pen(self, cap_style=Qt.PenCapStyle.RoundCap, join_style=Qt.PenJoinStyle.RoundJoin) -> QPen:
-        """Create a standard pen for drawing operations"""
+        """Create a standard pen for drawing operations."""
         return QPen(
             self.current_pen_color,
             self.pen_width_slider.value(),
@@ -990,17 +880,18 @@ class ActionBar(QWidget):
         )
 
     def _window_to_pixmap_pos(self, pos: QPoint) -> QPoint:
+        """Convert window coordinates to pixmap coordinates."""
         if hasattr(self.linked_widget, 'glow_size'):
             return QPoint(pos.x() - self.linked_widget.glow_size, pos.y() - self.linked_widget.glow_size)
         return pos
 
     def _clamp_pos_to_only_pixmap(self, pos: QPoint, for_container_window: bool = True) -> QPoint:
+        """Clamp position to be within the pixmap bounds."""
         if not self.linked_widget:
             return pos
 
         content_rect = self.linked_widget.content_rect
 
-        # Clamp
         clamped_pos = QPoint(
             int(max(content_rect.left(), min(pos.x(), content_rect.right() - 1))),
             int(max(content_rect.top(), min(pos.y(), content_rect.bottom() - 1)))
@@ -1009,13 +900,13 @@ class ActionBar(QWidget):
         if for_container_window:
             return clamped_pos
         else:
-            # Convert to pixmap coordinates
             return self._window_to_pixmap_pos(clamped_pos)
 
     def _finalize_sharp(self, end_point: QPoint):
-        """Draw the shape to the pixmap based on current draw mode"""
+        """Draw the shape to the pixmap based on current draw mode."""
         painter = QPainter(self.linked_widget.base_pixmap)
         draw_mode = self.get_active_draw_mode()
+
         if draw_mode == "rectangle":
             pen = self._create_drawing_pen(Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin)
             painter.setPen(pen)
@@ -1043,11 +934,10 @@ class ActionBar(QWidget):
         self.linked_widget.update()
 
     def save_to_file(self):
-        """Save the current selection to a file"""
+        """Save the current selection to a file."""
         cropped, _ = self.linked_widget._get_content_for_export()
         self.linked_widget.close()
         if cropped:
-            # Open save dialog
             file_path, _ = QFileDialog.getSaveFileName(
                 None,
                 "Save Screenshot",
@@ -1061,7 +951,7 @@ class ActionBar(QWidget):
                     logger.error(f"Failed to save screenshot to {file_path}")
 
     def copy_to_clipboard(self):
-        """Copy the current selection to clipboard"""
+        """Copy the current selection to clipboard."""
         cropped, _ = self.linked_widget._get_content_for_export()
         self.linked_widget.close()
         if cropped:
@@ -1084,10 +974,9 @@ class OverlayBase(QWidget):
         self.setMouseTracking(True)
 
         self.display_id = 0
-
         self.base_pixmap: Optional[QPixmap] = None
         self.hint_label = None
-        self.annotation_states: List[dict] = []
+        self.annotation_states: List[AnnotationState] = []
 
         # Dragging state
         self.dragging = False
@@ -1104,6 +993,11 @@ class OverlayBase(QWidget):
     def content_rect(self) -> Optional[QRect]:
         """Get the current selection rectangle. Override in subclasses if applicable."""
         return None
+
+    @property
+    def display_name(self):
+        """Get display name for logging."""
+        return f"{type(self).__name__[:-7]} #{self.display_id}"
 
     def _update_cursor(self, pos: QPoint):
         """Update cursor based on position and current state."""
@@ -1172,19 +1066,19 @@ class OverlayBase(QWidget):
         return cursor_map.get(edge, Qt.CursorShape.ArrowCursor)
 
     def _apply_resize(self, mouse_x, mouse_y, keep_aspect=False):
+        """Apply resize transformation. Must be implemented by subclasses."""
         raise NotImplementedError
 
-    @property
-    def display_name(self):
-        return f"{type(self).__name__[:-7]} #{self.display_id}"
-
     def keyPressEvent(self, event):
+        """Handle key press events."""
         get_actionbar().handle_key_press(event)
 
     def mousePressEvent(self, event):
+        """Handle mouse press events."""
         pos = event.pos()
         self._update_cursor(pos)
         resize_edge = self._get_resize_edge(pos)
+
         if resize_edge:
             self.resizing = True
             self.resize_edge = resize_edge
@@ -1198,8 +1092,10 @@ class OverlayBase(QWidget):
                 self.drag_offset = pos - self.content_rect.topLeft()
 
     def mouseMoveEvent(self, event):
+        """Handle mouse move events."""
         self._update_cursor(event.pos())
         actionbar = get_actionbar()
+
         if self.dragging:
             new_top_left = event.pos() - self.drag_offset
             if isinstance(self, PinnedOverlay):
@@ -1209,15 +1105,17 @@ class OverlayBase(QWidget):
             actionbar._position()
             return
         elif self.resizing:
-            # Pass modifier state for aspect ratio preservation
             keep_aspect = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             self._apply_resize(event.pos().x(), event.pos().y(), keep_aspect)
             actionbar._position()
+
         actionbar.handle_mouse_move(event)
 
     def mouseReleaseEvent(self, event):
+        """Handle mouse release events."""
         self._update_cursor(event.pos())
         actionbar = get_actionbar()
+
         if actionbar.drawing:
             actionbar._finalize_sharp(event.pos())
             actionbar.drawing = False
@@ -1229,7 +1127,7 @@ class OverlayBase(QWidget):
             self._save_annotation_state()
 
     def _handle_esc_shortcut(self):
-        """Esc can happen before actionbar is shown, so handle here."""
+        """Handle Escape key shortcut."""
         actionbar = get_actionbar()
         if actionbar.text_input:
             actionbar.text_input.deleteLater()
@@ -1243,10 +1141,11 @@ class OverlayBase(QWidget):
             self.close()
 
     def _get_content_for_export(self):
-        """Get pixmap for export (save/copy)"""
+        """Get pixmap for export (save/copy). Must be implemented by subclasses."""
         raise NotImplementedError
 
     def pin_to_screen(self):
+        """Pin content to screen. Must be implemented by subclasses."""
         raise NotImplementedError
 
     def _init_annotation_states(self):
@@ -1255,17 +1154,17 @@ class OverlayBase(QWidget):
         self.undo_redo_index = -1
 
     def _save_annotation_state(self):
-        """Save current annotation state to states list for undo/redo"""
-
+        """Save current annotation state to states list for undo/redo."""
         # Remove any states after current index (for redo)
         self.annotation_states = self.annotation_states[:self.undo_redo_index + 1]
 
         # Add new state
         cropped, selection_rect = self._get_content_for_export()
-        self.annotation_states.append({
-            'screenshot': cropped.copy(),
-            'selection_rect': selection_rect
-        })
+        state = AnnotationState(
+            screenshot=cropped.copy(),
+            selection_rect=selection_rect
+        )
+        self.annotation_states.append(state)
         self.undo_redo_index += 1
 
         if len(self.annotation_states) > MAX_HISTORY:
@@ -1275,33 +1174,30 @@ class OverlayBase(QWidget):
         logger.debug(f"[{self.display_name}] Saved annotation state: {self.undo_redo_index + 1}")
 
     def undo_action(self):
-        """Undo last annotation"""
+        """Undo last annotation."""
         if self.undo_redo_index > 0:
             self.undo_redo_index -= 1
             self._restore_annotation_state(self.undo_redo_index)
             self.update()
 
     def redo_action(self):
-        """Redo annotation"""
+        """Redo annotation."""
         if self.undo_redo_index < len(self.annotation_states) - 1:
             self.undo_redo_index += 1
             self._restore_annotation_state(self.undo_redo_index)
             self.update()
 
     def _restore_annotation_state(self, index: int):
-        """Restore annotation state from index"""
+        """Restore annotation state from index."""
         logger.debug(f"[{self.display_name}] Restoring state {index + 1} of {len(self.annotation_states)}")
-        state_item = self.annotation_states[index]
-        state_pixmap = state_item['screenshot']
-        selection_rect = state_item['selection_rect']
+        state = self.annotation_states[index]
+        state_pixmap = state.screenshot
+        selection_rect = state.selection_rect
 
         if isinstance(self, PinnedOverlay):
             self.base_pixmap = state_pixmap.copy()
-
-            # Update window size based on the restored pixmap
             self._update_window_size_from_pixmap()
 
-            # Reposition actionbar if visible
             actionbar = get_actionbar()
             if actionbar.isVisible() and actionbar.linked_widget == self:
                 actionbar._position()
@@ -1325,33 +1221,23 @@ class OverlayBase(QWidget):
         else:
             self.hint_label.setText(message)
 
-        # Position at the center of the screen
         self.hint_label.adjustSize()
         x = (self.width() - self.hint_label.width()) // 2
         y = (self.height() - self.hint_label.height()) // 2
         self.hint_label.move(x, y)
         self.hint_label.show()
 
-        # Hide after duration
         QTimer.singleShot(duration, self.hint_label.hide)
 
     def closeEvent(self, event):
+        """Clean up actionbar and release resources when closing."""
         get_actionbar().hide()
         self.annotation_states.clear()
+        self.base_pixmap = None
+        logger.info(f"<<< [{self.display_name}] CLOSED")
 
 class CaptureOverlay(OverlayBase):
-    """
-    Fullscreen overlay for selecting and annotating screenshot areas.
-
-    Features:
-    - Drag to select rectangular area
-    - Resize selection with edge/corner handles
-    - Move selection by dragging
-    - Arrow keys for fine positioning
-    - Multiple drawing tools (pen, rectangle, line, text)
-    - Undo/redo support with history
-    - Keyboard shortcuts for all actions
-    """
+    """Fullscreen overlay for selecting and annotating screenshot areas."""
 
     def __init__(self):
         super().__init__()
@@ -1359,15 +1245,11 @@ class CaptureOverlay(OverlayBase):
         screens = QApplication.screens()
         if screens:
             min_x, min_y, max_x, max_y = get_virtual_desktop_bounds(screens)
-
             virtual_width = max_x - min_x + 1
             virtual_height = max_y - min_y + 1
-
-            # Set geometry to cover the entire desktop
             self.setGeometry(min_x, min_y, virtual_width, virtual_height)
             logger.debug(f"CaptureOverlay geometry set to virtual desktop: {min_x}, {min_y}, {virtual_width}x{virtual_height}")
         else:
-            # Fallback to primary screen if no screens found
             screen = QApplication.primaryScreen()
             if screen:
                 full_geometry = screen.geometry()
@@ -1376,6 +1258,7 @@ class CaptureOverlay(OverlayBase):
         self.setCursor(Qt.CursorShape.CrossCursor)
 
     def paintEvent(self, event):
+        """Paint the capture overlay."""
         painter = QPainter(self)
         painter.drawPixmap(0, 0, self.base_pixmap)
 
@@ -1388,6 +1271,7 @@ class CaptureOverlay(OverlayBase):
         get_actionbar()._paint_shape_preview(painter)
 
     def keyPressEvent(self, event):
+        """Handle key press events."""
         key = event.key()
 
         # Handle history navigation keys (< and >)
@@ -1408,9 +1292,9 @@ class CaptureOverlay(OverlayBase):
 
     def mousePressEvent(self, event):
         if self.content_rect is None:
+            self.selecting = True
             self.start_pos = event.pos()
             self.end_pos = event.pos()
-            self.selecting = True
         else:
             super().mousePressEvent(event)
 
@@ -1432,8 +1316,7 @@ class CaptureOverlay(OverlayBase):
             super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
-        """Handle mouse wheel events for font size adjustment when text input is active"""
-        # Don't do if the wheel event is over the actionbar
+        """Only while cursor is not over the actionbar."""
         actionbar = get_actionbar()
         if not actionbar.geometry().contains(event.position().toPoint()):
             actionbar.handle_wheel_event(event)
@@ -1441,8 +1324,8 @@ class CaptureOverlay(OverlayBase):
             super().wheelEvent(event)
 
     def new_capture(self, full_screen: QPixmap):
+        """Initialize a new capture session."""
         self.display_id += 1
-
         self.base_pixmap = full_screen
 
         # Selection state
@@ -1450,18 +1333,18 @@ class CaptureOverlay(OverlayBase):
         self.end_pos: Optional[QPoint] = None
         self.selecting = False
 
-        # Current position in screenshot snapshots (-1 means not in snapshots)
+        # Current position in screenshot snapshots
         self.current_snapshot_index: int = -1
 
     @property
     def content_rect(self) -> Optional[QRect]:
-        """Get the current selection rectangle, normalized. Returns None if selection is not valid."""
+        """Get the current selection rectangle, normalized."""
         if self.start_pos is not None and self.end_pos is not None:
             return QRect(self.start_pos, self.end_pos).normalized()
         return None
 
     def _paint_overlay_around_selection(self, painter: QPainter, selection_rect: QRect):
-        """Paint dark overlay around the selection area"""
+        """Paint dark overlay around the selection area."""
         overlay = OVERLAY_COLOR
 
         # Top area
@@ -1485,13 +1368,12 @@ class CaptureOverlay(OverlayBase):
                            self.width() - selection_rect.right() - 1, selection_rect.height(), overlay)
 
     def _paint_selection_border(self, painter: QPainter, selection_rect: QRect):
-        """Paint the selection rectangle border"""
+        """Paint the selection rectangle border."""
         border_width = SELECTION_BORDER_WIDTH if not self.selecting else SELECTION_BORDER_WIDTH - 1
         pen = QPen(SELECTION_BORDER_COLOR, border_width, Qt.PenStyle.SolidLine)
         pen.setCapStyle(Qt.PenCapStyle.SquareCap)
         painter.setPen(pen)
 
-        # Draw four sides of the border, offset to be outside the selection rect
         half = border_width // 2
         # Top
         painter.drawLine(selection_rect.left() - half, selection_rect.top() - half,
@@ -1507,8 +1389,7 @@ class CaptureOverlay(OverlayBase):
                         selection_rect.right() + half, selection_rect.bottom() + half)
 
     def _apply_resize(self, mouse_x, mouse_y, keep_aspect=False):
-        """Apply resize transformation based on current resize edge"""
-        # Map edge names to resize operations
+        """Apply resize transformation based on current resize edge."""
         resize_operations = {
             'left': lambda: self.start_pos.setX(min(mouse_x, self.end_pos.x() - MIN_SIZE)),
             'right': lambda: self.end_pos.setX(max(mouse_x, self.start_pos.x() + MIN_SIZE)),
@@ -1537,7 +1418,6 @@ class CaptureOverlay(OverlayBase):
 
     def _move_selection(self, new_pos: QPoint):
         """Move selection to a new position while maintaining its size."""
-        # Calculate the delta (offset) from start to end
         delta_x = self.end_pos.x() - self.start_pos.x()
         delta_y = self.end_pos.y() - self.start_pos.y()
 
@@ -1550,7 +1430,7 @@ class CaptureOverlay(OverlayBase):
         self.end_pos = QPoint(new_x + delta_x, new_y + delta_y)
 
     def _finalize_selection(self):
-        """Finalize selection and initialize actionbar with snapshot handling"""
+        """Finalize selection and initialize actionbar with snapshot handling."""
         selection_rect = self.content_rect
 
         # Selection too small, clear it to allow new selection
@@ -1571,19 +1451,17 @@ class CaptureOverlay(OverlayBase):
         self._save_annotation_state()
 
         get_app_controller()._add_to_screenshot_snapshots(
-                self.base_pixmap,
-                self.start_pos,
-                self.end_pos
-            )
+            self.base_pixmap,
+            self.start_pos,
+            self.end_pos
+        )
         logger.debug(f"Added screenshot to snapshots with selection: {self.start_pos} -> {self.end_pos}")
-        # Reset snapshot index since we're now on a new screenshot
         self.current_snapshot_index = -1
 
     def _handle_arrow_key_movement(self, event):
-        """Handle arrow key movement of selection"""
+        """Handle arrow key movement of selection."""
         step = KEYBOARD_STEP_LARGE if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else KEYBOARD_STEP_SMALL
 
-        # Calculate delta based on arrow key
         key_to_delta = {
             Qt.Key.Key_Left: (-step, 0),
             Qt.Key.Key_Right: (step, 0),
@@ -1599,30 +1477,19 @@ class CaptureOverlay(OverlayBase):
         self.update()
 
     def _find_current_snapshot_index(self, screenshot_snapshots):
-        """
-        Find the current snapshot index by checking stored index or comparing screenshot data.
-
-        Args:
-            screenshot_snapshots: List of screenshot snapshot items
-
-        Returns:
-            Current snapshot index, or len(screenshot_snapshots) if not found
-        """
+        """Find the current snapshot index by checking stored index or comparing screenshot data."""
         if self.current_snapshot_index >= 0 and self.current_snapshot_index < len(screenshot_snapshots):
             return self.current_snapshot_index
 
         # Try to find by comparing screenshot data
-        for i, snapshot_item in enumerate(screenshot_snapshots):
-            snapshot_screenshot = snapshot_item['screenshot']
-            if snapshot_screenshot.cacheKey() == self.base_pixmap.cacheKey():
+        for i, snapshot in enumerate(screenshot_snapshots):
+            if snapshot.screenshot.cacheKey() == self.base_pixmap.cacheKey():
                 return i
 
-        # If not found, for navigation purposes, set to len so previous index is the last one
         return len(screenshot_snapshots)
 
     def _navigate_snapshots(self, direction: int):
-        """Navigate through screenshot snapshots (different screenshots)."""
-
+        """Navigate through screenshot snapshots."""
         screenshot_snapshots = get_app_controller().screenshot_snapshots
 
         if len(screenshot_snapshots) == 0:
@@ -1639,33 +1506,19 @@ class CaptureOverlay(OverlayBase):
         elif new_index >= len(screenshot_snapshots):
             self._show_hint("Already at latest screenshot")
         else:
-            # Get the snapshot item
-            snapshot_item = screenshot_snapshots[new_index]
-
-            # Restore selection from snapshot item
+            snapshot = screenshot_snapshots[new_index]
             self._restore_selection(
-                screenshot=snapshot_item['screenshot'],
-                start_pos=snapshot_item['start_pos'],
-                end_pos=snapshot_item['end_pos'],
+                screenshot=snapshot.screenshot,
+                start_pos=snapshot.start_pos,
+                end_pos=snapshot.end_pos,
                 reset_annotation=True
             )
-
             logger.debug(f"Navigated to screenshot {new_index} with selection: {self.start_pos} -> {self.end_pos}")
-
             self.update()
-
-            # Update current snapshot index
             self.current_snapshot_index = new_index
 
     def _restore_selection(self, screenshot, start_pos, end_pos, reset_annotation=True):
-        """Restore screenshot selection and optional reset annotation states
-
-        Args:
-            screenshot: The screenshot pixmap to restore
-            start_pos: Starting position for the selection
-            end_pos: Ending position for the selection
-            reset_annotation: If True, reset annotation states (default True)
-        """
+        """Restore screenshot selection and optional reset annotation states."""
         self.base_pixmap = screenshot.copy()
         self.start_pos = start_pos
         self.end_pos = end_pos
@@ -1678,12 +1531,7 @@ class CaptureOverlay(OverlayBase):
             get_actionbar().popup_for(self)
 
     def _scale_rect(self, rect: QRect) -> QRect:
-        """
-        Scale a rectangle by device pixel ratio for high DPI displays.
-        Note: Only use this when directly accessing pixmap pixel data (like copy).
-        When drawing with QPainter on a pixmap with devicePixelRatio set,
-        Qt automatically handles the scaling, so use logical coordinates.
-        """
+        """Scale a rectangle by device pixel ratio for high DPI displays."""
         if self.base_pixmap.devicePixelRatio() <= 1.0:
             return rect
         return QRect(
@@ -1694,25 +1542,18 @@ class CaptureOverlay(OverlayBase):
         )
 
     def _get_content_for_export(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
-        """
-        Get the cropped annotated screenshot from current selection.
-
-        Returns:
-            Tuple of (cropped_pixmap, selection_rect) or (None, None) if invalid.
-        """
+        """Get the cropped annotated screenshot from current selection."""
         result: Tuple[Optional[QPixmap], Optional[QRect]] = (None, None)
         selection_rect = self.content_rect
         if selection_rect is not None and selection_rect.width() > MIN_SIZE and selection_rect.height() > MIN_SIZE:
-            # Scale the selection rect for high DPI displays
             scaled_rect = self._scale_rect(selection_rect)
             cropped = self.base_pixmap.copy(scaled_rect)
-            # Preserve the device pixel ratio on the cropped pixmap
             cropped.setDevicePixelRatio(self.base_pixmap.devicePixelRatio())
             result = (cropped, selection_rect)
         return result
 
     def pin_to_screen(self):
-        """Pin the current selection"""
+        """Pin the current selection."""
         cropped, selection_rect = self._get_content_for_export()
         if cropped:
             pinned_window = PinnedOverlay(
@@ -1721,7 +1562,7 @@ class CaptureOverlay(OverlayBase):
                 annotation_states=self.annotation_states,
                 undo_redo_index=self.undo_redo_index
             )
-            # Transfer annotation states reference, so close .clear() won't delete data
+            # Transfer annotation states reference
             self.annotation_states = []
             pinned_window.show()
 
@@ -1730,41 +1571,23 @@ class CaptureOverlay(OverlayBase):
         get_actionbar().dismiss()
         self.close()
 
-    def closeEvent(self, event):
-        """Clean up actionbar and release resources when closing"""
-        super().closeEvent(event)
-
-        self.base_pixmap = None
-        logger.info(f"<<< [{self.display_name}] CLOSED")
-        event.accept()
-
 
 class PinnedOverlay(OverlayBase):
-    """
-    Pinned window for displaying captured and annotated screenshots.
-
-    Features:
-    - Always-on-top frameless window with glow effect
-    - Draggable with left mouse button
-    - Double-click to close
-    - Space key to reopen in edit mode
-    - Esc key to close
-    - Mouse scroll to adjust transparency
-    """
+    """Pinned window for displaying captured and annotated screenshots."""
 
     # Glow layers configuration
     GLOW_LAYERS = [
-        (QColor(220, 220, 220, 80), 1),   # Inner
+        (QColor(220, 220, 220, 80), 1),
         (QColor(220, 220, 220, 60), 2),
         (QColor(220, 220, 220, 40), 3),
         (QColor(220, 220, 220, 20), 5),
-        (QColor(220, 220, 220, 10), 9),   # Outer
+        (QColor(220, 220, 220, 10), 9),
     ]
 
     _instance_counter = 0
 
     def __init__(self, pixmap: QPixmap, position: Optional[QPoint] = None,
-                 annotation_states: Optional[List[QPixmap]] = None,
+                 annotation_states: Optional[List[AnnotationState]] = None,
                  undo_redo_index: int = -1):
         super().__init__()
 
@@ -1778,20 +1601,16 @@ class PinnedOverlay(OverlayBase):
         self.aspect_ratio = self.original_pixmap.width() / self.original_pixmap.height()
 
         self.base_pixmap = pixmap
-        # Calculate glow_size dynamically from the max offset in glow_layers
         self.glow_size = max(offset for _, offset in self.GLOW_LAYERS)
 
-        # Size includes padding for the full glow effect
         self._update_window_size_from_pixmap()
-
-        # Store initial position for showEvent
         self.initial_position = position
 
         # Transparency state
-        self.opacity = 1.0  # 100% opaque by default
+        self.opacity = 1.0
         self.setWindowOpacity(self.opacity)
 
-        # Opacity label (hidden by default)
+        # Opacity label
         self.opacity_label = QLabel(self)
         self.opacity_label.setStyleSheet("""
             QLabel {
@@ -1830,7 +1649,7 @@ class PinnedOverlay(OverlayBase):
         super().showEvent(event)
         if self.initial_position:
             self.move(self.initial_position.x() - self.glow_size, self.initial_position.y() - self.glow_size)
-            self.initial_position = None  # Clear after use
+            self.initial_position = None
 
     @property
     def content_rect(self) -> Optional[QRect]:
@@ -1846,6 +1665,7 @@ class PinnedOverlay(OverlayBase):
                          content.height() + 2 * self.glow_size)
 
     def _handle_space_shortcut(self):
+        """Handle space key to show/hide actionbar."""
         actionbar = get_actionbar()
         if actionbar.isVisible():
             actionbar.dismiss()
@@ -1853,6 +1673,7 @@ class PinnedOverlay(OverlayBase):
             actionbar.popup_for(self)
 
     def paintEvent(self, event):
+        """Paint the pinned overlay with glow effect."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -1863,34 +1684,30 @@ class PinnedOverlay(OverlayBase):
             glow_rect = self.content_rect.adjusted(-offset, -offset, offset, offset)
             painter.drawRect(glow_rect)
 
-        # Draw the pixmap at the center (glow expands outward)
+        # Draw the pixmap at the center
         painter.drawPixmap(self.glow_size, self.glow_size, self.base_pixmap)
 
         get_actionbar()._paint_shape_preview(painter)
 
     def mouseDoubleClickEvent(self, event):
+        """Close window on double click."""
         self.close()
 
     def wheelEvent(self, event):
-        """Handle mouse wheel events to adjust window opacity/transparency"""
-        # Get wheel delta (positive = scroll up, negative = scroll down)
+        """Handle mouse wheel events to adjust window opacity/transparency."""
         delta = event.angleDelta().y()
 
-        # Adjust opacity (scroll up = more opaque, scroll down = more transparent)
         if delta > 0:
-            self.opacity = min(1.0, self.opacity + 0.05)  # Increase opacity (less transparent)
+            self.opacity = min(1.0, self.opacity + 0.05)
         else:
-            self.opacity = max(0.1, self.opacity - 0.05)  # Decrease opacity (more transparent), min 10%
+            self.opacity = max(0.1, self.opacity - 0.05)
 
-        # Apply the new opacity
         self.setWindowOpacity(self.opacity)
 
-        # Update and show the opacity label
         opacity_percent = int(self.opacity * 100)
         self.opacity_label.setText(f"{opacity_percent}%")
         self.opacity_label.adjustSize()
 
-        # Position the label in the top-right corner with some margin
         margin = 10
         label_x = self.width() - self.opacity_label.width() - margin
         label_y = margin
@@ -1898,13 +1715,10 @@ class PinnedOverlay(OverlayBase):
         self.opacity_label.show()
         self.opacity_label.raise_()
 
-        # Restart timer to hide label after 1 second of no scrolling
         self.opacity_timer.start(1000)
 
-        event.accept()
-
     def _calculate_new_size(self, mouse_x: int, mouse_y: int, keep_aspect: bool) -> Tuple[int, int, int, int]:
-        """Apply resize transformation to the pinned overlay's base_pixmap."""
+        """Calculate new size for resize operation."""
         content_x = mouse_x - self.glow_size
         content_y = mouse_y - self.glow_size
 
@@ -1963,11 +1777,14 @@ class PinnedOverlay(OverlayBase):
         self.update()
 
     def _get_content_for_export(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
+        """Get content for export (returns the base pixmap)."""
         return (self.base_pixmap, None)
 
     def closeEvent(self, event):
-        """Clean up and remove from pinned windows list"""
+        """Clean up and remove from pinned windows list."""
         super().closeEvent(event)
+
+        self.original_pixmap = None
 
         # Clean up timers
         opacity_timer = getattr(self, 'opacity_timer', None)
@@ -1975,19 +1792,13 @@ class PinnedOverlay(OverlayBase):
             opacity_timer.stop()
 
         pinned_list = get_app_controller().pinned_windows
-        pinned_list.remove(self)
-        self.base_pixmap = None
-        self.original_pixmap = None
-        logger.info(f"<<< [{self.display_name}] CLOSED. Remaining: {len(pinned_list)}")
-        event.accept()
+        if self in pinned_list:
+            pinned_list.remove(self)
+        logger.info(f"Remaining pinned: {len(pinned_list)}")
 
 
 class MainWindow(QMainWindow):
-    """
-    About dialog window showing application information.
-
-    Simple dialog displaying app name, hotkey, and usage instructions.
-    """
+    """About dialog window showing application information."""
 
     def __init__(self):
         super().__init__()
@@ -2041,7 +1852,6 @@ def main():
     """Initialize and run the ShotNPin application."""
     app = QApplication(sys.argv)
     app.setApplicationName("ShotNPin")
-
     app.setWindowIcon(get_app_icon())
 
     single_instance = SingleInstance()
@@ -2049,10 +1859,8 @@ def main():
         logger.info("Application startup blocked - another instance is already running")
         sys.exit(0)
 
-    # Don't quit when last window closes (we run in system tray)
     app.setQuitOnLastWindowClosed(False)
 
-    # Create app controller with single instance management
     controller = AppController(single_instance)
     app.controller = controller
 
