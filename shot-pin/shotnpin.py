@@ -39,7 +39,7 @@ MIN_SIZE = 2
 ICON_SIZE = 24
 TOOLBAR_MARGIN = 5
 TOOLBAR_SPACING = 3
-SELECTION_BORDER_WIDTH = 3
+SELECTION_BORDER_WIDTH = 2
 
 # Drawing Defaults
 DEFAULT_PEN_WIDTH = 2
@@ -830,7 +830,10 @@ class ActionBar(QWidget):
                     return
 
                 content_rect = self.linked_widget.content_rect
-                if content_rect and not content_rect.contains(event.pos()):
+                pen_half_width = self.pen_width_slider.value() // 2
+                draw_rect = content_rect.adjusted(pen_half_width, pen_half_width, -pen_half_width, -pen_half_width)
+                
+                if content_rect and not draw_rect.contains(event.pos()):
                     pos = self._clamp_pos_to_only_pixmap(pos)
                     self.last_point_clamped = True
 
@@ -892,9 +895,11 @@ class ActionBar(QWidget):
 
         content_rect = self.linked_widget.content_rect
 
+        pen_half_width = self.pen_width_slider.value() // 2
+
         clamped_pos = QPoint(
-            int(max(content_rect.left(), min(pos.x(), content_rect.right() - 1))),
-            int(max(content_rect.top(), min(pos.y(), content_rect.bottom() - 1)))
+            int(max(content_rect.left() + 1 + pen_half_width, min(pos.x(), content_rect.right() - 1 - pen_half_width))),
+            int(max(content_rect.top() + 1 + pen_half_width, min(pos.y(), content_rect.bottom() - 1 - pen_half_width)))
         )
 
         if for_container_window:
@@ -1369,25 +1374,14 @@ class CaptureOverlay(OverlayBase):
 
     def _paint_selection_border(self, painter: QPainter, selection_rect: QRect):
         """Paint the selection rectangle border."""
-        border_width = SELECTION_BORDER_WIDTH if not self.selecting else SELECTION_BORDER_WIDTH - 1
+        border_width = SELECTION_BORDER_WIDTH if self.selecting else SELECTION_BORDER_WIDTH + 1
         pen = QPen(SELECTION_BORDER_COLOR, border_width, Qt.PenStyle.SolidLine)
         pen.setCapStyle(Qt.PenCapStyle.SquareCap)
         painter.setPen(pen)
 
         half = border_width // 2
-        # Top
-        painter.drawLine(selection_rect.left() - half, selection_rect.top() - half,
-                        selection_rect.right() + half, selection_rect.top() - half)
-        # Bottom
-        painter.drawLine(selection_rect.left() - half, selection_rect.bottom() + half,
-                        selection_rect.right() + half, selection_rect.bottom() + half)
-        # Left
-        painter.drawLine(selection_rect.left() - half, selection_rect.top() - half,
-                        selection_rect.left() - half, selection_rect.bottom() + half)
-        # Right
-        painter.drawLine(selection_rect.right() + half, selection_rect.top() - half,
-                        selection_rect.right() + half, selection_rect.bottom() + half)
-
+        border_rect = selection_rect.adjusted(-half, -half, half, half)
+        painter.drawRect(border_rect)
     def _apply_resize(self, mouse_x, mouse_y, keep_aspect=False):
         """Apply resize transformation based on current resize edge."""
         resize_operations = {
