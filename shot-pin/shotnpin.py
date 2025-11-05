@@ -665,6 +665,10 @@ class ActionBar(QWidget):
         self.close_btn = self._create_button('close', "Close (Esc)", lambda: self.linked_widget.close())
         layout.addWidget(self.close_btn)
 
+        # Install event filter on all child widgets to prevent focus stealing
+        for child in self.findChildren(QWidget):
+            child.installEventFilter(self)
+
     def _create_button(
         self,
         icon_name: Optional[str] = None,
@@ -866,6 +870,14 @@ class ActionBar(QWidget):
         if self.preview_line and self.get_active_draw_mode() == "line":
             painter.setPen(self._create_drawing_pen())
             painter.drawLine(self.preview_line[0], self.preview_line[1])
+
+    def eventFilter(self, obj, event):
+        """Intercept focus events to ensures linked_widget (PinnedOverlay) maintains focus for shortcuts."""
+        if event.type() == event.Type.FocusIn and self.linked_widget:
+            self.linked_widget.setFocus()
+            self.linked_widget.activateWindow()
+            return True
+        return False
 
     def handle_key_press(self, event):
         if not self.isVisible():
