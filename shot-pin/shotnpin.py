@@ -4,20 +4,31 @@ ShotNPin - Simple screenshot, annotation, and pinning tool
 
 A lightweight application for capturing, annotating, and pinning screenshots.
 """
-import sys
+
+# ============================================================================
+# Standard Library Imports
+# ============================================================================
 import logging
+import sys
 from pathlib import Path
 from typing import Optional, Tuple, List, Callable
-from dataclasses import dataclass
 
+# ============================================================================
+# Third-party Library Imports
+# ============================================================================
+from dataclasses import dataclass
 from pynput import keyboard
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QShortcut, QKeySequence, QCursor, QIcon, QFont
+from PyQt6.QtGui import (
+    QPixmap, QPainter, QPen, QBrush, QColor, QShortcut, QKeySequence, 
+    QCursor, QIcon, QFont
+)
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, QColorDialog,
-    QSlider, QHBoxLayout, QFileDialog, QLineEdit, QSystemTrayIcon, QMenu, QMessageBox
+    QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, 
+    QColorDialog, QSlider, QHBoxLayout, QFileDialog, QLineEdit, 
+    QSystemTrayIcon, QMenu, QMessageBox
 )
 
 # ============================================================================
@@ -33,6 +44,10 @@ logger = logging.getLogger('ShotNPin')
 # Application Constants
 # ============================================================================
 
+# File and Path Constants
+ICON_FILENAME = "icons8-screenshot-100.png"
+SINGLE_INSTANCE_KEY = 'shotnpin_single_instance'
+
 # Dimensions & Sizes
 RESIZE_HANDLE_SIZE = 8
 MIN_SIZE = 2
@@ -47,7 +62,7 @@ DEFAULT_PEN_COLOR = QColor(255, 0, 0)
 DEFAULT_FONT_SIZE = 16
 MAX_HISTORY = 20
 
-# Keyboard
+# Keyboard Shortcuts
 GLOBAL_HOTKEY_CAP = '<ctrl>+<alt>+1'
 GLOBAL_HOTKEY_PIN = '<ctrl>+<alt>+2'
 KEYBOARD_STEP_SMALL = 1
@@ -62,12 +77,18 @@ BORDER_COLOR = "#555"
 SELECTION_BORDER_COLOR = QColor(0, 120, 215)
 OVERLAY_COLOR = QColor(0, 0, 0, 100)
 
-ICON_FILENAME = "icons8-screenshot-100.png"
+# Glow Effect Colors for PinnedOverlay
+GLOW_LAYERS = [
+    (QColor(220, 220, 220, 80), 1),
+    (QColor(220, 220, 220, 60), 2),
+    (QColor(220, 220, 220, 40), 3),
+    (QColor(220, 220, 220, 20), 5),
+    (QColor(220, 220, 220, 10), 9),
+]
 
 # ============================================================================
 # SVG Icons
 # ============================================================================
-
 SVG_ICONS = {
     'undo': "M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3",
     'redo': "m15 15 6-6m0 0-6-6m6 6H9a6 6 0 0 0 0 12h3",
@@ -97,7 +118,6 @@ class AnnotationState:
     """Represents an annotation state for undo/redo."""
     screenshot: QPixmap
     selection_rect: Optional[QRect] = None
-
 
 # ============================================================================
 # Helper Functions
@@ -147,22 +167,21 @@ def get_virtual_desktop_bounds(screens) -> Tuple[int, int, int, int]:
 
     return (min_x, min_y, max_x, max_y)
 
-
 # ============================================================================
 # Single Instance Management
 # ============================================================================
-
 
 class SingleInstance(QObject):
     """Uses QLocalServer/QLocalSocket for inter-process communication."""
 
     new_instance_detected = pyqtSignal(str)
 
-    def __init__(self, key: str = 'shotnpin_single_instance'):
+    def __init__(self, key: str = SINGLE_INSTANCE_KEY):
         super().__init__()
         self.key = key
         self.server = None
 
+    # Initialization Methods
     def is_already_running(self) -> bool:
         """Check if another instance is already running."""
         socket = QLocalSocket()
@@ -186,6 +205,7 @@ class SingleInstance(QObject):
         logger.info(f"Single instance server started (key: '{self.key}')")
         return False
 
+    # Event Handlers
     def _handle_new_connection(self):
         """Handle connection from a new instance trying to start."""
         connection = self.server.nextPendingConnection()
@@ -196,6 +216,7 @@ class SingleInstance(QObject):
                 self.new_instance_detected.emit(message)
             connection.close()
 
+    # Cleanup Methods
     def _cleanup(self):
         """Clean up the server."""
         if self.server:
@@ -203,15 +224,14 @@ class SingleInstance(QObject):
             QLocalServer.removeServer(self.key)
             logger.info("Single instance server cleaned up")
 
-
 # ============================================================================
 # Application Controller
 # ============================================================================
 
-
 class AppController(QObject):
     """Main application controller managing system tray and screenshot functionality."""
 
+    # Signals
     screenshot_triggered = pyqtSignal()
     pin_clipboard_triggered = pyqtSignal()
 
@@ -223,7 +243,6 @@ class AppController(QObject):
 
         self.screenshot_snapshots: List[SnapshotItem] = []
         self.actionbar = ActionBar()
-
         self.capture_overlay = CaptureOverlay()
         self.pinned_windows: List['PinnedOverlay'] = []
 
@@ -235,24 +254,7 @@ class AppController(QObject):
         self.screenshot_triggered.connect(self.prepare_fullscreen_capture)
         self.pin_clipboard_triggered.connect(self.pin_clipboard_image)
 
-    def pin_clipboard_image(self):
-        """Pin image from clipboard as a PinnedImageWindow."""
-        clipboard = QApplication.instance().clipboard()
-        mime = clipboard.mimeData()
-        if mime.hasImage():
-            pixmap = clipboard.pixmap()
-            if not pixmap or pixmap.isNull():
-                logger.error("Clipboard image is null or invalid.")
-                return
-
-            pinned = PinnedOverlay(pixmap, position=QCursor.pos())
-            pinned.show()
-
-            self.pinned_windows.append(pinned)
-            logger.info(f"Clipboard pinned to screen: {len(self.pinned_windows)}")
-        else:
-            logger.warning("No image found in clipboard to pin.")
-
+    # Initialization Methods
     def _setup_about_window(self):
         """Create the about window (hidden by default)."""
         self.about_window = MainWindow()
@@ -302,11 +304,6 @@ class AppController(QObject):
                         3000
                     )
 
-    def tray_icon_activated(self, reason):
-        """Handle tray icon activation (clicks)."""
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self.prepare_fullscreen_capture()
-
     def _setup_hotkey(self):
         """Register global hotkey."""
         try:
@@ -334,6 +331,12 @@ class AppController(QObject):
             lambda msg: self.show_about() if msg == "new_instance" else None
         )
 
+    # Event Handlers
+    def tray_icon_activated(self, reason):
+        """Handle tray icon activation (clicks)."""
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.prepare_fullscreen_capture()
+
     def show_about(self):
         """Show the about window."""
         if self.about_window:
@@ -341,6 +344,7 @@ class AppController(QObject):
             self.about_window.activateWindow()
             self.about_window.raise_()
 
+    # Screenshot Methods
     def prepare_fullscreen_capture(self):
         """Prepare fullscreen capture for user selection."""
         if self.capture_overlay and self.capture_overlay.isVisible():
@@ -403,6 +407,26 @@ class AppController(QObject):
         painter.end()
         return combined_pixmap
 
+    # Clipboard Methods
+    def pin_clipboard_image(self):
+        """Pin image from clipboard as a PinnedImageWindow."""
+        clipboard = QApplication.instance().clipboard()
+        mime = clipboard.mimeData()
+        if mime.hasImage():
+            pixmap = clipboard.pixmap()
+            if not pixmap or pixmap.isNull():
+                logger.error("Clipboard image is null or invalid.")
+                return
+
+            pinned = PinnedOverlay(pixmap, position=QCursor.pos())
+            pinned.show()
+
+            self.pinned_windows.append(pinned)
+            logger.info(f"Clipboard pinned to screen: {len(self.pinned_windows)}")
+        else:
+            logger.warning("No image found in clipboard to pin.")
+
+    # Utility Methods
     def _add_to_screenshot_snapshots(self, screenshot: QPixmap, start_pos: Optional[QPoint] = None, end_pos: Optional[QPoint] = None):
         """Add screenshot to snapshots with size limit."""
         snapshot = SnapshotItem(
@@ -417,6 +441,7 @@ class AppController(QObject):
 
         logger.debug(f"Snapshots added: {len(self.screenshot_snapshots)}")
 
+    # Application Lifecycle
     def quit_application(self):
         """Quit the application and clean up all resources."""
         if self.capture_overlay:
@@ -437,11 +462,9 @@ class AppController(QObject):
         logger.info("Application quitting")
         QApplication.quit()
 
-
 # ============================================================================
 # UI Classes
 # ============================================================================
-
 
 class ActionBar(QWidget):
     """Floating toolbar providing annotation controls and actions."""
@@ -481,6 +504,7 @@ class ActionBar(QWidget):
         self._init_buttons(layout)
         self.adjustSize()
 
+    # Initialization Methods
     def _setup_styles(self):
         """Apply stylesheet to actionbar and its widgets."""
         self.setStyleSheet(f"""
@@ -607,6 +631,7 @@ class ActionBar(QWidget):
             btn.setChecked(False)
         return btn
 
+    # Tool Management
     def tool_button_handler(self):
         """Handler for drawing tool buttons to ensure mutual exclusion."""
         sender = self.sender()
@@ -632,6 +657,7 @@ class ActionBar(QWidget):
             if btn is not exclude_btn:
                 btn.setChecked(False)
 
+    # UI Management
     def popup_for(self, linked: "OverlayBase"):
         """Show actionbar for a specific widget."""
         logger.info(f"[ActionBar] Showing -> {linked.display_name}")
@@ -668,6 +694,7 @@ class ActionBar(QWidget):
             y = min(y, self.linked_widget.height() - self.height())
             self.move(x, y)
 
+    # Color and Style Methods
     def choose_color(self):
         """Open color picker dialog."""
         color = QColorDialog.getColor(self.current_pen_color, self.linked_widget, "Choose Pen Color")
@@ -685,6 +712,7 @@ class ActionBar(QWidget):
             f"border-radius: 3px;"
         )
 
+    # Text Annotation Methods
     def _add_text_annotation(self, pos: QPoint):
         """Add text annotation at the given position."""
         if self.text_input:
@@ -754,6 +782,7 @@ class ActionBar(QWidget):
         self.text_input = None
         self.text_input_pos = None
 
+    # Drawing and Preview Methods
     def _paint_shape_preview(self, painter: QPainter):
         """Paint preview for rectangle/line drawing modes."""
         if not self.linked_widget:
@@ -768,6 +797,43 @@ class ActionBar(QWidget):
             painter.setPen(self._create_drawing_pen())
             painter.drawLine(self.preview_line[0], self.preview_line[1])
 
+    def _create_drawing_pen(self, cap_style=Qt.PenCapStyle.RoundCap, join_style=Qt.PenJoinStyle.RoundJoin) -> QPen:
+        """Create a standard pen for drawing operations."""
+        return QPen(
+            self.current_pen_color,
+            self.pen_width_slider.value(),
+            Qt.PenStyle.SolidLine,
+            cap_style,
+            join_style
+        )
+
+    # Coordinate Conversion Methods
+    def _window_to_pixmap_pos(self, pos: QPoint) -> QPoint:
+        """Convert window coordinates to pixmap coordinates."""
+        if hasattr(self.linked_widget, 'glow_size'):
+            return QPoint(pos.x() - self.linked_widget.glow_size, pos.y() - self.linked_widget.glow_size)
+        return pos
+
+    def _clamp_pos_to_only_pixmap(self, pos: QPoint, for_container_window: bool = True) -> QPoint:
+        """Clamp position to be within the pixmap bounds."""
+        if not self.linked_widget:
+            return pos
+
+        content_rect = self.linked_widget.content_rect
+
+        pen_half_width = self.pen_width_slider.value() // 2
+
+        clamped_pos = QPoint(
+            int(max(content_rect.left() + 1 + pen_half_width, min(pos.x(), content_rect.right() - 1 - pen_half_width))),
+            int(max(content_rect.top() + 1 + pen_half_width, min(pos.y(), content_rect.bottom() - 1 - pen_half_width)))
+        )
+
+        if for_container_window:
+            return clamped_pos
+        else:
+            return self._window_to_pixmap_pos(clamped_pos)
+
+    # Event Handling Methods
     def eventFilter(self, obj, event):
         """Intercept focus events to ensure linked_widget maintains focus for shortcuts."""
         if event.type() == event.Type.FocusIn and self.linked_widget:
@@ -872,41 +938,7 @@ class ActionBar(QWidget):
             self.text_input.setFont(font)
             self.text_input.adjustSize()
 
-    def _create_drawing_pen(self, cap_style=Qt.PenCapStyle.RoundCap, join_style=Qt.PenJoinStyle.RoundJoin) -> QPen:
-        """Create a standard pen for drawing operations."""
-        return QPen(
-            self.current_pen_color,
-            self.pen_width_slider.value(),
-            Qt.PenStyle.SolidLine,
-            cap_style,
-            join_style
-        )
-
-    def _window_to_pixmap_pos(self, pos: QPoint) -> QPoint:
-        """Convert window coordinates to pixmap coordinates."""
-        if hasattr(self.linked_widget, 'glow_size'):
-            return QPoint(pos.x() - self.linked_widget.glow_size, pos.y() - self.linked_widget.glow_size)
-        return pos
-
-    def _clamp_pos_to_only_pixmap(self, pos: QPoint, for_container_window: bool = True) -> QPoint:
-        """Clamp position to be within the pixmap bounds."""
-        if not self.linked_widget:
-            return pos
-
-        content_rect = self.linked_widget.content_rect
-
-        pen_half_width = self.pen_width_slider.value() // 2
-
-        clamped_pos = QPoint(
-            int(max(content_rect.left() + 1 + pen_half_width, min(pos.x(), content_rect.right() - 1 - pen_half_width))),
-            int(max(content_rect.top() + 1 + pen_half_width, min(pos.y(), content_rect.bottom() - 1 - pen_half_width)))
-        )
-
-        if for_container_window:
-            return clamped_pos
-        else:
-            return self._window_to_pixmap_pos(clamped_pos)
-
+    # Drawing Finalization
     def _finalize_sharp(self, end_point: QPoint):
         """Draw the shape to the pixmap based on current draw mode."""
         painter = QPainter(self.linked_widget.base_pixmap)
@@ -938,6 +970,7 @@ class ActionBar(QWidget):
         self.linked_widget._save_annotation_state()
         self.linked_widget.update()
 
+    # Export Methods
     def save_to_file(self):
         """Save the current selection to a file."""
         cropped, _ = self.linked_widget._get_content_for_export()
@@ -967,7 +1000,6 @@ class ActionBar(QWidget):
             else:
                 logger.error("Clipboard not available")
 
-
 class OverlayBase(QWidget):
     """Base class for overlay widgets with annotation."""
 
@@ -994,6 +1026,7 @@ class OverlayBase(QWidget):
 
         QShortcut(QKeySequence("Esc"), self).activated.connect(self._handle_esc_shortcut)
 
+    # Properties
     @property
     def content_rect(self) -> Optional[QRect]:
         """Get the current selection rectangle. Override in subclasses if applicable."""
@@ -1004,6 +1037,7 @@ class OverlayBase(QWidget):
         """Get display name for logging."""
         return f"{type(self).__name__[:-7]} #{self.display_id}"
 
+    # Cursor Management
     def _update_cursor(self, pos: QPoint):
         """Update cursor based on position and current state."""
         pressed = QApplication.mouseButtons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)
@@ -1070,10 +1104,20 @@ class OverlayBase(QWidget):
         }
         return cursor_map.get(edge, Qt.CursorShape.ArrowCursor)
 
+    # Abstract Methods (must be implemented by subclasses)
     def _apply_resize(self, mouse_x, mouse_y, keep_aspect=False):
         """Apply resize transformation. Must be implemented by subclasses."""
         raise NotImplementedError
 
+    def _get_content_for_export(self):
+        """Get pixmap for export (save/copy). Must be implemented by subclasses."""
+        raise NotImplementedError
+
+    def pin_to_screen(self):
+        """Pin content to screen. Must be implemented by subclasses."""
+        raise NotImplementedError
+
+    # Event Handlers
     def keyPressEvent(self, event):
         """Handle key press events."""
         get_actionbar().handle_key_press(event)
@@ -1145,14 +1189,7 @@ class OverlayBase(QWidget):
         else:
             self.close()
 
-    def _get_content_for_export(self):
-        """Get pixmap for export (save/copy). Must be implemented by subclasses."""
-        raise NotImplementedError
-
-    def pin_to_screen(self):
-        """Pin content to screen. Must be implemented by subclasses."""
-        raise NotImplementedError
-
+    # Undo/Redo System
     def _init_annotation_states(self):
         """Initialize annotation states for undo/redo functionality."""
         self.annotation_states = []
@@ -1211,6 +1248,7 @@ class OverlayBase(QWidget):
             painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
             painter.end()
 
+    # Hint and UI Methods
     def _show_hint(self, message: str, duration: int = 1000):
         """Show a temporary hint message overlay on the screen."""
         if self.hint_label is None:
@@ -1262,6 +1300,29 @@ class CaptureOverlay(OverlayBase):
 
         self.setCursor(Qt.CursorShape.CrossCursor)
 
+    # Initialization Methods
+    def new_capture(self, full_screen: QPixmap):
+        """Initialize a new capture session."""
+        self.display_id += 1
+        self.base_pixmap = full_screen
+
+        # Selection state
+        self.start_pos: Optional[QPoint] = None
+        self.end_pos: Optional[QPoint] = None
+        self.selecting = False
+
+        # Current position in screenshot snapshots
+        self.current_snapshot_index: int = -1
+
+    # Properties
+    @property
+    def content_rect(self) -> Optional[QRect]:
+        """Get the current selection rectangle, normalized."""
+        if self.start_pos is not None and self.end_pos is not None:
+            return QRect(self.start_pos, self.end_pos).normalized()
+        return None
+
+    # Painting Methods
     def paintEvent(self, event):
         """Paint the capture overlay."""
         painter = QPainter(self)
@@ -1275,6 +1336,42 @@ class CaptureOverlay(OverlayBase):
 
         get_actionbar()._paint_shape_preview(painter)
 
+    def _paint_overlay_around_selection(self, painter: QPainter, selection_rect: QRect):
+        """Paint dark overlay around the selection area."""
+        overlay = OVERLAY_COLOR
+
+        # Top area
+        if selection_rect.top() > 0:
+            painter.fillRect(0, 0, self.width(), selection_rect.top(), overlay)
+
+        # Bottom area
+        bottom_y = selection_rect.bottom() + 1
+        remaining_height = self.height() - bottom_y
+        if remaining_height > 0:
+            painter.fillRect(0, bottom_y, self.width(), remaining_height, overlay)
+
+        # Left area
+        if selection_rect.left() > 0:
+            painter.fillRect(0, selection_rect.top(), selection_rect.left(),
+                           selection_rect.height(), overlay)
+
+        # Right area
+        if selection_rect.right() < self.width() - 1:
+            painter.fillRect(selection_rect.right() + 1, selection_rect.top(),
+                           self.width() - selection_rect.right() - 1, selection_rect.height(), overlay)
+
+    def _paint_selection_border(self, painter: QPainter, selection_rect: QRect):
+        """Paint the selection rectangle border."""
+        border_width = SELECTION_BORDER_WIDTH if self.selecting else SELECTION_BORDER_WIDTH + 1
+        pen = QPen(SELECTION_BORDER_COLOR, border_width, Qt.PenStyle.SolidLine)
+        pen.setCapStyle(Qt.PenCapStyle.SquareCap)
+        painter.setPen(pen)
+
+        half = border_width // 2
+        border_rect = selection_rect.adjusted(-half, -half, half, half)
+        painter.drawRect(border_rect)
+
+    # Event Handlers
     def keyPressEvent(self, event):
         """Handle key press events."""
         key = event.key()
@@ -1328,60 +1425,7 @@ class CaptureOverlay(OverlayBase):
         else:
             super().wheelEvent(event)
 
-    def new_capture(self, full_screen: QPixmap):
-        """Initialize a new capture session."""
-        self.display_id += 1
-        self.base_pixmap = full_screen
-
-        # Selection state
-        self.start_pos: Optional[QPoint] = None
-        self.end_pos: Optional[QPoint] = None
-        self.selecting = False
-
-        # Current position in screenshot snapshots
-        self.current_snapshot_index: int = -1
-
-    @property
-    def content_rect(self) -> Optional[QRect]:
-        """Get the current selection rectangle, normalized."""
-        if self.start_pos is not None and self.end_pos is not None:
-            return QRect(self.start_pos, self.end_pos).normalized()
-        return None
-
-    def _paint_overlay_around_selection(self, painter: QPainter, selection_rect: QRect):
-        """Paint dark overlay around the selection area."""
-        overlay = OVERLAY_COLOR
-
-        # Top area
-        if selection_rect.top() > 0:
-            painter.fillRect(0, 0, self.width(), selection_rect.top(), overlay)
-
-        # Bottom area
-        bottom_y = selection_rect.bottom() + 1
-        remaining_height = self.height() - bottom_y
-        if remaining_height > 0:
-            painter.fillRect(0, bottom_y, self.width(), remaining_height, overlay)
-
-        # Left area
-        if selection_rect.left() > 0:
-            painter.fillRect(0, selection_rect.top(), selection_rect.left(),
-                           selection_rect.height(), overlay)
-
-        # Right area
-        if selection_rect.right() < self.width() - 1:
-            painter.fillRect(selection_rect.right() + 1, selection_rect.top(),
-                           self.width() - selection_rect.right() - 1, selection_rect.height(), overlay)
-
-    def _paint_selection_border(self, painter: QPainter, selection_rect: QRect):
-        """Paint the selection rectangle border."""
-        border_width = SELECTION_BORDER_WIDTH if self.selecting else SELECTION_BORDER_WIDTH + 1
-        pen = QPen(SELECTION_BORDER_COLOR, border_width, Qt.PenStyle.SolidLine)
-        pen.setCapStyle(Qt.PenCapStyle.SquareCap)
-        painter.setPen(pen)
-
-        half = border_width // 2
-        border_rect = selection_rect.adjusted(-half, -half, half, half)
-        painter.drawRect(border_rect)
+    # Selection Management
     def _apply_resize(self, mouse_x, mouse_y, keep_aspect=False):
         """Apply resize transformation based on current resize edge."""
         resize_operations = {
@@ -1470,6 +1514,7 @@ class CaptureOverlay(OverlayBase):
         get_actionbar()._position()
         self.update()
 
+    # Snapshot Navigation
     def _find_current_snapshot_index(self, screenshot_snapshots):
         """Find the current snapshot index by checking stored index or comparing screenshot data."""
         if self.current_snapshot_index >= 0 and self.current_snapshot_index < len(screenshot_snapshots):
@@ -1524,6 +1569,7 @@ class CaptureOverlay(OverlayBase):
         if self.content_rect is not None:
             get_actionbar().popup_for(self)
 
+    # Utility Methods
     def _scale_rect(self, rect: QRect) -> QRect:
         """Scale a rectangle by device pixel ratio for high DPI displays."""
         if self.base_pixmap.devicePixelRatio() <= 1.0:
@@ -1565,18 +1611,8 @@ class CaptureOverlay(OverlayBase):
         get_actionbar().dismiss()
         self.close()
 
-
 class PinnedOverlay(OverlayBase):
     """Pinned window for displaying captured and annotated screenshots."""
-
-    # Glow layers configuration
-    GLOW_LAYERS = [
-        (QColor(220, 220, 220, 80), 1),
-        (QColor(220, 220, 220, 60), 2),
-        (QColor(220, 220, 220, 40), 3),
-        (QColor(220, 220, 220, 20), 5),
-        (QColor(220, 220, 220, 10), 9),
-    ]
 
     _instance_counter = 0
 
@@ -1595,7 +1631,7 @@ class PinnedOverlay(OverlayBase):
         self.aspect_ratio = self.original_pixmap.width() / self.original_pixmap.height()
 
         self.base_pixmap = pixmap
-        self.glow_size = max(offset for _, offset in self.GLOW_LAYERS)
+        self.glow_size = max(offset for _, offset in GLOW_LAYERS)
 
         self._update_window_size_from_pixmap()
         self.initial_position = position
@@ -1638,6 +1674,7 @@ class PinnedOverlay(OverlayBase):
         # Keyboard shortcuts
         QShortcut(QKeySequence("Space"), self).activated.connect(self._handle_space_shortcut)
 
+    # Initialization Methods
     def showEvent(self, event):
         """Handle show event to position the window with glow effect adjustment."""
         super().showEvent(event)
@@ -1645,6 +1682,7 @@ class PinnedOverlay(OverlayBase):
             self.move(self.initial_position.x() - self.glow_size, self.initial_position.y() - self.glow_size)
             self.initial_position = None
 
+    # Properties
     @property
     def content_rect(self) -> Optional[QRect]:
         """Get the content rectangle accounting for glow effect."""
@@ -1652,6 +1690,7 @@ class PinnedOverlay(OverlayBase):
         logical_height = int(self.base_pixmap.height() / self.base_pixmap.devicePixelRatio())
         return QRect(self.glow_size, self.glow_size, logical_width, logical_height)
 
+    # Window Management
     def _update_window_size_from_pixmap(self):
         """Update window size based on current base_pixmap dimensions plus glow."""
         content = self.content_rect
@@ -1666,6 +1705,7 @@ class PinnedOverlay(OverlayBase):
         else:
             actionbar.popup_for(self)
 
+    # Painting Methods
     def paintEvent(self, event):
         """Paint the pinned overlay with glow effect."""
         painter = QPainter(self)
@@ -1673,7 +1713,7 @@ class PinnedOverlay(OverlayBase):
         painter.setPen(Qt.PenStyle.NoPen)
 
         # Draw glow effect expanding outward from the pixmap
-        for color, offset in self.GLOW_LAYERS:
+        for color, offset in GLOW_LAYERS:
             painter.setBrush(QBrush(color))
             glow_rect = self.content_rect.adjusted(-offset, -offset, offset, offset)
             painter.drawRect(glow_rect)
@@ -1683,6 +1723,7 @@ class PinnedOverlay(OverlayBase):
 
         get_actionbar()._paint_shape_preview(painter)
 
+    # Event Handlers
     def mouseDoubleClickEvent(self, event):
         """Close window on double click."""
         self.close()
@@ -1711,6 +1752,7 @@ class PinnedOverlay(OverlayBase):
 
         self.opacity_timer.start(1000)
 
+    # Resize Methods
     def _calculate_new_size(self, mouse_x: int, mouse_y: int, keep_aspect: bool) -> Tuple[int, int, int, int]:
         """Calculate new size for resize operation."""
         content_x = mouse_x - self.glow_size
@@ -1770,10 +1812,16 @@ class PinnedOverlay(OverlayBase):
 
         self.update()
 
+    # Abstract Method Implementations
     def _get_content_for_export(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
         """Get content for export (returns the base pixmap)."""
         return (self.base_pixmap, None)
 
+    def pin_to_screen(self):
+        """Pin content to screen (no-op for already pinned content)."""
+        pass
+
+    # Cleanup
     def closeEvent(self, event):
         """Clean up and remove from pinned windows list."""
         super().closeEvent(event)
@@ -1790,7 +1838,6 @@ class PinnedOverlay(OverlayBase):
             pinned_list.remove(self)
         logger.info(f"Remaining pinned: {len(pinned_list)}")
 
-
 class MainWindow(QMainWindow):
     """About dialog window showing application information."""
 
@@ -1801,6 +1848,7 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 300, 250)
         self._setup_ui()
 
+    # Initialization Methods
     def _setup_ui(self):
         """Create and configure UI elements for about dialog."""
         central_widget = QWidget()
@@ -1836,11 +1884,9 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
-
 # ============================================================================
 # Application Entry Point
 # ============================================================================
-
 
 def main():
     """Initialize and run the ShotNPin application."""
@@ -1859,7 +1905,6 @@ def main():
     app.controller = controller
 
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()
