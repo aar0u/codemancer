@@ -140,9 +140,8 @@ def create_svg_icon(path_data: str, color: str = "#ffffff", size: int = ICON_SIZ
     pixmap.fill(Qt.GlobalColor.transparent)
 
     renderer = QSvgRenderer(QByteArray(svg_template.encode()))
-    painter = QPainter(pixmap)
-    renderer.render(painter)
-    painter.end()
+    with QPainter(pixmap) as painter:
+        renderer.render(painter)
 
     icon = QIcon(pixmap)
     _ICON_CACHE[cache_key] = icon
@@ -327,14 +326,11 @@ class AppController(QObject):
         except Exception as e:
             logger.error(f"Hotkey registration failed: {e}")
             if sys.platform == "darwin":
-                logger.info("On macOS: Please grant Accessibility permissions in System Preferences > Security & Privacy > Privacy & Accessibility")
                 QMessageBox.warning(
                     None,
                     "ShotNPin",
                     "Failed to register global hotkey.\nPlease grant Accessibility permissions in System Preferences > Privacy > Accessibility."
                 )
-            else:
-                logger.info("You may need to run with administrator/root privileges for global hotkeys")
 
     def _setup_single_instance_handler(self):
         """Setup handler for when another instance tries to start."""
@@ -392,34 +388,30 @@ class AppController(QObject):
         combined_pixmap.fill(Qt.GlobalColor.transparent)
         combined_pixmap.setDevicePixelRatio(max_dpr)
 
-        painter = QPainter(combined_pixmap)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-
-        try:
+        with QPainter(combined_pixmap) as painter:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             for screen in screens:
                 screen_geometry = screen.geometry()
                 screen_pixmap = screen.grabWindow(0)
 
-                if not screen_pixmap.isNull():
-                    x_offset = screen_geometry.left() - min_x
-                    y_offset = screen_geometry.top() - min_y
+                if screen_pixmap.isNull():
+                    continue
+                    
+                x_offset = screen_geometry.left() - min_x
+                y_offset = screen_geometry.top() - min_y
 
-                    if screen.devicePixelRatio() != max_dpr:
-                        scaled_pixmap = screen_pixmap.scaled(
-                            int(screen_geometry.width() * max_dpr),
-                            int(screen_geometry.height() * max_dpr),
-                            Qt.AspectRatioMode.IgnoreAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation
-                        )
-                        scaled_pixmap.setDevicePixelRatio(max_dpr)
-                        painter.drawPixmap(x_offset, y_offset, scaled_pixmap)
-                    else:
-                        painter.drawPixmap(x_offset, y_offset, screen_pixmap)
-        except Exception as e:
-            logger.error(f"Error in screen capture operation: {e}", exc_info=True)
-            raise
-        finally:
-            painter.end()
+                if screen.devicePixelRatio() == max_dpr:
+                    painter.drawPixmap(x_offset, y_offset, screen_pixmap)
+                else:
+                    scaled_pixmap = screen_pixmap.scaled(
+                        int(screen_geometry.width() * max_dpr),
+                        int(screen_geometry.height() * max_dpr),
+                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    scaled_pixmap.setDevicePixelRatio(max_dpr)
+                    painter.drawPixmap(x_offset, y_offset, scaled_pixmap)
+
         return combined_pixmap
 
     # Clipboard Methods
@@ -460,16 +452,10 @@ class AppController(QObject):
     def _quit_application(self):
         """Quit the application and clean up all resources."""
         if self.capture_overlay:
-            try:
-                self.capture_overlay.close()
-            except Exception as e:
-                logger.debug(f"Error closing capture overlay: {e}")
+            self.capture_overlay.close()
 
         for pinned_window in self.pinned_windows[:]:
-            try:
-                pinned_window.close()
-            except Exception as e:
-                logger.debug(f"Error closing pinned window: {e}")
+            pinned_window.close()
 
         if self.single_instance:
             self.single_instance.cleanup()
@@ -491,26 +477,21 @@ class FocusPreservingEventFilter(QObject):
     def eventFilter(self, obj, event):
         if (event.type() in [
             event.Type.MouseButtonRelease,
-            event.Type.FocusOut,
-            event.Type.Leave,
-            event.Type.Hide,
-            event.Type.Close
+            event.Type.FocusOut
         ]):
-            logger.debug(f"FocusPreservingEventFilter: Detected event {event.type()} on {obj}")
             # Use QTimer to ensure the event has been processed first
             QTimer.singleShot(0, self._restore_focus)
         
         return False
     
     def _restore_focus(self):
-        if self.actionbar.linked_widget:
-            try:
-                if not self.actionbar.linked_widget.isActiveWindow():
-                    self.actionbar.linked_widget.activateWindow()
-                if not self.actionbar.linked_widget.hasFocus():
-                    self.actionbar.linked_widget.setFocus()
-            except Exception as e:
-                logger.debug(f"Error restoring focus: {e}")
+        active_widget = self.actionbar.linked_widget
+        if not active_widget:
+            return
+        if not active_widget.isActiveWindow():
+            active_widget.activateWindow()
+        if not active_widget.hasFocus():
+            active_widget.setFocus()
 
 class ActionBar(QWidget):
     """Floating toolbar providing annotation controls and actions."""
@@ -819,10 +800,8 @@ class ActionBar(QWidget):
             return
 
         text = self.text_input.text()
-
         if text:
-            painter = QPainter(self.linked_widget.base_pixmap)
-            try:
+            with QPainter(self.linked_widget.base_pixmap) as painter:
                 painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
                 painter.setFont(self._text_font())
                 painter.setPen(get_app_controller().draw_pen)
@@ -835,11 +814,6 @@ class ActionBar(QWidget):
 
                 text_rect = QRect(pos.x() + x_offset, pos.y() + y_offset, 1000, 100)
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, text)
-            except Exception as e:
-                logger.error(f"Error in text annotation: {e}", exc_info=True)
-                raise
-            finally:
-                painter.end()
 
             self.linked_widget._save_annotation_state()
             self.linked_widget.update()
@@ -852,6 +826,7 @@ class ActionBar(QWidget):
             self.text_input = None
             self.text_input_pos = None
             return True
+        return False
 
     # Drawing and Preview Methods
     def _paint_shape_preview(self, painter: QPainter):
@@ -960,15 +935,10 @@ class ActionBar(QWidget):
             pixmap_last_point = self._window_to_pixmap_pos(self.last_point)
             pixmap_pos = self._window_to_pixmap_pos(pos)
 
-            painter = QPainter(self.linked_widget.base_pixmap)
-            try:
+            with QPainter(self.linked_widget.base_pixmap) as painter:
                 painter.setPen(get_app_controller().draw_pen)
                 painter.drawLine(pixmap_last_point, pixmap_pos)
-            except Exception as e:
-                logger.error(f"Error in pen drawing: {e}", exc_info=True)
-                raise
-            finally:
-                painter.end()
+
             self.last_point = pos
         elif draw_mode == "rectangle":
             clamped_pos = self._clamp_pos_to_only_pixmap(pos)
@@ -999,10 +969,9 @@ class ActionBar(QWidget):
     # Drawing Finalization
     def _finalize_sharp(self, end_point: QPoint):
         """Draw the shape to the pixmap based on current draw mode."""
-        painter = QPainter(self.linked_widget.base_pixmap)
         pen = get_app_controller().draw_pen
-        painter.setPen(pen)
-        try:
+        with QPainter(self.linked_widget.base_pixmap) as painter:
+            painter.setPen(pen)
             draw_mode = self._get_active_draw_mode()
 
             if draw_mode == "rectangle":
@@ -1018,11 +987,6 @@ class ActionBar(QWidget):
                 clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
                 painter.drawLine(pixmap_start_point, clamped_end_point)
                 self.preview_line = None
-        except Exception as e:
-            logger.error(f"Error in shape finalization: {e}", exc_info=True)
-            raise
-        finally:
-            painter.end()
 
         self.linked_widget._save_annotation_state()
         self.linked_widget.update()
@@ -1104,7 +1068,7 @@ class OverlayBase(QWidget):
             self.setCursor(self._get_resize_cursor(resize_edge))
         elif pressed and (self.dragging or self.resizing):
             self.setCursor(Qt.CursorShape.SizeAllCursor)
-        elif get_actionbar().is_any_draw_tool_active():
+        elif (actionbar := get_actionbar()) and actionbar.is_any_draw_tool_active():
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -1177,7 +1141,8 @@ class OverlayBase(QWidget):
     # Event Handlers
     def keyPressEvent(self, event):
         """Handle key press events."""
-        get_actionbar().handle_key_press(event)
+        if (actionbar := get_actionbar()):
+            actionbar.handle_key_press(event)
 
     def mousePressEvent(self, event):
         """Handle mouse press events."""
@@ -1188,14 +1153,13 @@ class OverlayBase(QWidget):
         if resize_edge:
             self.resizing = True
             self.resize_edge = resize_edge
-        else:
-            if get_actionbar().handle_mouse_press(event):
-                return
-            self.dragging = True
-            if isinstance(self, PinnedOverlay):
-                self.drag_offset = pos
-            else:
-                self.drag_offset = pos - self.content_rect.topLeft()
+            return
+
+        if (actionbar := get_actionbar()) and actionbar.handle_mouse_press(event):
+            return
+
+        self.dragging = True
+        self.drag_offset = pos if isinstance(self, PinnedOverlay) else pos - self.content_rect.topLeft()
 
     def mouseMoveEvent(self, event):
         """Handle mouse move events."""
@@ -1240,13 +1204,10 @@ class OverlayBase(QWidget):
     def _handle_esc_shortcut(self):
         """Handle Escape key shortcut."""
         actionbar = get_actionbar()
-        if actionbar._remove_text_input():
-            return
-
-        if actionbar.is_any_draw_tool_active():
-            actionbar.deactivate_draw_tools()
-        else:
+        if not actionbar or not actionbar.is_any_draw_tool_active():
             self.close()
+        elif not actionbar._remove_text_input():
+            actionbar.deactivate_draw_tools()
 
     # Undo/Redo System
     def _init_annotation_states(self):
@@ -1300,17 +1261,11 @@ class OverlayBase(QWidget):
             self._update_window_size_from_pixmap()
 
             actionbar = get_actionbar()
-            if actionbar.isVisible() and actionbar.linked_widget == self:
+            if actionbar and actionbar.isVisible() and actionbar.linked_widget == self:
                 actionbar._position()
         else:
-            painter = QPainter(self.base_pixmap)
-            try:
+            with QPainter(self.base_pixmap) as painter:
                 painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
-            except Exception as e:
-                logger.error(f"Error in restoring annotation state: {e}", exc_info=True)
-                raise
-            finally:
-                painter.end()
 
     # Hint and UI Methods
     def _show_hint(self, message: str, duration: int = 1000):
@@ -1338,7 +1293,8 @@ class OverlayBase(QWidget):
 
     def closeEvent(self, event):
         """Clean up actionbar and release resources when closing."""
-        get_actionbar().hide()
+        if (actionbar := get_actionbar()):
+            actionbar.hide()
         self.annotation_states.clear()
         self.base_pixmap = None
         logger.info(f"<<< [{self.display_name}] CLOSED")
@@ -1389,16 +1345,17 @@ class CaptureOverlay(OverlayBase):
     # Painting Methods
     def paintEvent(self, event):
         """Paint the capture overlay."""
-        painter = QPainter(self)
-        painter.drawPixmap(0, 0, self.base_pixmap)
+        with QPainter(self) as painter:
+            painter.drawPixmap(0, 0, self.base_pixmap)
 
-        if self.content_rect is not None:
-            self._paint_overlay_around_selection(painter, self.content_rect)
-            self._paint_selection_border(painter, self.content_rect)
-        else:
-            painter.fillRect(self.rect(), OVERLAY_COLOR)
+            if self.content_rect is not None:
+                self._paint_overlay_around_selection(painter, self.content_rect)
+                self._paint_selection_border(painter, self.content_rect)
+            else:
+                painter.fillRect(self.rect(), OVERLAY_COLOR)
 
-        get_actionbar()._paint_shape_preview(painter)
+            if (actionbar := get_actionbar()):
+                actionbar._paint_shape_preview(painter)
 
     def _paint_overlay_around_selection(self, painter: QPainter, selection_rect: QRect):
         """Paint dark overlay around the selection area."""
@@ -1485,10 +1442,10 @@ class CaptureOverlay(OverlayBase):
     def wheelEvent(self, event):
         """Only while cursor is not over the actionbar."""
         actionbar = get_actionbar()
-        if not actionbar.geometry().contains(event.position().toPoint()):
-            actionbar.handle_wheel_event(event)
-        else:
+        if not actionbar or actionbar.geometry().contains(event.position().toPoint()):
             super().wheelEvent(event)
+        else:
+            actionbar.handle_wheel_event(event)
 
     # Selection Management
     def _apply_resize(self, mouse_x, mouse_y, keep_aspect=False):
@@ -1547,8 +1504,8 @@ class CaptureOverlay(OverlayBase):
         self.end_pos = selection_rect.bottomRight()
         self.update()
 
-        actionbar = get_actionbar()
-        actionbar.popup_for(self)
+        if (actionbar := get_actionbar()):
+            actionbar.popup_for(self)
 
         self._init_annotation_states()
         self._save_annotation_state()
@@ -1576,7 +1533,8 @@ class CaptureOverlay(OverlayBase):
         new_pos = self.start_pos + QPoint(delta_x, delta_y)
 
         self._move_selection(new_pos)
-        get_actionbar()._position()
+        if (actionbar := get_actionbar()):
+            actionbar._position()
         self.update()
 
     # Snapshot Navigation
@@ -1631,8 +1589,8 @@ class CaptureOverlay(OverlayBase):
             self._init_annotation_states()
             self._save_annotation_state()
 
-        if self.content_rect is not None:
-            get_actionbar().popup_for(self)
+        if self.content_rect is not None and (actionbar := get_actionbar()):
+            actionbar.popup_for(self)
 
     # Utility Methods
     def _scale_rect(self, rect: QRect) -> QRect:
@@ -1659,7 +1617,8 @@ class CaptureOverlay(OverlayBase):
 
     def pin_to_screen(self):
         """Pin the current selection."""
-        get_actionbar().dismiss()
+        if (actionbar := get_actionbar()):
+            actionbar.dismiss()
         content, selection_rect = self._get_content_for_export()
         if content:
             pinned_window = PinnedOverlay(
@@ -1765,6 +1724,8 @@ class PinnedOverlay(OverlayBase):
     def _handle_space_shortcut(self):
         """Handle space key to show/hide actionbar."""
         actionbar = get_actionbar()
+        if not actionbar:
+            return
         if actionbar.isVisible():
             actionbar.dismiss()
         else:
@@ -1773,20 +1734,21 @@ class PinnedOverlay(OverlayBase):
     # Painting Methods
     def paintEvent(self, event):
         """Paint the pinned overlay with glow effect."""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
+        with QPainter(self) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
 
-        # Draw glow effect expanding outward from the pixmap
-        for color, offset in GLOW_LAYERS:
-            painter.setBrush(QBrush(color))
-            glow_rect = self.content_rect.adjusted(-offset, -offset, offset, offset)
-            painter.drawRect(glow_rect)
+            # Draw glow effect expanding outward from the pixmap
+            for color, offset in GLOW_LAYERS:
+                painter.setBrush(QBrush(color))
+                glow_rect = self.content_rect.adjusted(-offset, -offset, offset, offset)
+                painter.drawRect(glow_rect)
 
-        # Draw the pixmap at the center
-        painter.drawPixmap(self.glow_size, self.glow_size, self.base_pixmap)
+            # Draw the pixmap at the center
+            painter.drawPixmap(self.glow_size, self.glow_size, self.base_pixmap)
 
-        get_actionbar()._paint_shape_preview(painter)
+            if (actionbar := get_actionbar()):
+                actionbar._paint_shape_preview(painter)
 
     # Event Handlers
     def mouseDoubleClickEvent(self, event):
