@@ -217,7 +217,7 @@ class SingleInstance(QObject):
             connection.close()
 
     # Cleanup Methods
-    def _cleanup(self):
+    def cleanup(self):
         """Clean up the server."""
         if self.server:
             self.server.close()
@@ -251,8 +251,8 @@ class AppController(QObject):
         self._setup_hotkey()
         self._setup_single_instance_handler()
 
-        self.screenshot_triggered.connect(self.prepare_fullscreen_capture)
-        self.pin_clipboard_triggered.connect(self.pin_clipboard_image)
+        self.screenshot_triggered.connect(self._prepare_fullscreen_capture)
+        self.pin_clipboard_triggered.connect(self._pin_clipboard_image)
 
     # Initialization Methods
     def _setup_about_window(self):
@@ -266,13 +266,13 @@ class AppController(QObject):
         self.tray_icon.setToolTip("ShotNPin - Screenshot Tool")
 
         tray_menu = QMenu()
-        tray_menu.addAction("Take Screenshot").triggered.connect(self.prepare_fullscreen_capture)
-        tray_menu.addAction("&About").triggered.connect(self.show_about)
+        tray_menu.addAction("Take Screenshot").triggered.connect(self._prepare_fullscreen_capture)
+        tray_menu.addAction("&About").triggered.connect(self._show_about)
         tray_menu.addSeparator()
-        tray_menu.addAction("&Exit").triggered.connect(self.quit_application)
+        tray_menu.addAction("&Exit").triggered.connect(self._quit_application)
 
         self.tray_icon.setContextMenu(tray_menu)
-        self.tray_icon.activated.connect(self.tray_icon_activated)
+        self.tray_icon.activated.connect(self._tray_icon_activated)
         self.tray_icon.show()
 
         if self.tray_icon.isVisible():
@@ -328,16 +328,16 @@ class AppController(QObject):
     def _setup_single_instance_handler(self):
         """Setup handler for when another instance tries to start."""
         self.single_instance.new_instance_detected.connect(
-            lambda msg: self.show_about() if msg == "new_instance" else None
+            lambda msg: self._show_about() if msg == "new_instance" else None
         )
 
     # Event Handlers
-    def tray_icon_activated(self, reason):
+    def _tray_icon_activated(self, reason):
         """Handle tray icon activation (clicks)."""
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self.prepare_fullscreen_capture()
+            self._prepare_fullscreen_capture()
 
-    def show_about(self):
+    def _show_about(self):
         """Show the about window."""
         if self.about_window:
             self.about_window.show()
@@ -345,7 +345,7 @@ class AppController(QObject):
             self.about_window.raise_()
 
     # Screenshot Methods
-    def prepare_fullscreen_capture(self):
+    def _prepare_fullscreen_capture(self):
         """Prepare fullscreen capture for user selection."""
         if self.capture_overlay and self.capture_overlay.isVisible():
             logger.debug("Capture already in progress, ignoring")
@@ -384,31 +384,35 @@ class AppController(QObject):
         painter = QPainter(combined_pixmap)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        for screen in screens:
-            screen_geometry = screen.geometry()
-            screen_pixmap = screen.grabWindow(0)
+        try:
+            for screen in screens:
+                screen_geometry = screen.geometry()
+                screen_pixmap = screen.grabWindow(0)
 
-            if not screen_pixmap.isNull():
-                x_offset = screen_geometry.left() - min_x
-                y_offset = screen_geometry.top() - min_y
+                if not screen_pixmap.isNull():
+                    x_offset = screen_geometry.left() - min_x
+                    y_offset = screen_geometry.top() - min_y
 
-                if screen.devicePixelRatio() != max_dpr:
-                    scaled_pixmap = screen_pixmap.scaled(
-                        int(screen_geometry.width() * max_dpr),
-                        int(screen_geometry.height() * max_dpr),
-                        Qt.AspectRatioMode.IgnoreAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation
-                    )
-                    scaled_pixmap.setDevicePixelRatio(max_dpr)
-                    painter.drawPixmap(x_offset, y_offset, scaled_pixmap)
-                else:
-                    painter.drawPixmap(x_offset, y_offset, screen_pixmap)
-
-        painter.end()
+                    if screen.devicePixelRatio() != max_dpr:
+                        scaled_pixmap = screen_pixmap.scaled(
+                            int(screen_geometry.width() * max_dpr),
+                            int(screen_geometry.height() * max_dpr),
+                            Qt.AspectRatioMode.IgnoreAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation
+                        )
+                        scaled_pixmap.setDevicePixelRatio(max_dpr)
+                        painter.drawPixmap(x_offset, y_offset, scaled_pixmap)
+                    else:
+                        painter.drawPixmap(x_offset, y_offset, screen_pixmap)
+        except Exception as e:
+            logger.error(f"Error in screen capture operation: {e}", exc_info=True)
+            raise
+        finally:
+            painter.end()
         return combined_pixmap
 
     # Clipboard Methods
-    def pin_clipboard_image(self):
+    def _pin_clipboard_image(self):
         """Pin image from clipboard as a PinnedImageWindow."""
         clipboard = QApplication.instance().clipboard()
         mime = clipboard.mimeData()
@@ -442,7 +446,7 @@ class AppController(QObject):
         logger.debug(f"Snapshots added: {len(self.screenshot_snapshots)}")
 
     # Application Lifecycle
-    def quit_application(self):
+    def _quit_application(self):
         """Quit the application and clean up all resources."""
         if self.capture_overlay:
             try:
@@ -457,7 +461,7 @@ class AppController(QObject):
                 logger.debug(f"Error closing pinned window: {e}")
 
         if self.single_instance:
-            self.single_instance._cleanup()
+            self.single_instance.cleanup()
 
         logger.info("Application quitting")
         QApplication.quit()
@@ -581,7 +585,7 @@ class ActionBar(QWidget):
             btn = self._create_button(
                 icon_name=mode,
                 tooltip=f"{label} ({idx})",
-                callback=self.tool_button_handler,
+                callback=self._tool_button_handler,
                 checkable=True
             )
             btn.setProperty("mode", mode)
@@ -590,8 +594,8 @@ class ActionBar(QWidget):
             self.button_actions.append(lambda b=btn: b.click())
 
         # Color picker button
-        self.color_btn = self._create_button(tooltip=f"Choose Color ({len(self.button_actions) + 1})", callback=self.choose_color)
-        self.update_color_button(self.current_pen_color)
+        self.color_btn = self._create_button(tooltip=f"Choose Color ({len(self.button_actions) + 1})", callback=self._choose_color)
+        self._update_color_button(self.current_pen_color)
         layout.addWidget(self.color_btn)
         self.button_actions.append(lambda: self.color_btn.click())
 
@@ -613,8 +617,8 @@ class ActionBar(QWidget):
         buttons_config = [
             ('undo', "Undo (Ctrl+Z)", lambda: self.linked_widget.undo_action()),
             ('redo', "Redo (Ctrl+Y)", lambda: self.linked_widget.redo_action()),
-            ('copy', "Copy to Clipboard (Ctrl+C)", self.copy_to_clipboard),
-            ('save', "Save to File (Ctrl+S)", self.save_to_file),
+            ('copy', "Copy to Clipboard (Ctrl+C)", self._copy_to_clipboard),
+            ('save', "Save to File (Ctrl+S)", self._save_to_file),
             ('pin', "Pin (Ctrl+T)", lambda: self.linked_widget.pin_to_screen()),
             ('close', "Close (Esc)", lambda: self.linked_widget.close()),
         ]
@@ -650,7 +654,7 @@ class ActionBar(QWidget):
         return btn
 
     # Tool Management
-    def tool_button_handler(self):
+    def _tool_button_handler(self):
         """Handler for drawing tool buttons to ensure mutual exclusion."""
         sender = self.sender()
         if sender.isChecked():
@@ -658,7 +662,7 @@ class ActionBar(QWidget):
         else:
             sender.setChecked(False)
 
-    def get_active_draw_mode(self) -> Optional[str]:
+    def _get_active_draw_mode(self) -> Optional[str]:
         """Get the currently active drawing mode."""
         for btn in self.tool_buttons:
             if btn.isChecked():
@@ -713,14 +717,14 @@ class ActionBar(QWidget):
             self.move(x, y)
 
     # Color and Style Methods
-    def choose_color(self):
+    def _choose_color(self):
         """Open color picker dialog."""
         color = QColorDialog.getColor(self.current_pen_color, self.linked_widget, "Choose Pen Color")
         if color.isValid():
             self.current_pen_color = color
-            self.update_color_button(color)
+            self._update_color_button(color)
 
-    def update_color_button(self, color: QColor):
+    def _update_color_button(self, color: QColor):
         """Update color button appearance based on selected color."""
         text_color = 'white' if color.lightness() < 128 else 'black'
         self.color_btn.setStyleSheet(
@@ -778,20 +782,25 @@ class ActionBar(QWidget):
 
         if text:
             painter = QPainter(self.linked_widget.base_pixmap)
-            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-            font.setPointSize(self.font_size)
-            painter.setFont(font)
-            painter.setPen(self.current_pen_color)
+            try:
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+                font.setPointSize(self.font_size)
+                painter.setFont(font)
+                painter.setPen(self.current_pen_color)
 
-            content_margins = self.text_input.contentsMargins()
-            x_offset = content_margins.left() if content_margins.left() > 0 else 2
-            y_offset = content_margins.top() if content_margins.top() > 0 else 1
+                content_margins = self.text_input.contentsMargins()
+                x_offset = content_margins.left() if content_margins.left() > 0 else 2
+                y_offset = content_margins.top() if content_margins.top() > 0 else 1
 
-            pos = self._window_to_pixmap_pos(self.text_input_pos)
+                pos = self._window_to_pixmap_pos(self.text_input_pos)
 
-            text_rect = QRect(pos.x() + x_offset, pos.y() + y_offset, 1000, 100)
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, text)
-            painter.end()
+                text_rect = QRect(pos.x() + x_offset, pos.y() + y_offset, 1000, 100)
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, text)
+            except Exception as e:
+                logger.error(f"Error in text annotation: {e}", exc_info=True)
+                raise
+            finally:
+                painter.end()
 
             self.linked_widget._save_annotation_state()
             self.linked_widget.update()
@@ -806,12 +815,12 @@ class ActionBar(QWidget):
         if not self.linked_widget:
             return
 
-        if self.preview_rect and self.get_active_draw_mode() == "rectangle":
+        if self.preview_rect and self._get_active_draw_mode() == "rectangle":
             painter.setPen(self._create_drawing_pen(Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin))
             painter.setBrush(QColor(self.current_pen_color.red(), self.current_pen_color.green(), self.current_pen_color.blue(), 50))
             painter.drawRect(self.preview_rect)
 
-        if self.preview_line and self.get_active_draw_mode() == "line":
+        if self.preview_line and self._get_active_draw_mode() == "line":
             painter.setPen(self._create_drawing_pen())
             painter.drawLine(self.preview_line[0], self.preview_line[1])
 
@@ -861,8 +870,8 @@ class ActionBar(QWidget):
             shortcuts = {
                 Qt.Key.Key_Z: self.linked_widget.undo_action,
                 Qt.Key.Key_Y: self.linked_widget.redo_action,
-                Qt.Key.Key_S: self.save_to_file,
-                Qt.Key.Key_C: self.copy_to_clipboard,
+                Qt.Key.Key_S: self._save_to_file,
+                Qt.Key.Key_C: self._copy_to_clipboard,
                 Qt.Key.Key_T: self.pin_btn.click,
             }
             if key in shortcuts:
@@ -882,7 +891,7 @@ class ActionBar(QWidget):
             return False
 
         pos = event.pos()
-        if self.get_active_draw_mode() == "text":
+        if self._get_active_draw_mode() == "text":
             self._add_text_annotation(pos)
         else:
             self.drawing = True
@@ -898,7 +907,7 @@ class ActionBar(QWidget):
 
         pos = event.pos()
         if self.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
-            draw_mode = self.get_active_draw_mode()
+            draw_mode = self._get_active_draw_mode()
 
             if draw_mode == "pen":
                 if self.last_point_clamped:
@@ -916,11 +925,16 @@ class ActionBar(QWidget):
                 pixmap_pos = self._window_to_pixmap_pos(pos)
 
                 painter = QPainter(self.linked_widget.base_pixmap)
-                pen = self._create_drawing_pen()
-                painter.setPen(pen)
-                painter.drawLine(pixmap_last_point, pixmap_pos)
+                try:
+                    pen = self._create_drawing_pen()
+                    painter.setPen(pen)
+                    painter.drawLine(pixmap_last_point, pixmap_pos)
+                except Exception as e:
+                    logger.error(f"Error in pen drawing: {e}", exc_info=True)
+                    raise
+                finally:
+                    painter.end()
                 self.last_point = pos
-                painter.end()
             elif draw_mode == "rectangle":
                 clamped_pos = self._clamp_pos_to_only_pixmap(pos)
                 self.preview_rect = QRect(self.draw_start_point, clamped_pos).normalized()
@@ -951,36 +965,41 @@ class ActionBar(QWidget):
     def _finalize_sharp(self, end_point: QPoint):
         """Draw the shape to the pixmap based on current draw mode."""
         painter = QPainter(self.linked_widget.base_pixmap)
-        draw_mode = self.get_active_draw_mode()
+        try:
+            draw_mode = self._get_active_draw_mode()
 
-        if draw_mode == "rectangle":
-            pen = self._create_drawing_pen(Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin)
-            painter.setPen(pen)
-            painter.setBrush(QColor(
-                self.current_pen_color.red(),
-                self.current_pen_color.green(),
-                self.current_pen_color.blue(),
-                50
-            ))
-            pixmap_start_point = self._clamp_pos_to_only_pixmap(self.draw_start_point, False)
-            clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
-            rect = QRect(pixmap_start_point, clamped_end_point).normalized()
-            painter.drawRect(rect)
-            self.preview_rect = None
-        elif draw_mode == "line":
-            pen = self._create_drawing_pen()
-            painter.setPen(pen)
-            pixmap_start_point = self._clamp_pos_to_only_pixmap(self.draw_start_point, False)
-            clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
-            painter.drawLine(pixmap_start_point, clamped_end_point)
-            self.preview_line = None
-        painter.end()
+            if draw_mode == "rectangle":
+                pen = self._create_drawing_pen(Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin)
+                painter.setPen(pen)
+                painter.setBrush(QColor(
+                    self.current_pen_color.red(),
+                    self.current_pen_color.green(),
+                    self.current_pen_color.blue(),
+                    50
+                ))
+                pixmap_start_point = self._clamp_pos_to_only_pixmap(self.draw_start_point, False)
+                clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
+                rect = QRect(pixmap_start_point, clamped_end_point).normalized()
+                painter.drawRect(rect)
+                self.preview_rect = None
+            elif draw_mode == "line":
+                pen = self._create_drawing_pen()
+                painter.setPen(pen)
+                pixmap_start_point = self._clamp_pos_to_only_pixmap(self.draw_start_point, False)
+                clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
+                painter.drawLine(pixmap_start_point, clamped_end_point)
+                self.preview_line = None
+        except Exception as e:
+            logger.error(f"Error in shape finalization: {e}", exc_info=True)
+            raise
+        finally:
+            painter.end()
 
         self.linked_widget._save_annotation_state()
         self.linked_widget.update()
 
     # Export Methods
-    def save_to_file(self):
+    def _save_to_file(self):
         """Save the current selection to a file."""
         cropped, _ = self.linked_widget._get_content_for_export()
         self.linked_widget.close()
@@ -997,7 +1016,7 @@ class ActionBar(QWidget):
                 else:
                     logger.error(f"Failed to save screenshot to {file_path}")
 
-    def copy_to_clipboard(self):
+    def _copy_to_clipboard(self):
         """Copy the current selection to clipboard."""
         cropped, _ = self.linked_widget._get_content_for_export()
         self.linked_widget.close()
@@ -1254,8 +1273,13 @@ class OverlayBase(QWidget):
                 actionbar._position()
         else:
             painter = QPainter(self.base_pixmap)
-            painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
-            painter.end()
+            try:
+                painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
+            except Exception as e:
+                logger.error(f"Error in restoring annotation state: {e}", exc_info=True)
+                raise
+            finally:
+                painter.end()
 
     # Hint and UI Methods
     def _show_hint(self, message: str, duration: int = 1000):
