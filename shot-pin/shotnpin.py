@@ -254,6 +254,9 @@ class AppController(QObject):
         self.capture_overlay = CaptureOverlay()
         self.pinned_windows: List['PinnedOverlay'] = []
 
+        self.border_pen = QPen(SELECTION_BORDER_COLOR, SELECTION_BORDER_WIDTH, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin)
+        self.draw_pen = QPen(DEFAULT_PEN_COLOR, DEFAULT_PEN_WIDTH, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+
         self._setup_about_window()
         self._setup_tray()
         self._setup_hotkey()
@@ -635,7 +638,7 @@ class ActionBar(QWidget):
         def on_pen_width_changed(value):
             self.pen_width_label.setNum(value)
             if self.linked_widget is not None:
-                self.linked_widget.draw_pen.setWidth(value)
+                get_app_controller().draw_pen.setWidth(value)
         self.pen_width_slider.valueChanged.connect(on_pen_width_changed)
         self.pen_width_slider.setValue(DEFAULT_PEN_WIDTH)
         layout.addWidget(self.pen_width_slider)
@@ -749,7 +752,7 @@ class ActionBar(QWidget):
     # Color and Style Methods
     def _choose_color(self):
         """Open color picker dialog."""
-        pen = self.linked_widget.draw_pen
+        pen = get_app_controller().draw_pen
         color = QColorDialog.getColor(pen.color(), self.linked_widget, "Choose Pen Color")
         if color.isValid():
             pen.setColor(color)
@@ -783,9 +786,10 @@ class ActionBar(QWidget):
 
         self.text_input.setFont(self._text_font())
 
-        brightness = self.linked_widget.draw_pen.color().lightness()
+        pen = get_app_controller().draw_pen
+        brightness = pen.color().lightness()
         bg_color = "rgba(255, 255, 255, 180)" if brightness < 128 else "rgba(0, 0, 0, 180)"
-        text_color = self.linked_widget.draw_pen.color().name()
+        text_color = pen.color().name()
 
         self.text_input.setStyleSheet(f"""
             QLineEdit {{
@@ -811,20 +815,19 @@ class ActionBar(QWidget):
 
     def _finalize_text_input(self):
         """Finalize the text input and draw it on the screenshot."""
-        text_input = self.text_input
-        if not text_input or not self.text_input_pos:
+        if not self.text_input or not self.text_input_pos:
             return
 
-        text = text_input.text()
+        text = self.text_input.text()
 
         if text:
             painter = QPainter(self.linked_widget.base_pixmap)
             try:
                 painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
                 painter.setFont(self._text_font())
-                painter.setPen(self.linked_widget.draw_pen)
+                painter.setPen(get_app_controller().draw_pen)
 
-                content_margins = text_input.contentsMargins()
+                content_margins = self.text_input.contentsMargins()
                 x_offset = content_margins.left() if content_margins.left() > 0 else 2
                 y_offset = content_margins.top() if content_margins.top() > 0 else 1
 
@@ -840,10 +843,15 @@ class ActionBar(QWidget):
 
             self.linked_widget._save_annotation_state()
             self.linked_widget.update()
+        
+        self._remove_text_input()
 
-        text_input.deleteLater()
-        self.text_input = None
-        self.text_input_pos = None
+    def _remove_text_input(self):
+        if self.text_input:
+            self.text_input.deleteLater()
+            self.text_input = None
+            self.text_input_pos = None
+            return True
 
     # Drawing and Preview Methods
     def _paint_shape_preview(self, painter: QPainter):
@@ -851,14 +859,14 @@ class ActionBar(QWidget):
         if not self.linked_widget:
             return
 
+        pen = get_app_controller().draw_pen
+        painter.setPen(pen)
         if self.preview_rect and self._get_active_draw_mode() == "rectangle":
-            painter.setPen(self.linked_widget.draw_pen)
-            pen_color = self.linked_widget.draw_pen.color()
+            pen_color = pen.color()
             painter.setBrush(QColor(pen_color.red(), pen_color.green(), pen_color.blue(), 50))
             painter.drawRect(self.preview_rect)
 
         if self.preview_line and self._get_active_draw_mode() == "line":
-            painter.setPen(self.linked_widget.draw_pen)
             painter.drawLine(self.preview_line[0], self.preview_line[1])
 
     # Coordinate Conversion Methods
@@ -930,45 +938,46 @@ class ActionBar(QWidget):
     def handle_mouse_move(self, event):
         """Handle mouse move for drawing preview."""
         if not self.linked_widget or not self.is_any_draw_tool_active():
-            return False
+            return
+        
+        if not self.drawing:
+            return
 
         pos = event.pos()
-        if self.drawing and (event.buttons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)):
-            draw_mode = self._get_active_draw_mode()
+        draw_mode = self._get_active_draw_mode()
+        if draw_mode == "pen":
+            if self.last_point_clamped:
+                return
 
-            if draw_mode == "pen":
-                if self.last_point_clamped:
-                    return
+            content_rect = self.linked_widget.content_rect
+            pen_half_width = self.pen_width_slider.value() // 2
+            draw_rect = content_rect.adjusted(pen_half_width, pen_half_width, -pen_half_width, -pen_half_width)
+            
+            if content_rect and not draw_rect.contains(event.pos()):
+                pos = self._clamp_pos_to_only_pixmap(pos)
+                self.last_point_clamped = True
 
-                content_rect = self.linked_widget.content_rect
-                pen_half_width = self.pen_width_slider.value() // 2
-                draw_rect = content_rect.adjusted(pen_half_width, pen_half_width, -pen_half_width, -pen_half_width)
-                
-                if content_rect and not draw_rect.contains(event.pos()):
-                    pos = self._clamp_pos_to_only_pixmap(pos)
-                    self.last_point_clamped = True
+            pixmap_last_point = self._window_to_pixmap_pos(self.last_point)
+            pixmap_pos = self._window_to_pixmap_pos(pos)
 
-                pixmap_last_point = self._window_to_pixmap_pos(self.last_point)
-                pixmap_pos = self._window_to_pixmap_pos(pos)
+            painter = QPainter(self.linked_widget.base_pixmap)
+            try:
+                painter.setPen(get_app_controller().draw_pen)
+                painter.drawLine(pixmap_last_point, pixmap_pos)
+            except Exception as e:
+                logger.error(f"Error in pen drawing: {e}", exc_info=True)
+                raise
+            finally:
+                painter.end()
+            self.last_point = pos
+        elif draw_mode == "rectangle":
+            clamped_pos = self._clamp_pos_to_only_pixmap(pos)
+            self.preview_rect = QRect(self.draw_start_point, clamped_pos).normalized()
+        elif draw_mode == "line":
+            clamped_pos = self._clamp_pos_to_only_pixmap(pos)
+            self.preview_line = (self.draw_start_point, clamped_pos)
 
-                painter = QPainter(self.linked_widget.base_pixmap)
-                try:
-                    painter.setPen(self.linked_widget.draw_pen)
-                    painter.drawLine(pixmap_last_point, pixmap_pos)
-                except Exception as e:
-                    logger.error(f"Error in pen drawing: {e}", exc_info=True)
-                    raise
-                finally:
-                    painter.end()
-                self.last_point = pos
-            elif draw_mode == "rectangle":
-                clamped_pos = self._clamp_pos_to_only_pixmap(pos)
-                self.preview_rect = QRect(self.draw_start_point, clamped_pos).normalized()
-            elif draw_mode == "line":
-                clamped_pos = self._clamp_pos_to_only_pixmap(pos)
-                self.preview_line = (self.draw_start_point, clamped_pos)
-            self.linked_widget.update()
-        return True
+        self.linked_widget.update()
 
     def handle_wheel_event(self, event):
         """Adjust font size when scrolling with text input active."""
@@ -991,12 +1000,13 @@ class ActionBar(QWidget):
     def _finalize_sharp(self, end_point: QPoint):
         """Draw the shape to the pixmap based on current draw mode."""
         painter = QPainter(self.linked_widget.base_pixmap)
-        painter.setPen(self.linked_widget.draw_pen)
+        pen = get_app_controller().draw_pen
+        painter.setPen(pen)
         try:
             draw_mode = self._get_active_draw_mode()
 
             if draw_mode == "rectangle":
-                pen_color = self.linked_widget.draw_pen.color()
+                pen_color = pen.color()
                 painter.setBrush(QColor(pen_color.red(), pen_color.green(), pen_color.blue(), 50))
                 pixmap_start_point = self._clamp_pos_to_only_pixmap(self.draw_start_point, False)
                 clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
@@ -1061,9 +1071,6 @@ class OverlayBase(QWidget):
         self.base_pixmap: Optional[QPixmap] = None
         self.hint_label = None
         self.annotation_states: List[AnnotationState] = []
-
-        self.border_pen = QPen(SELECTION_BORDER_COLOR, SELECTION_BORDER_WIDTH, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin)
-        self.draw_pen = QPen(DEFAULT_PEN_COLOR, DEFAULT_PEN_WIDTH, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
 
         # Dragging state
         self.dragging = False
@@ -1193,6 +1200,11 @@ class OverlayBase(QWidget):
     def mouseMoveEvent(self, event):
         """Handle mouse move events."""
         self._update_cursor(event.pos())
+
+        pressed = QApplication.mouseButtons() & (Qt.MouseButton.LeftButton | Qt.MouseButton.RightButton)
+        if not pressed:
+            return
+
         actionbar = get_actionbar()
 
         if self.dragging:
@@ -1228,8 +1240,7 @@ class OverlayBase(QWidget):
     def _handle_esc_shortcut(self):
         """Handle Escape key shortcut."""
         actionbar = get_actionbar()
-        if actionbar.text_input:
-            actionbar._finalize_text_input()
+        if actionbar._remove_text_input():
             return
 
         if actionbar.is_any_draw_tool_active():
@@ -1417,8 +1428,9 @@ class CaptureOverlay(OverlayBase):
         """Paint the selection rectangle border."""
         border_width = SELECTION_BORDER_WIDTH if self.selecting else SELECTION_BORDER_WIDTH + 1
         
-        self.border_pen.setWidth(border_width)
-        painter.setPen(self.border_pen)
+        pen = get_app_controller().border_pen
+        pen.setWidth(border_width)
+        painter.setPen(pen)
 
         half = border_width // 2
         border_rect = selection_rect.adjusted(-half, -half, half, half)
