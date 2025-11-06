@@ -269,7 +269,7 @@ class AppController(QObject):
         tray_menu.addAction("Take Screenshot").triggered.connect(self._prepare_fullscreen_capture)
         tray_menu.addAction("&About").triggered.connect(self._show_about)
         tray_menu.addSeparator()
-        tray_menu.addAction("&Exit").triggered.connect(self._quit_application)
+        tray_menu.addAction("&Quit").triggered.connect(self._quit_application)
 
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self._tray_icon_activated)
@@ -478,12 +478,28 @@ class FocusPreservingEventFilter(QObject):
         self.actionbar = actionbar
     
     def eventFilter(self, obj, event):
-        if event.type() == event.Type.MouseButtonRelease and self.actionbar.linked_widget:
-            QTimer.singleShot(0, lambda: (
-                self.actionbar.linked_widget.activateWindow(),
-                self.actionbar.linked_widget.setFocus()
-            ))
+        if (event.type() in [
+            event.Type.MouseButtonRelease,
+            event.Type.FocusOut,
+            event.Type.Leave,
+            event.Type.Hide,
+            event.Type.Close
+        ]):
+            logger.debug(f"FocusPreservingEventFilter: Detected event {event.type()} on {obj}")
+            # Use QTimer to ensure the event has been processed first
+            QTimer.singleShot(0, self._restore_focus)
+        
         return False
+    
+    def _restore_focus(self):
+        if self.actionbar.linked_widget:
+            try:
+                if not self.actionbar.linked_widget.isActiveWindow():
+                    self.actionbar.linked_widget.activateWindow()
+                if not self.actionbar.linked_widget.hasFocus():
+                    self.actionbar.linked_widget.setFocus()
+            except Exception as e:
+                logger.debug(f"Error restoring focus: {e}")
 
 class ActionBar(QWidget):
     """Floating toolbar providing annotation controls and actions."""
@@ -699,6 +715,9 @@ class ActionBar(QWidget):
 
     def dismiss(self):
         """Hide the actionbar."""
+        if self.text_input:
+            self._finalize_text_input()
+            
         self.deactivate_draw_tools()
         self.hide()
 
@@ -734,6 +753,13 @@ class ActionBar(QWidget):
             f"border-radius: 3px;"
         )
 
+    def _text_font(self) -> QFont:
+        """Get the font used for text annotations."""
+        font = QFont()
+        font.setPointSize(self.font_size)
+        font.setBold(True)
+        return font
+
     # Text Annotation Methods
     def _add_text_annotation(self, pos: QPoint):
         """Add text annotation at the given position."""
@@ -743,9 +769,7 @@ class ActionBar(QWidget):
         self.text_input_pos = pos
         self.text_input = QLineEdit(self.linked_widget)
 
-        font = QFont("Arial", self.font_size)
-        font.setBold(True)
-        self.text_input.setFont(font)
+        self.text_input.setFont(self._text_font())
 
         brightness = self.current_pen_color.lightness()
         bg_color = "rgba(255, 255, 255, 180)" if brightness < 128 else "rgba(0, 0, 0, 180)"
@@ -770,25 +794,25 @@ class ActionBar(QWidget):
         self.text_input.show()
         self.text_input.setFocus()
 
-        self.text_input.returnPressed.connect(lambda: self._finalize_text_input(font))
-        self.text_input.editingFinished.connect(lambda: self._finalize_text_input(font))
+        self.text_input.returnPressed.connect(self._finalize_text_input)
+        self.text_input.editingFinished.connect(self._finalize_text_input)
 
-    def _finalize_text_input(self, font: Optional[QFont] = None):
+    def _finalize_text_input(self):
         """Finalize the text input and draw it on the screenshot."""
-        if not self.text_input or not self.text_input_pos:
+        text_input = self.text_input
+        if not text_input or not self.text_input_pos:
             return
 
-        text = self.text_input.text()
+        text = text_input.text()
 
         if text:
             painter = QPainter(self.linked_widget.base_pixmap)
             try:
                 painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-                font.setPointSize(self.font_size)
-                painter.setFont(font)
+                painter.setFont(self._text_font())
                 painter.setPen(self.current_pen_color)
 
-                content_margins = self.text_input.contentsMargins()
+                content_margins = text_input.contentsMargins()
                 x_offset = content_margins.left() if content_margins.left() > 0 else 2
                 y_offset = content_margins.top() if content_margins.top() > 0 else 1
 
@@ -805,7 +829,7 @@ class ActionBar(QWidget):
             self.linked_widget._save_annotation_state()
             self.linked_widget.update()
 
-        self.text_input.deleteLater()
+        text_input.deleteLater()
         self.text_input = None
         self.text_input_pos = None
 
@@ -1001,9 +1025,9 @@ class ActionBar(QWidget):
     # Export Methods
     def _save_to_file(self):
         """Save the current selection to a file."""
-        cropped, _ = self.linked_widget._get_content_for_export()
+        content, _ = self.linked_widget._get_content_for_export()
         self.linked_widget.close()
-        if cropped:
+        if content:
             file_path, _ = QFileDialog.getSaveFileName(
                 None,
                 "Save Screenshot",
@@ -1011,19 +1035,19 @@ class ActionBar(QWidget):
                 "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;All Files (*)"
             )
             if file_path:
-                if cropped.save(file_path):
+                if content.save(file_path):
                     logger.info(f"Screenshot saved to {file_path}")
                 else:
                     logger.error(f"Failed to save screenshot to {file_path}")
 
     def _copy_to_clipboard(self):
         """Copy the current selection to clipboard."""
-        cropped, _ = self.linked_widget._get_content_for_export()
+        content, _ = self.linked_widget._get_content_for_export()
         self.linked_widget.close()
-        if cropped:
+        if content:
             clipboard = QApplication.clipboard()
             if clipboard:
-                clipboard.setPixmap(cropped)
+                clipboard.setPixmap(content)
                 logger.info("Screenshot copied to clipboard")
             else:
                 logger.error("Clipboard not available")
@@ -1207,9 +1231,7 @@ class OverlayBase(QWidget):
         """Handle Escape key shortcut."""
         actionbar = get_actionbar()
         if actionbar.text_input:
-            actionbar.text_input.deleteLater()
-            actionbar.text_input = None
-            actionbar.text_input_pos = None
+            actionbar._finalize_text_input()
             return
 
         if actionbar.is_any_draw_tool_active():
@@ -1229,9 +1251,9 @@ class OverlayBase(QWidget):
         self.annotation_states = self.annotation_states[:self.undo_redo_index + 1]
 
         # Add new state
-        cropped, selection_rect = self._get_content_for_export()
+        content, selection_rect = self._get_content_for_export()
         state = AnnotationState(
-            screenshot=cropped.copy(),
+            screenshot=content.copy(),
             selection_rect=selection_rect
         )
         self.annotation_states.append(state)
@@ -1615,22 +1637,23 @@ class CaptureOverlay(OverlayBase):
         )
 
     def _get_content_for_export(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
-        """Get the cropped annotated screenshot from current selection."""
+        """Get the annotated screenshot from current selection."""
         result: Tuple[Optional[QPixmap], Optional[QRect]] = (None, None)
         selection_rect = self.content_rect
         if selection_rect is not None and selection_rect.width() > MIN_SIZE and selection_rect.height() > MIN_SIZE:
             scaled_rect = self._scale_rect(selection_rect)
-            cropped = self.base_pixmap.copy(scaled_rect)
-            cropped.setDevicePixelRatio(self.base_pixmap.devicePixelRatio())
-            result = (cropped, selection_rect)
+            content = self.base_pixmap.copy(scaled_rect)
+            content.setDevicePixelRatio(self.base_pixmap.devicePixelRatio())
+            result = (content, selection_rect)
         return result
 
     def pin_to_screen(self):
         """Pin the current selection."""
-        cropped, selection_rect = self._get_content_for_export()
-        if cropped:
+        get_actionbar().dismiss()
+        content, selection_rect = self._get_content_for_export()
+        if content:
             pinned_window = PinnedOverlay(
-                cropped,
+                content,
                 position=selection_rect.topLeft(),
                 annotation_states=self.annotation_states,
                 undo_redo_index=self.undo_redo_index
@@ -1641,7 +1664,6 @@ class CaptureOverlay(OverlayBase):
 
             get_app_controller().pinned_windows.append(pinned_window)
             logger.info(f"Screenshot pinned to screen: {len(get_app_controller().pinned_windows)}")
-        get_actionbar().dismiss()
         self.close()
 
 class PinnedOverlay(OverlayBase):
@@ -1934,8 +1956,7 @@ def main():
 
     app.setQuitOnLastWindowClosed(False)
 
-    controller = AppController(single_instance)
-    app.controller = controller
+    app.controller = AppController(single_instance)
 
     sys.exit(app.exec())
 
