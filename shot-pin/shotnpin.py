@@ -123,8 +123,14 @@ class AnnotationState:
 # Helper Functions
 # ============================================================================
 
+_ICON_CACHE: dict[tuple[str, str, int], QIcon] = {}
+
 def create_svg_icon(path_data: str, color: str = "#ffffff", size: int = ICON_SIZE) -> QIcon:
-    """Create a QIcon from SVG path data."""
+    """Create a QIcon from SVG path data with caching for performance."""
+    cache_key = (path_data, color, size)
+    if cache_key in _ICON_CACHE:
+        return _ICON_CACHE[cache_key]
+
     svg_template = f'''<?xml version="1.0" encoding="UTF-8"?>
     <svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="{path_data}" stroke="{color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -138,7 +144,9 @@ def create_svg_icon(path_data: str, color: str = "#ffffff", size: int = ICON_SIZ
     renderer.render(painter)
     painter.end()
 
-    return QIcon(pixmap)
+    icon = QIcon(pixmap)
+    _ICON_CACHE[cache_key] = icon
+    return icon
 
 def get_app_icon() -> QIcon:
     """Get the application icon with correct path resolution."""
