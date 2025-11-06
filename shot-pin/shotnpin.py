@@ -466,6 +466,21 @@ class AppController(QObject):
 # UI Classes
 # ============================================================================
 
+class FocusPreservingEventFilter(QObject):
+    """Event filter to preserve focus on linked widgets when actionbar widgets gain focus."""
+    
+    def __init__(self, actionbar: "ActionBar"):
+        super().__init__()
+        self.actionbar = actionbar
+    
+    def eventFilter(self, obj, event):
+        if event.type() == event.Type.MouseButtonRelease and self.actionbar.linked_widget:
+            QTimer.singleShot(0, lambda: (
+                self.actionbar.linked_widget.activateWindow(),
+                self.actionbar.linked_widget.setFocus()
+            ))
+        return False
+
 class ActionBar(QWidget):
     """Floating toolbar providing annotation controls and actions."""
 
@@ -480,6 +495,9 @@ class ActionBar(QWidget):
 
         self.linked_widget: Optional["OverlayBase"] = None
         self.button_actions = []
+
+        # Create event filter for focus preservation
+        self.focus_filter = FocusPreservingEventFilter(self)
 
         self.font_size = DEFAULT_FONT_SIZE
         self.current_pen_color = DEFAULT_PEN_COLOR
@@ -610,7 +628,7 @@ class ActionBar(QWidget):
 
         # Install event filter on all child widgets to prevent focus stealing
         for child in self.findChildren(QWidget):
-            child.installEventFilter(self)
+            child.installEventFilter(self.focus_filter)
 
     def _create_button(
         self,
@@ -832,15 +850,6 @@ class ActionBar(QWidget):
             return clamped_pos
         else:
             return self._window_to_pixmap_pos(clamped_pos)
-
-    # Event Handling Methods
-    def eventFilter(self, obj, event):
-        """Intercept focus events to ensure linked_widget maintains focus for shortcuts."""
-        if event.type() == event.Type.FocusIn and self.linked_widget:
-            self.linked_widget.setFocus()
-            self.linked_widget.activateWindow()
-            return True
-        return False
 
     def handle_key_press(self, event):
         """Handle key press events for shortcuts."""
