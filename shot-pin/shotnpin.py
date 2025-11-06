@@ -528,7 +528,6 @@ class ActionBar(QWidget):
         self.focus_filter = FocusPreservingEventFilter(self)
 
         self.font_size = DEFAULT_FONT_SIZE
-        self.current_pen_color = DEFAULT_PEN_COLOR
 
         # Text input state
         self.text_input: Optional[QLineEdit] = None
@@ -619,7 +618,7 @@ class ActionBar(QWidget):
 
         # Color picker button
         self.color_btn = self._create_button(tooltip=f"Choose Color ({len(self.button_actions) + 1})", callback=self._choose_color)
-        self._update_color_button(self.current_pen_color)
+        self._update_color_button(DEFAULT_PEN_COLOR)
         layout.addWidget(self.color_btn)
         self.button_actions.append(lambda: self.color_btn.click())
 
@@ -633,7 +632,11 @@ class ActionBar(QWidget):
         self.pen_width_slider.setRange(1, 20)
         self.pen_width_slider.setFixedWidth(60)
         self.pen_width_slider.setSingleStep(1)
-        self.pen_width_slider.valueChanged.connect(self.pen_width_label.setNum)
+        def on_pen_width_changed(value):
+            self.pen_width_label.setNum(value)
+            if self.linked_widget is not None:
+                self.linked_widget.draw_pen.setWidth(value)
+        self.pen_width_slider.valueChanged.connect(on_pen_width_changed)
         self.pen_width_slider.setValue(DEFAULT_PEN_WIDTH)
         layout.addWidget(self.pen_width_slider)
 
@@ -746,9 +749,10 @@ class ActionBar(QWidget):
     # Color and Style Methods
     def _choose_color(self):
         """Open color picker dialog."""
-        color = QColorDialog.getColor(self.current_pen_color, self.linked_widget, "Choose Pen Color")
+        pen = self.linked_widget.draw_pen
+        color = QColorDialog.getColor(pen.color(), self.linked_widget, "Choose Pen Color")
         if color.isValid():
-            self.current_pen_color = color
+            pen.setColor(color)
             self._update_color_button(color)
 
     def _update_color_button(self, color: QColor):
@@ -779,9 +783,9 @@ class ActionBar(QWidget):
 
         self.text_input.setFont(self._text_font())
 
-        brightness = self.current_pen_color.lightness()
+        brightness = self.linked_widget.draw_pen.color().lightness()
         bg_color = "rgba(255, 255, 255, 180)" if brightness < 128 else "rgba(0, 0, 0, 180)"
-        text_color = self.current_pen_color.name()
+        text_color = self.linked_widget.draw_pen.color().name()
 
         self.text_input.setStyleSheet(f"""
             QLineEdit {{
@@ -818,7 +822,7 @@ class ActionBar(QWidget):
             try:
                 painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
                 painter.setFont(self._text_font())
-                painter.setPen(self.current_pen_color)
+                painter.setPen(self.linked_widget.draw_pen)
 
                 content_margins = text_input.contentsMargins()
                 x_offset = content_margins.left() if content_margins.left() > 0 else 2
@@ -848,23 +852,14 @@ class ActionBar(QWidget):
             return
 
         if self.preview_rect and self._get_active_draw_mode() == "rectangle":
-            painter.setPen(self._create_drawing_pen(Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin))
-            painter.setBrush(QColor(self.current_pen_color.red(), self.current_pen_color.green(), self.current_pen_color.blue(), 50))
+            painter.setPen(self.linked_widget.draw_pen)
+            pen_color = self.linked_widget.draw_pen.color()
+            painter.setBrush(QColor(pen_color.red(), pen_color.green(), pen_color.blue(), 50))
             painter.drawRect(self.preview_rect)
 
         if self.preview_line and self._get_active_draw_mode() == "line":
-            painter.setPen(self._create_drawing_pen())
+            painter.setPen(self.linked_widget.draw_pen)
             painter.drawLine(self.preview_line[0], self.preview_line[1])
-
-    def _create_drawing_pen(self, cap_style=Qt.PenCapStyle.RoundCap, join_style=Qt.PenJoinStyle.RoundJoin) -> QPen:
-        """Create a standard pen for drawing operations."""
-        return QPen(
-            self.current_pen_color,
-            self.pen_width_slider.value(),
-            Qt.PenStyle.SolidLine,
-            cap_style,
-            join_style
-        )
 
     # Coordinate Conversion Methods
     def _window_to_pixmap_pos(self, pos: QPoint) -> QPoint:
@@ -958,8 +953,7 @@ class ActionBar(QWidget):
 
                 painter = QPainter(self.linked_widget.base_pixmap)
                 try:
-                    pen = self._create_drawing_pen()
-                    painter.setPen(pen)
+                    painter.setPen(self.linked_widget.draw_pen)
                     painter.drawLine(pixmap_last_point, pixmap_pos)
                 except Exception as e:
                     logger.error(f"Error in pen drawing: {e}", exc_info=True)
@@ -997,26 +991,19 @@ class ActionBar(QWidget):
     def _finalize_sharp(self, end_point: QPoint):
         """Draw the shape to the pixmap based on current draw mode."""
         painter = QPainter(self.linked_widget.base_pixmap)
+        painter.setPen(self.linked_widget.draw_pen)
         try:
             draw_mode = self._get_active_draw_mode()
 
             if draw_mode == "rectangle":
-                pen = self._create_drawing_pen(Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin)
-                painter.setPen(pen)
-                painter.setBrush(QColor(
-                    self.current_pen_color.red(),
-                    self.current_pen_color.green(),
-                    self.current_pen_color.blue(),
-                    50
-                ))
+                pen_color = self.linked_widget.draw_pen.color()
+                painter.setBrush(QColor(pen_color.red(), pen_color.green(), pen_color.blue(), 50))
                 pixmap_start_point = self._clamp_pos_to_only_pixmap(self.draw_start_point, False)
                 clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
                 rect = QRect(pixmap_start_point, clamped_end_point).normalized()
                 painter.drawRect(rect)
                 self.preview_rect = None
             elif draw_mode == "line":
-                pen = self._create_drawing_pen()
-                painter.setPen(pen)
                 pixmap_start_point = self._clamp_pos_to_only_pixmap(self.draw_start_point, False)
                 clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
                 painter.drawLine(pixmap_start_point, clamped_end_point)
@@ -1074,6 +1061,9 @@ class OverlayBase(QWidget):
         self.base_pixmap: Optional[QPixmap] = None
         self.hint_label = None
         self.annotation_states: List[AnnotationState] = []
+
+        self.border_pen = QPen(SELECTION_BORDER_COLOR, SELECTION_BORDER_WIDTH, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin)
+        self.draw_pen = QPen(DEFAULT_PEN_COLOR, DEFAULT_PEN_WIDTH, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
 
         # Dragging state
         self.dragging = False
@@ -1426,9 +1416,9 @@ class CaptureOverlay(OverlayBase):
     def _paint_selection_border(self, painter: QPainter, selection_rect: QRect):
         """Paint the selection rectangle border."""
         border_width = SELECTION_BORDER_WIDTH if self.selecting else SELECTION_BORDER_WIDTH + 1
-        pen = QPen(SELECTION_BORDER_COLOR, border_width, Qt.PenStyle.SolidLine)
-        pen.setCapStyle(Qt.PenCapStyle.SquareCap)
-        painter.setPen(pen)
+        
+        self.border_pen.setWidth(border_width)
+        painter.setPen(self.border_pen)
 
         half = border_width // 2
         border_rect = selection_rect.adjusted(-half, -half, half, half)
