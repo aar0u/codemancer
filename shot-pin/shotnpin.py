@@ -718,6 +718,9 @@ class ActionBar(QWidget):
 
     def _position(self):
         """Position actionbar at bottom right of selection area."""
+        if not self.linked_widget:
+            return
+
         if isinstance(self.linked_widget, PinnedOverlay):
             x = self.linked_widget.width() - self.width()
             y = self.linked_widget.height() + TOOLBAR_MARGIN
