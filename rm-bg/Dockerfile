@@ -11,6 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Pre-download model files during build
+RUN python download_model.py
+
 EXPOSE 5001
 
 CMD ["python", "web_app.py"]

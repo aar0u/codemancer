@@ -15,8 +15,7 @@ try:
     from transformers import pipeline
 except ImportError as e:
     print(f"Missing required package: {e}")
-    print("Please install required packages with:")
-    print("pip install torch torchvision transformers pillow")
+    print("Please install required packages with: pip install -r requirements.txt")
     sys.exit(1)
 
 
