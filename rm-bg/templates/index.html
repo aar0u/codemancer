@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI背景移除工具 - Background Remover</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo">
+                <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="40" height="40" rx="12" fill="url(#gradient)" />
+                    <path d="M20 10L28 16V24L20 30L12 24V16L20 10Z" stroke="white" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round" />
+                    <circle cx="20" cy="20" r="4" fill="white" />
+                    <defs>
+                        <linearGradient id="gradient" x1="0" y1="0" x2="40" y2="40">
+                            <stop offset="0%" stop-color="#667eea" />
+                            <stop offset="100%" stop-color="#764ba2" />
+                        </linearGradient>
+                    </defs>
+                </svg>
+                <h1>AI背景移除</h1>
+            </div>
+            <p class="subtitle">使用先进的AI技术，一键移除图片背景</p>
+        </header>
+
+        <main class="main-content">
+            <!-- Upload Section -->
+            <div class="upload-section" id="uploadSection">
+                <div class="upload-area" id="uploadArea">
+                    <input type="file" id="fileInput" accept="image/*" hidden>
+                    <div class="upload-icon">
+                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                            <polyline points="17 8 12 3 7 8" />
+                            <line x1="12" y1="3" x2="12" y2="15" />
+                        </svg>
+                    </div>
+                    <h3>拖放图片到这里</h3>
+                    <p>或者 <span class="browse-link">浏览文件</span></p>
+                    <p class="file-info">支持 PNG, JPG, WEBP, BMP, GIF (最大 16MB)</p>
+                </div>
+
+                <div class="format-selector">
+                    <label class="format-label">输出格式：</label>
+                    <div class="format-options">
+                        <label class="format-option">
+                            <input type="radio" name="format" value="png" checked>
+                            <span class="format-button">
+                                <span class="format-name">PNG</span>
+                                <span class="format-desc">透明背景</span>
+                            </span>
+                        </label>
+                        <label class="format-option">
+                            <input type="radio" name="format" value="jpg">
+                            <span class="format-button">
+                                <span class="format-name">JPG</span>
+                                <span class="format-desc">白色背景</span>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="compress-selector" id="compressSelector">
+                    <label class="compress-toggle">
+                        <input type="checkbox" name="compress_png" checked>
+                        <span class="toggle-slider"></span>
+                        <span class="toggle-label">启用 PNG 压缩 (减小文件大小)</span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Processing Section -->
+            <div class="processing-section hidden" id="processingSection">
+                <div class="spinner"></div>
+                <h3>正在处理中...</h3>
+                <p>AI正在移除背景，请稍候</p>
+            </div>
+
+            <!-- Result Section -->
+            <div class="result-section hidden" id="resultSection">
+                <h3 class="comparison-title">拖动滑块对比效果</h3>
+                <div class="image-comparison-slider">
+                    <div class="comparison-container" id="comparisonContainer">
+                        <!-- Background image (result) -->
+                        <div class="result-image-wrapper">
+                            <img id="resultImage" alt="处理后" class="comparison-image">
+                        </div>
+                        <!-- Foreground image (original) with clip -->
+                        <div class="original-overlay" id="originalOverlay">
+                            <img id="originalImage" alt="原图" class="comparison-image">
+                        </div>
+                        <!-- Slider handle -->
+                        <div class="slider-handle" id="sliderHandle">
+                            <div class="slider-line"></div>
+                            <div class="slider-button">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <polyline points="15 18 9 12 15 6" />
+                                </svg>
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <polyline points="9 18 15 12 9 6" />
+                                </svg>
+                            </div>
+                            <div class="slider-line"></div>
+                        </div>
+                        <!-- Labels -->
+                        <div class="comparison-label label-left">原图</div>
+                        <div class="comparison-label label-right">处理后</div>
+                    </div>
+                </div>
+
+                <div class="action-buttons">
+                    <button class="btn btn-primary" id="downloadBtn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                            <polyline points="7 10 12 15 17 10" />
+                            <line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
+                        下载图片
+                    </button>
+                    <button class="btn btn-secondary" id="newImageBtn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <polyline points="1 4 1 10 7 10" />
+                            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                        </svg>
+                        处理新图片
+                    </button>
+                </div>
+            </div>
+
+            <!-- Error Section -->
+            <div class="error-section hidden" id="errorSection">
+                <div class="error-icon">⚠️</div>
+                <h3>处理失败</h3>
+                <p id="errorMessage">发生了一个错误</p>
+                <button class="btn btn-secondary" id="retryBtn">重试</button>
+            </div>
+        </main>
+
+        <footer class="footer">
+            <p>Powered by RMBG-1.4 AI Model | Made with ❤️</p>
+        </footer>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const uploadSection = document.getElementById('uploadSection');
+        const processingSection = document.getElementById('processingSection');
+        const resultSection = document.getElementById('resultSection');
+        const errorSection = document.getElementById('errorSection');
+        const originalImage = document.getElementById('originalImage');
+        const resultImage = document.getElementById('resultImage');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const newImageBtn = document.getElementById('newImageBtn');
+        const retryBtn = document.getElementById('retryBtn');
+        const errorMessage = document.getElementById('errorMessage');
+        const browseLinkSpan = document.querySelector('.browse-link');
+
+        let currentFile = null;
+        let processedBlob = null;
+
+        // Click to browse
+        uploadArea.addEventListener('click', () => fileInput.click());
+        browseLinkSpan.addEventListener('click', (e) => {
+            e.stopPropagation();
+            fileInput.click();
+        });
+
+        // Handle format change to show/hide compression option
+        const formatRadios = document.querySelectorAll('input[name="format"]');
+        const compressSelector = document.getElementById('compressSelector');
+
+        formatRadios.forEach(radio => {
+            radio.addEventListener('change', () => {
+                if (radio.value === 'png') {
+                    compressSelector.classList.remove('hidden');
+                } else {
+                    compressSelector.classList.add('hidden');
+                }
+            });
+        });
+
+        // Drag and drop
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('drag-over');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('drag-over');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('drag-over');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        // File input change
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        function handleFile(file) {
+            // Validate file type
+            const validTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/bmp', 'image/gif'];
+            if (!validTypes.includes(file.type)) {
+                showError('请上传有效的图片文件 (PNG, JPG, WEBP, BMP, GIF)');
+                return;
+            }
+
+            // Validate file size (16MB)
+            if (file.size > 16 * 1024 * 1024) {
+                showError('文件大小不能超过 16MB');
+                return;
+            }
+
+            currentFile = file;
+            uploadImage();
+        }
+
+        async function uploadImage() {
+            // Show processing
+            showSection('processing');
+
+            // Get selected format
+            const format = document.querySelector('input[name="format"]:checked').value;
+
+            // Get PNG compression option
+            const compressPng = document.querySelector('input[name="compress_png"]').checked;
+
+            // Create form data
+            const formData = new FormData();
+            formData.append('file', currentFile);
+            formData.append('format', format);
+            formData.append('compress_png', compressPng);
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || '处理失败');
+                }
+
+                // Get the processed image
+                processedBlob = await response.blob();
+
+                // Display images
+                const originalUrl = URL.createObjectURL(currentFile);
+                const resultUrl = URL.createObjectURL(processedBlob);
+
+                originalImage.src = originalUrl;
+                resultImage.src = resultUrl;
+
+                // Show result
+                showSection('result');
+
+                // Initialize slider after images are loaded
+                initializeSlider();
+
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        function showSection(section) {
+            uploadSection.classList.add('hidden');
+            processingSection.classList.add('hidden');
+            resultSection.classList.add('hidden');
+            errorSection.classList.add('hidden');
+
+            switch (section) {
+                case 'upload':
+                    uploadSection.classList.remove('hidden');
+                    break;
+                case 'processing':
+                    processingSection.classList.remove('hidden');
+                    break;
+                case 'result':
+                    resultSection.classList.remove('hidden');
+                    break;
+                case 'error':
+                    errorSection.classList.remove('hidden');
+                    break;
+            }
+        }
+
+        function showError(message) {
+            errorMessage.textContent = message;
+            showSection('error');
+        }
+
+        // Download button
+        downloadBtn.addEventListener('click', () => {
+            if (processedBlob) {
+                const format = document.querySelector('input[name="format"]:checked').value;
+                const url = URL.createObjectURL(processedBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `removed_bg.${format}`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }
+        });
+
+        // New image button
+        newImageBtn.addEventListener('click', () => {
+            currentFile = null;
+            processedBlob = null;
+            fileInput.value = '';
+            showSection('upload');
+        });
+
+        // Retry button
+        retryBtn.addEventListener('click', () => {
+            showSection('upload');
+        });
+
+        // Slider comparison functionality
+        function initializeSlider() {
+            const comparisonContainer = document.getElementById('comparisonContainer');
+            const sliderHandle = document.getElementById('sliderHandle');
+            const originalOverlay = document.getElementById('originalOverlay');
+
+            let isDragging = false;
+
+            function updateSliderPosition(x) {
+                const rect = comparisonContainer.getBoundingClientRect();
+                let position = ((x - rect.left) / rect.width) * 100;
+
+                // Clamp between 0 and 100
+                position = Math.max(0, Math.min(100, position));
+
+                // Update slider position
+                sliderHandle.style.left = `${position}%`;
+                originalOverlay.style.clipPath = `inset(0 ${100 - position}% 0 0)`;
+            }
+
+            // Mouse events
+            sliderHandle.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (isDragging) {
+                    updateSliderPosition(e.clientX);
+                }
+            });
+
+            document.addEventListener('mouseup', () => {
+                isDragging = false;
+            });
+
+            // Touch events for mobile
+            sliderHandle.addEventListener('touchstart', (e) => {
+                isDragging = true;
+                e.preventDefault();
+            });
+
+            document.addEventListener('touchmove', (e) => {
+                if (isDragging) {
+                    const touch = e.touches[0];
+                    updateSliderPosition(touch.clientX);
+                }
+            });
+
+            document.addEventListener('touchend', () => {
+                isDragging = false;
+            });
+
+            // Click anywhere on the container to move slider
+            comparisonContainer.addEventListener('click', (e) => {
+                if (e.target !== sliderHandle && !sliderHandle.contains(e.target)) {
+                    updateSliderPosition(e.clientX);
+                }
+            });
+
+            // Initialize at 50%
+            updateSliderPosition(comparisonContainer.getBoundingClientRect().left +
+                comparisonContainer.getBoundingClientRect().width / 2);
+        }
+    </script>
+</body>
+
+</html>
