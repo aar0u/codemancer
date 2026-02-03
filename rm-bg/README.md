@@ -10,21 +10,41 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Command Line Interface
+
 ```bash
-python rm-bg.py path/to/image.jpg
+python rmbg.py path/to/image.jpg
 ```
 
 Options:
-- `-o, --output`: Output path
 - `-f, --format`: Format (png or jpg, default: png)
 
 Examples:
 ```bash
-python rm-bg.py input.jpg -f jpg
+python rmbg.py input.jpg -f jpg
 ```
+
+### Web Interface
+
+Start the web server:
+```bash
+python web_app.py
+```
+
+Then open your browser and navigate to:
+```
+http://localhost:5001
+```
+
+Features:
+- 🎨 Modern, beautiful UI with drag-and-drop support
+- 🖼️ Before/after image comparison
+- 📥 Direct download of processed images
+- 🎯 Support for PNG (transparent) and JPG (white background) formats
+- 📱 Responsive design for all devices
 
 ## Build Executable
 
 ```bash
-python -m PyInstaller --contents-directory=. --name rm-bg --collect-all torch --collect-all torchvision --collect-all transformers --collect-all PIL --collect-all skimage rm-bg.py
+python -m PyInstaller --contents-directory=. --name rm-bg --collect-all torch --collect-all torchvision --collect-all transformers --collect-all PIL rmbg.py
 ```
