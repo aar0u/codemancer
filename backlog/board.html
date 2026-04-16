@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Action Board</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+    <style>
+      body {
+        padding: 20px;
+        background-color: #f5f5f5;
+      }
+
+      .container {
+        max-width: 900px;
+        width: 100%;
+        padding: 2rem;
+        box-sizing: border-box;
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+      }
+
+      .header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 2rem;
+        flex-wrap: wrap;
+        gap: 1rem;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 2rem;
+        color: var(--primary-color);
+      }
+
+      .action-buttons {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+
+      .action-btn {
+        padding: 8px 16px;
+        font-size: 0.9rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+      }
+
+      .action-btn .material-icons {
+        font-size: 1.2rem;
+      }
+
+      .task-list {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      .task-item {
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        background: white;
+        transition: all 0.3s ease;
+        overflow: hidden;
+      }
+
+      .task-item:hover {
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+      }
+
+      .task-item.selected {
+        border-color: var(--primary-color);
+        box-shadow: 0 0 0 2px rgba(1, 114, 173, 0.2);
+      }
+
+      .task-item.ended {
+        opacity: 0.6;
+        background-color: #f5f5f5;
+      }
+
+      .task-item.ended .task-preview {
+        text-decoration: line-through;
+        color: #9e9e9e;
+      }
+
+      .task-item.ended .task-date {
+        color: #9e9e9e;
+      }
+
+      .task-summary {
+        display: flex;
+        align-items: center;
+        padding: 1rem;
+        cursor: pointer;
+        gap: 1rem;
+      }
+
+      .task-summary:hover {
+        background-color: #f5f5f5;
+      }
+
+      .task-date {
+        font-size: 0.85rem;
+        color: #757575;
+        min-width: 140px;
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+      }
+
+      .ended-date {
+        font-size: 0.75rem;
+        color: #9e9e9e;
+      }
+
+      .task-preview {
+        flex: 1;
+        color: #424242;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .task-preview.empty {
+        color: #9e9e9e;
+        font-style: italic;
+      }
+
+      .task-tags {
+        display: flex;
+        gap: 0.3rem;
+        flex-wrap: wrap;
+      }
+
+      .tag {
+        padding: 2px 8px;
+        background-color: #e3f2fd;
+        color: var(--primary-color);
+        border-radius: 12px;
+        font-size: 0.75rem;
+      }
+
+      .task-actions {
+        display: flex;
+        gap: 0.5rem;
+      }
+
+      .icon-btn {
+        background: transparent;
+        border: none;
+        padding: 6px;
+        cursor: pointer;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #757575;
+        transition: all 0.2s ease;
+      }
+
+      .icon-btn:hover {
+        background-color: #f5f5f5;
+        color: var(--primary-color);
+        transform: none;
+        box-shadow: none;
+      }
+
+      .icon-btn:active {
+        background-color: #e0e0e0;
+        transform: none;
+        box-shadow: none;
+      }
+
+      .icon-btn.complete:hover {
+        color: #4caf50;
+      }
+
+      .icon-btn.delete:hover {
+        color: #f44336;
+      }
+
+      .task-detail {
+        padding: 0 1rem 1rem 1rem;
+        display: none;
+      }
+
+      .task-detail.expanded {
+        display: block;
+      }
+
+      .task-input {
+        width: 100%;
+        border: 1px solid #e0e0e0;
+        border-radius: 4px;
+        padding: 12px;
+        font-size: 1rem;
+        font-family: inherit;
+        resize: vertical;
+        min-height: 120px;
+        box-sizing: border-box;
+        outline: none;
+        transition: border-color 0.3s ease;
+      }
+
+      .task-input:focus {
+        border-color: var(--primary-color);
+        box-shadow: 0 0 0 2px rgba(1, 114, 173, 0.1);
+      }
+
+      .task-tags-input {
+        margin-top: 0.5rem;
+        padding: 8px;
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #e0e0e0;
+        border-radius: 4px;
+        font-size: 0.9rem;
+        outline: none;
+      }
+
+      .task-tags-input:focus {
+        border-color: var(--primary-color);
+        box-shadow: 0 0 0 2px rgba(1, 114, 173, 0.1);
+      }
+
+      .save-btn {
+        margin-top: 0.5rem;
+        padding: 8px 16px;
+        font-size: 0.9rem;
+      }
+
+      .empty-state {
+        text-align: center;
+        padding: 3rem 1rem;
+        color: #9e9e9e;
+      }
+
+      .empty-state .material-icons {
+        font-size: 4rem;
+        margin-bottom: 1rem;
+        opacity: 0.3;
+      }
+
+      .shortcut-hint {
+        margin-top: 2rem;
+        padding: 1rem;
+        background-color: #f5f5f5;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        color: #707070;
+      }
+
+      input[type="file"] {
+        display: none;
+      }
+
+      @media (max-width: 600px) {
+        .task-summary {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .task-date {
+          min-width: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1>Board</h1>
+        <div class="action-buttons">
+          <button class="action-btn" id="new-btn">
+            <span class="material-icons">add</span>
+            New
+          </button>
+          <button class="action-btn" id="export-btn">
+            <span class="material-icons">download</span>
+            Export
+          </button>
+          <button class="action-btn" id="import-btn">
+            <span class="material-icons">upload</span>
+            Import
+          </button>
+        </div>
+      </div>
+
+      <div class="task-list" id="task-list">
+        <div class="empty-state">
+          <div class="material-icons">assignment</div>
+          <div>No tasks yet. Press Ctrl+K to create one!</div>
+        </div>
+      </div>
+
+      <div class="shortcut-hint">
+        <strong>Keyboard Shortcuts:</strong><br>
+        <span class="shortcut-key">Ctrl</span>+<span class="shortcut-key">K</span> - New Task |
+        <span class="shortcut-key">Ctrl</span>+<span class="shortcut-key">Enter</span> - Save Task |
+        <span class="shortcut-key">↑</span>/<span class="shortcut-key">K</span> <span class="shortcut-key">↓</span>/<span class="shortcut-key">J</span> - Navigate |
+        <span class="shortcut-key">→</span>/<span class="shortcut-key">L</span> - Expand |
+        <span class="shortcut-key">Esc</span> - Collapse
+      </div>
+    </div>
+
+    <input type="file" id="import-file" accept=".json">
+
+    <script>
+      let tasks = [];
+      let selectedTaskIndex = -1;
+      let expandedTaskId = null;
+
+      // Load tasks from localStorage
+      function loadTasks() {
+        const stored = localStorage.getItem('tasks');
+        if (stored) {
+          tasks = JSON.parse(stored);
+        }
+        renderTasks();
+      }
+
+      // Save tasks to localStorage
+      function saveTasks() {
+        localStorage.setItem('tasks', JSON.stringify(tasks));
+      }
+
+      // Create new task
+      function createTask() {
+         const task = {
+           id: Date.now(),
+           createdTime: new Date().toISOString(),
+           content: '',
+           tags: [],
+           endTime: null
+         };
+        tasks.unshift(task);
+        saveTasks();
+        renderTasks();
+        expandTask(task.id);
+        selectedTaskIndex = 0;
+      }
+
+      // Expand task for editing
+      function expandTask(taskId) {
+        expandedTaskId = taskId;
+        renderTasks();
+
+        // Focus on textarea
+        setTimeout(() => {
+          const textarea = document.querySelector(`#task-${taskId} .task-input`);
+          if (textarea) {
+            // Simulate mousedown to unlock focus capability in keyboard events
+            const mouseDownEvent = new MouseEvent('mousedown', {
+              bubbles: true,
+              cancelable: true,
+              view: globalThis
+            });
+            textarea.dispatchEvent(mouseDownEvent);
+            textarea.focus();
+            adjustTextareaHeight(textarea);
+          }
+        }, 50);
+      }
+
+      // Collapse task
+      function collapseTask(taskId) {
+        if (expandedTaskId === taskId) {
+          expandedTaskId = null;
+          renderTasks();
+        }
+      }
+
+      // Toggle task expansion
+      function toggleTask(taskId) {
+        if (expandedTaskId === taskId) {
+          collapseTask(taskId);
+        } else {
+          expandTask(taskId);
+        }
+      }
+
+      // Save task content
+      function saveTask(taskId) {
+        const task = tasks.find(t => t.id === taskId);
+        if (!task) return;
+
+        const textarea = document.querySelector(`#task-${taskId} .task-input`);
+        const tagsInput = document.querySelector(`#task-${taskId} .task-tags-input`);
+
+        task.content = textarea.value.trim();
+        task.tags = tagsInput.value
+          .split(',')
+          .map(tag => tag.trim())
+          .filter(Boolean);
+
+        saveTasks();
+        collapseTask(taskId);
+      }
+
+       function endTask(taskId) {
+         const task = tasks.find(t => t.id === taskId);
+         if (!task) return;
+
+         task.endTime = new Date().toISOString();
+
+         // Move to bottom of list
+         tasks = tasks.filter(t => t.id !== taskId);
+         tasks.push(task);
+
+         saveTasks();
+         renderTasks();
+       }
+
+       function reopenTask(taskId) {
+         const task = tasks.find(t => t.id === taskId);
+         if (!task) return;
+
+         task.endTime = null;
+
+         // Move to top of list
+         tasks = tasks.filter(t => t.id !== taskId);
+         tasks.unshift(task);
+
+         saveTasks();
+         renderTasks();
+       }
+
+      function deleteTask(taskId) {
+        if (confirm('Are you sure you want to delete this task?')) {
+          tasks = tasks.filter(t => t.id !== taskId);
+          saveTasks();
+          renderTasks();
+        }
+      }
+
+      function formatDate(isoString) {
+        const date = new Date(isoString);
+        const year = String(date.getFullYear());
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        return `${year}-${month}-${day} ${hours}:${minutes}`;
+      }
+
+      // Auto-adjust textarea height
+      function adjustTextareaHeight(textarea) {
+        textarea.style.height = 'auto';
+        textarea.style.height = textarea.scrollHeight + 'px';
+      }
+
+      // Render tasks
+      function renderTasks() {
+        const container = document.getElementById('task-list');
+
+        if (tasks.length === 0) {
+          container.innerHTML = `
+            <div class="empty-state">
+              <div class="material-icons">assignment</div>
+              <div>No tasks yet. Press Ctrl+K to create one!</div>
+            </div>
+          `;
+          return;
+        }
+
+        container.innerHTML = tasks.map((task, index) => {
+           const isExpanded = expandedTaskId === task.id;
+           const isSelected = selectedTaskIndex === index;
+          const isEmpty = !task.content;
+          const isEnded = task.endTime !== null;
+          let preview;
+          if (task.content) {
+            const lines = task.content.split(/\r?\n/);
+            preview = lines[0] + (lines.length > 1 ? ' ...' : '');
+          } else {
+            preview = 'No content';
+          }
+
+          return `
+            <div class="task-item ${isSelected ? 'selected' : ''} ${isEnded ? 'ended' : ''}" id="task-${task.id}">
+              <div class="task-summary" onclick="toggleTask(${task.id})">
+                <div class="task-date">
+                  <div>${formatDate(task.createdTime)}</div>
+                  ${isEnded ? `<div class="ended-date">${formatDate(task.endTime)}</div>` : ''}
+                </div>
+                <div class="task-preview ${isEmpty ? 'empty' : ''}">${preview}</div>
+                ${task.tags.length > 0 ? `
+                  <div class="task-tags">
+                    ${task.tags.map(tag => `<span class="tag">${tag}</span>`).join('')}
+                  </div>
+                ` : ''}
+                <div class="task-actions" onclick="event.stopPropagation()">
+                  ${isEnded ? `
+                    <button class="icon-btn complete" onclick="reopenTask(${task.id})" title="Reopen">
+                      <span class="material-icons">undo</span>
+                    </button>
+                  ` : `
+                    <button class="icon-btn complete" onclick="endTask(${task.id})" title="End Task">
+                      <span class="material-icons">check_circle</span>
+                    </button>
+                  `}
+                  <button class="icon-btn delete" onclick="deleteTask(${task.id})" title="Delete">
+                    <span class="material-icons">delete</span>
+                  </button>
+                </div>
+              </div>
+              <div class="task-detail ${isExpanded ? 'expanded' : ''}">
+                <textarea
+                  class="task-input"
+                  placeholder="Enter task content..."
+                  oninput="adjustTextareaHeight(this)"
+                >${task.content}</textarea>
+                <input
+                  type="text"
+                  class="task-tags-input"
+                  placeholder="Tags (comma separated)"
+                  value="${task.tags.join(', ')}"
+                >
+                <button class="save-btn" onclick="saveTask(${task.id})">
+                  <span class="material-icons" style="vertical-align: middle; font-size: 1rem;">save</span>
+                  Save
+                </button>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      // Export tasks
+      function exportTasks() {
+        const dataStr = JSON.stringify(tasks, null, 2);
+        const dataBlob = new Blob([dataStr], { type: 'application/json' });
+        const url = URL.createObjectURL(dataBlob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `tasks-${new Date().toISOString().split('T')[0]}.json`;
+        link.click();
+        URL.revokeObjectURL(url);
+      }
+
+      // Import tasks
+      function importTasks() {
+        document.getElementById('import-file').click();
+      }
+
+      // Handle file import
+      document.getElementById('import-file').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        file.text().then(text => {
+          try {
+            const imported = JSON.parse(text);
+            if (Array.isArray(imported)) {
+              if (confirm(`Import ${imported.length} tasks? This will replace existing tasks.`)) {
+                tasks = imported;
+                saveTasks();
+                renderTasks();
+              }
+            }
+          } catch (err) {
+            console.error('Failed to import tasks:', err);
+            alert('Invalid file format. Please check the file and try again.');
+          }
+        });
+        e.target.value = '';
+      });
+
+      // Navigate tasks with arrow keys
+      function navigateTasks(direction) {
+        if (tasks.length === 0) return;
+
+        selectedTaskIndex += direction;
+        if (selectedTaskIndex < 0) selectedTaskIndex = 0;
+        if (selectedTaskIndex >= tasks.length) selectedTaskIndex = tasks.length - 1;
+
+        renderTasks();
+
+        // Scroll into view
+        const selectedElement = document.querySelector('.task-item.selected');
+        if (selectedElement) {
+          selectedElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      }
+
+      // Keyboard shortcuts
+      document.addEventListener('keydown', function(e) {
+        const isInputField = e.target.matches('textarea, input');
+        
+        // Ctrl+K - New task
+        if (e.ctrlKey && e.key === 'k') {
+          e.preventDefault();
+          createTask();
+          return;
+        }
+        
+        // Ctrl+Enter - Save task
+        if (e.ctrlKey && e.key === 'Enter' && expandedTaskId !== null) {
+          e.preventDefault();
+          saveTask(expandedTaskId);
+          return;
+        }
+        
+        // Arrow keys and j/k/l shortcuts (only when not in input fields)
+        if (!isInputField) {
+          if (e.key === 'ArrowUp' || e.key === 'k') {
+            e.preventDefault();
+            navigateTasks(-1);
+            return;
+          }
+          if (e.key === 'ArrowDown' || e.key === 'j') {
+            e.preventDefault();
+            navigateTasks(1);
+            return;
+          }
+          if ((e.key === 'ArrowRight' || e.key === 'l') && selectedTaskIndex >= 0 && selectedTaskIndex < tasks.length) {
+            e.preventDefault();
+            toggleTask(tasks[selectedTaskIndex].id);
+            return;
+          }
+        }
+        
+        // Escape key
+        if (e.key === 'Escape' && expandedTaskId !== null) {
+          e.preventDefault();
+          collapseTask(expandedTaskId);
+        }
+      });
+
+      // Event listeners
+      document.getElementById('new-btn').addEventListener('click', createTask);
+      document.getElementById('export-btn').addEventListener('click', exportTasks);
+      document.getElementById('import-btn').addEventListener('click', importTasks);
+
+      // Initialize
+      globalThis.addEventListener('DOMContentLoaded', function() {
+        loadTasks();
+      });
+    </script>
+  </body>
+</html>

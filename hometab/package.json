@@ -1,0 +1,19 @@
+{
+  "name": "hometab",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --ip 0.0.0.0 --port 8787",
+    "build": "esbuild src/frontend/main.ts --bundle --outfile=public/scripts/main.js --format=esm --target=es2022",
+    "deploy": "pnpm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.83.0"
+  }
+}

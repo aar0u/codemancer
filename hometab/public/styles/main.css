@@ -1,0 +1,667 @@
+:root {
+  --card: oklch(1 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --radius: 0.625rem;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-content {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2rem;
+  width: 90%;
+  max-width: 400px;
+  text-align: center;
+}
+
+.modal-content h2 {
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+}
+
+.modal-content p {
+  color: var(--muted-foreground);
+  margin-bottom: 1.5rem;
+  font-size: 0.875rem;
+}
+
+.modal-content input {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--input);
+  color: var(--foreground);
+  font-size: 1rem;
+  margin-bottom: 1rem;
+}
+
+.modal-content input:focus {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.modal-content button {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.modal-content button#password-submit {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.modal-content button#password-submit:hover {
+  opacity: 0.9;
+}
+
+.error {
+  color: var(--destructive);
+  font-size: 0.875rem;
+  margin-top: 0.5rem;
+}
+
+.background {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100vh;
+  height: 100lvh;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  z-index: -2;
+}
+
+.overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100vh;
+  height: 100lvh;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.3), rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.4));
+  z-index: -1;
+}
+
+.refresh-bg {
+  position: fixed;
+  bottom: 0.5rem;
+  right: 0.5rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.2s;
+  z-index: 1;
+}
+
+.refresh-bg:hover {
+  color: rgba(255,255,255,0.7);
+}
+
+.refresh-bg svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.content {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.5rem;
+  padding-bottom: 2rem;
+}
+
+@media (min-width: 768px) {
+  .content {
+    padding: 3rem;
+  }
+}
+
+.top-section {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 2rem;
+}
+
+.clock {
+  text-align: center;
+}
+
+.clock h1 {
+  font-size: 4rem;
+  font-weight: 300;
+  letter-spacing: -0.025em;
+  color: white;
+  text-shadow: 0 2px 10px rgba(0,0,0,0.3);
+}
+
+@media (min-width: 768px) {
+  .clock h1 {
+    font-size: 6rem;
+  }
+}
+
+.clock p {
+  font-size: 1.25rem;
+  font-weight: 300;
+  color: rgba(255,255,255,0.8);
+  text-shadow: 0 1px 5px rgba(0,0,0,0.3);
+  margin-top: 0.5rem;
+}
+
+@media (min-width: 768px) {
+  .clock p {
+    font-size: 1.5rem;
+  }
+}
+
+.middle-section {
+  width: 100%;
+  padding: 2rem 0;
+}
+
+.shortcuts {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+@media (min-width: 640px) {
+  .shortcuts {
+    grid-template-columns: repeat(6, 1fr);
+    max-width: 800px;
+  }
+}
+
+.shortcut {
+  position: relative;
+  min-width: 0;
+}
+
+.shortcut a {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 0.75rem;
+  background: rgba(255,255,255,0.1);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.2);
+  text-decoration: none;
+  transition: all 0.2s;
+  min-width: 0;
+  width: 100%;
+}
+
+.shortcut a:hover {
+  background: rgba(255,255,255,0.2);
+  transform: scale(1.05);
+}
+
+.shortcut.dragging {
+  opacity: 0.5;
+}
+
+.shortcut.drag-over {
+  position: relative;
+}
+
+.shortcut.drag-over::before {
+  content: '';
+  position: absolute;
+  left: -0.5rem;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: rgba(255,255,255,0.8);
+  border-radius: 2px;
+}
+
+.shortcut[draggable="true"] {
+  cursor: grab;
+}
+
+.shortcut[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.shortcut-icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.5rem;
+  background: rgba(255,255,255,0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.shortcut-icon img {
+  width: 2rem;
+  height: 2rem;
+}
+
+.shortcut-icon svg {
+  width: 2rem;
+  height: 2rem;
+}
+
+.shortcut-icon .default-icon {
+  color: rgba(255,255,255,0.7);
+}
+
+.shortcut-name {
+  font-size: 0.75rem;
+  color: rgba(255,255,255,0.9);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.shortcut-menu-btn {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  width: 0.75rem;
+  height: 1rem;
+  border-radius: 0.25rem;
+  border: none;
+  background: rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s;
+  z-index: 10;
+}
+
+.shortcut:hover .shortcut-menu-btn {
+  opacity: 1;
+}
+
+.shortcut-menu-btn:hover {
+  background: rgba(255,255,255,0.2);
+  color: white;
+}
+
+.shortcut-menu-btn svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+@media (max-width: 767px) {
+  .shortcut-menu-btn {
+    opacity: 1;
+  }
+}
+
+.shortcut-dropdown {
+  position: absolute;
+  top: 1.5rem;
+  right: 0.25rem;
+  min-width: 7rem;
+  background: rgba(30,30,30,0.95);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 0.5rem;
+  padding: 0.25rem;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-0.25rem);
+  transition: all 0.15s ease;
+  z-index: 20;
+}
+
+.shortcut-dropdown.open {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.dropdown-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.9);
+  font-size: 0.75rem;
+  border-radius: 0.375rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.dropdown-item:hover {
+  background: rgba(255,255,255,0.1);
+}
+
+.dropdown-item.delete {
+  color: #ef4444;
+}
+
+.dropdown-item.delete:hover {
+  background: rgba(239,68,68,0.15);
+}
+
+.dropdown-item svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  flex-shrink: 0;
+}
+
+.add-shortcut {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 0.75rem;
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(12px);
+  border: 1px dashed rgba(255,255,255,0.3);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.add-shortcut:hover {
+  background: rgba(255,255,255,0.1);
+  border-color: rgba(255,255,255,0.5);
+}
+
+.add-shortcut .shortcut-icon {
+  background: rgba(255,255,255,0.05);
+}
+
+.bottom-section {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  padding-bottom: 1rem;
+}
+
+.todo-list {
+  width: 100%;
+  max-width: 24rem;
+  background: rgba(255,255,255,0.1);
+  backdrop-filter: blur(20px);
+  border-radius: 1rem;
+  border: 1px solid rgba(255,255,255,0.2);
+  overflow: hidden;
+}
+
+.todo-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.todo-header:hover {
+  background: rgba(255,255,255,0.05);
+}
+
+.todo-header .icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  color: white;
+}
+
+.todo-header span {
+  color: white;
+  font-weight: 500;
+}
+
+.todo-count {
+  font-size: 0.875rem;
+  color: rgba(255,255,255,0.7);
+}
+
+.todo-content {
+  padding: 1rem;
+  border-top: 1px solid rgba(255,255,255,0.1);
+}
+
+.todo-input-group {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.todo-input-group input {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: var(--radius);
+  background: rgba(255,255,255,0.1);
+  color: white;
+  font-size: 0.875rem;
+}
+
+.todo-input-group input::placeholder {
+  color: rgba(255,255,255,0.5);
+}
+
+.todo-input-group input:focus {
+  outline: none;
+  border-color: rgba(255,255,255,0.4);
+}
+
+.icon-btn {
+  width: 2.25rem;
+  height: 2.25rem;
+  border: none;
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.icon-btn svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.icon-btn.primary {
+  background: white;
+  color: var(--primary);
+}
+
+.icon-btn.primary:hover {
+  opacity: 0.9;
+}
+
+.todo-items {
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem;
+  border-radius: 0.5rem;
+  transition: background 0.2s;
+}
+
+.todo-item:hover {
+  background: rgba(255,255,255,0.05);
+}
+
+.todo-item .checkbox {
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.todo-item .checkbox:hover {
+  border-color: white;
+}
+
+.todo-item .checkbox.checked {
+  background: white;
+  border-color: white;
+}
+
+.todo-item .checkbox svg {
+  width: 0.75rem;
+  height: 0.75rem;
+  color: var(--primary);
+  opacity: 0;
+}
+
+.todo-item .checkbox.checked svg {
+  opacity: 1;
+}
+
+.todo-item .text {
+  flex: 1;
+  font-size: 0.875rem;
+  color: white;
+  transition: all 0.2s;
+}
+
+.todo-item .text.completed {
+  color: rgba(255,255,255,0.5);
+  text-decoration: line-through;
+}
+
+.todo-item .delete-btn {
+  width: 1.5rem;
+  height: 1.5rem;
+  border: none;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: rgba(255,255,255,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s;
+}
+
+.todo-item:hover .delete-btn {
+  opacity: 1;
+}
+
+.todo-item .delete-btn:hover {
+  background: rgba(220,38,38,0.2);
+  color: #ef4444;
+}
+
+.todo-item .delete-btn svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.modal-actions button {
+  flex: 1;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.btn-primary:hover {
+  opacity: 0.9;
+}
+
+.btn-secondary {
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+
+.btn-secondary:hover {
+  opacity: 0.9;
+}
+
+#confirm-password-group {
+  margin-bottom: 1rem;
+}
