@@ -57,6 +57,34 @@ Each task contains:
 
 ---
 
+## Running the Server
+
+```bash
+pnpm dev
+# or
+bun server.ts
+```
+
+---
+
+## Build Single File (for offline deployment)
+
+Use `bun build` to compile into a single file - ideal for air-gapped/intranet deployment:
+
+```bash
+bun build ./server.ts --outfile=app.js --target=bun
+```
+
+This produces `app.js` with all dependencies (hono, etc.) bundled inside.
+
+**Deploy to intranet:** Just copy `app.js` and `public/` folder, then run:
+
+```bash
+bun app.js
+```
+
+---
+
 ## Technical Notes
 
 - Date format: `yyyy-mm-dd hh:mm`
