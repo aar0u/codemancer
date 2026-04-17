@@ -12,6 +12,11 @@ import java.util.List;
 /**
  * ClipboardPanel monitors the system clipboard every second and displays
  * the last 10 entries as clickable rows. Clicking a row restores it to the clipboard.
+ * 
+ * Memory note: Image entries store a full copy of the BufferedImage in memory.
+ * With MAX_ENTRIES=10 and typical screenshots at 10-30MB each, worst-case memory
+ * usage could reach 300+ MB. If this becomes a problem, consider reducing MAX_ENTRIES
+ * or implementing image compression/downscaling.
  */
 public class ClipboardPanel extends JPanel {
     private static final int MAX_ENTRIES = 10;
@@ -191,19 +196,26 @@ public class ClipboardPanel extends JPanel {
         return System.identityHashCode(t);
     }
 
+    private static Transferable createTransferable(DataFlavor flavor, Object data) {
+        return new Transferable() {
+            @Override
+            public DataFlavor[] getTransferDataFlavors() {
+                return new DataFlavor[] { flavor };
+            }
+            @Override
+            public boolean isDataFlavorSupported(DataFlavor f) {
+                return f.equals(flavor);
+            }
+            @Override
+            public Object getTransferData(DataFlavor f) {
+                return data;
+            }
+        };
+    }
+
     /** Build a ClipEntry from a Transferable, returns null if unsupported. */
     private ClipEntry buildEntry(Transferable t) {
         try {
-            if (t.isDataFlavorSupported(DataFlavor.stringFlavor)) {
-                String text = (String) t.getTransferData(DataFlavor.stringFlavor);
-                String trimmed = text.trim();
-                if (trimmed.isEmpty()) return null;
-                String stored = trimmed.length() > MAX_TEXT_CHARS
-                        ? trimmed.substring(0, MAX_TEXT_CHARS) + "\n[TRUNCATED — " + trimmed.length() + " chars total]"
-                        : trimmed;
-                return new ClipEntry(ClipEntry.Type.TEXT, stored, stored, new StringSelection(stored));
-            }
-
             if (t.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
                 @SuppressWarnings("unchecked")
                 List<File> files = (List<File>) t.getTransferData(DataFlavor.javaFileListFlavor);
@@ -212,14 +224,34 @@ public class ClipboardPanel extends JPanel {
                 String display = files.size() == 1
                         ? shorten(files.get(0).getName())
                         : files.size() + " files";
-                return new ClipEntry(ClipEntry.Type.FILE, "[File] " + display, fullText, t);
+                
+                return new ClipEntry(ClipEntry.Type.FILE, "📄 " + display, fullText, t);
             }
 
             if (t.isDataFlavorSupported(DataFlavor.imageFlavor)) {
-                String label = "[Image] " + LocalDateTime.now().format(TIME_FMT);
-                // Do NOT store the Transferable: a BufferedImage can be 10-30MB per screenshot.
-                // Stale clipboard images cannot be reliably restored after owner changes anyway.
-                return new ClipEntry(ClipEntry.Type.IMAGE, label, label, null);
+                String label = "🖼️ " + LocalDateTime.now().format(TIME_FMT);
+                
+                java.awt.Image img = (java.awt.Image) t.getTransferData(DataFlavor.imageFlavor);
+                java.awt.image.BufferedImage copy = new java.awt.image.BufferedImage(
+                        img.getWidth(null),
+                        img.getHeight(null),
+                        java.awt.image.BufferedImage.TYPE_INT_RGB);
+                Graphics g = copy.getGraphics();
+                g.drawImage(img, 0, 0, null);
+                g.dispose();
+                
+                return new ClipEntry(ClipEntry.Type.IMAGE, label, label, 
+                        createTransferable(DataFlavor.imageFlavor, copy));
+            }
+
+            if (t.isDataFlavorSupported(DataFlavor.stringFlavor)) {
+                String text = (String) t.getTransferData(DataFlavor.stringFlavor);
+                String trimmed = text.trim();
+                if (trimmed.isEmpty()) return null;
+                String stored = trimmed.length() > MAX_TEXT_CHARS
+                        ? trimmed.substring(0, MAX_TEXT_CHARS) + "\n[TRUNCATED — " + trimmed.length() + " chars total]"
+                        : trimmed;
+                return new ClipEntry(ClipEntry.Type.TEXT, stored, stored, new StringSelection(stored));
             }
         } catch (Exception e) {
             // Unsupported or unavailable data
@@ -263,20 +295,13 @@ public class ClipboardPanel extends JPanel {
                 BorderFactory.createEmptyBorder(4, 6, 4, 6)));
         row.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        // Type icon / prefix (ASCII-safe to avoid encoding issues)
-        String prefix = switch (entry.type) {
-            case IMAGE -> "[IMG] ";
-            case FILE -> "[FILE] ";
-            default -> "[TXT] ";
-        };
-
         // Truncate to 2 lines; if more exist append "..."
         String[] rawLines = entry.displayText.split("\n", -1);
         String displayText;
         if (rawLines.length > 2) {
-            displayText = prefix + rawLines[0] + "\n" + rawLines[1] + "\n...";
+            displayText = rawLines[0] + "\n" + rawLines[1] + "\n...";
         } else {
-            displayText = prefix + entry.displayText;
+            displayText = entry.displayText;
         }
 
         // Use JTextArea for reliable word-wrap within container width (JLabel stretches on long lines)
