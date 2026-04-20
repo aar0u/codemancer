@@ -243,10 +243,12 @@ function setupShortcutsEventDelegation() {
       const shortcut = link.closest('.shortcut')
       const icon = shortcut?.querySelector('.shortcut-icon')
       const img = icon?.querySelector('img')
+      const svgIcon = icon?.querySelector('svg:not(.loading-icon)')
       const defaultIconSpan = icon?.querySelector('span:not(.hidden)')
       const loadingIcon = icon?.querySelector('.loading-icon')
       
       if (img) img.classList.add('hidden')
+      if (svgIcon) svgIcon.classList.add('hidden')
       if (defaultIconSpan) defaultIconSpan.classList.add('hidden')
       if (loadingIcon) loadingIcon.classList.remove('hidden')
       shortcut?.classList.add('loading')
@@ -673,46 +675,59 @@ async function handlePasswordSubmit() {
   }
 }
 
+function loadCachedData(): boolean {
+  const cached = localStorage.getItem('hometab_data')
+  if (!cached) return false
+  try {
+    renderAll(JSON.parse(cached))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function renderAll(data: Record<string, unknown>) {
+  state.shortcuts = (data.shortcuts as Shortcut[]) || []
+  state.todos = (data.todos as Todo[]) || []
+  state.searchEngines = (data.searchEngines as SearchEngine[]) || []
+  
+  const savedEngineId = localStorage.getItem('hometab_search_engine')
+  state.currentSearchEngine = state.searchEngines.find(e => e.id === savedEngineId) || state.searchEngines[0]
+  
+  renderShortcuts()
+  renderTodos()
+  renderSearchEngines()
+}
+
 async function showMainContent() {
   passwordModal.classList.add('hidden')
   mainContent.classList.remove('hidden')
-  await loadData()
-  await setDynamicBackground()
+  
   updateClock()
   if (state.clockInterval) clearInterval(state.clockInterval)
   state.clockInterval = setInterval(updateClock, 1000)
+  
+  const cachedBg = localStorage.getItem('hometab_bg')
+  if (cachedBg) {
+    try {
+      const { imageUrl } = JSON.parse(cachedBg)
+      if (imageUrl) background.style.backgroundImage = `url(${imageUrl})`
+    } catch {}
+  }
+  
+  loadCachedData()
+  
+  await Promise.all([loadData(), setDynamicBackground()])
 }
 
 async function loadData() {
   try {
-    const [shortcutsRes, todosRes, searchEnginesRes] = await Promise.all([
-      fetchWithAuth(`${API_BASE}/api/shortcuts`),
-      fetchWithAuth(`${API_BASE}/api/todos`),
-      fetch(`${API_BASE}/api/search-engines`)
-    ])
+    const res = await fetchWithAuth(`${API_BASE}/api/data`)
+    if (!res.ok) throw new Error('Failed to load data')
     
-    if (!shortcutsRes.ok || !todosRes.ok || !searchEnginesRes.ok) {
-      throw new Error('Failed to load data')
-    }
-    
-    const shortcutsData = await shortcutsRes.json()
-    const todosData = await todosRes.json()
-    const searchEnginesData = await searchEnginesRes.json()
-    
-    state.shortcuts = (shortcutsData as { shortcuts: Shortcut[] }).shortcuts || []
-    state.todos = (todosData as { todos: Todo[] }).todos || []
-    state.searchEngines = (searchEnginesData as { searchEngines: SearchEngine[] }).searchEngines || []
-    
-    const savedEngineId = localStorage.getItem('hometab_search_engine')
-    if (savedEngineId) {
-      state.currentSearchEngine = state.searchEngines.find(e => e.id === savedEngineId) || state.searchEngines[0]
-    } else {
-      state.currentSearchEngine = state.searchEngines[0]
-    }
-    
-    renderShortcuts()
-    renderTodos()
-    renderSearchEngines()
+    const data = (await res.json()) as Record<string, unknown>
+    localStorage.setItem('hometab_data', JSON.stringify(data))
+    renderAll(data)
   } catch (error) {
     console.error('Failed to load data:', error)
   }
@@ -723,12 +738,15 @@ async function init() {
   
   if (storedToken) {
     try {
-      const res = await fetch(`${API_BASE}/api/shortcuts`, {
+      const res = await fetch(`${API_BASE}/api/auth/check`, {
         headers: { 'Authorization': `Bearer ${storedToken}` }
       })
       if (res.ok) {
-        showMainContent()
-        return
+        const data = await res.json()
+        if ((data as { isValid?: boolean }).isValid) {
+          showMainContent()
+          return
+        }
       }
     } catch {
       // Token invalid, continue to show password modal
@@ -851,11 +869,13 @@ function resetLoadingStates() {
     shortcut.classList.remove('loading')
     const icon = shortcut.querySelector('.shortcut-icon')
     const img = icon?.querySelector('img')
+    const svgIcon = icon?.querySelector('svg:not(.loading-icon)')
     const defaultIconSpan = icon?.querySelector('span.hidden')
     const loadingIcon = icon?.querySelector('.loading-icon')
     
     if (img) img.classList.remove('hidden')
-    if (defaultIconSpan) defaultIconSpan.classList.add('hidden')
+    if (svgIcon) svgIcon.classList.remove('hidden')
+    if (defaultIconSpan) defaultIconSpan.classList.remove('hidden')
     if (loadingIcon) loadingIcon.classList.add('hidden')
   })
   

@@ -22,6 +22,7 @@ export interface UserData {
   passwordHash: string
   shortcuts: Shortcut[]
   todos: Todo[]
+  searchEngines: SearchEngine[]
 }
 
 export const DEFAULT_USER_ID = 'default'

@@ -133,7 +133,8 @@ app.post('/api/auth/setup', rateLimit({ windowMs: 60 * 60 * 1000, max: 3, messag
   const userData: UserData = {
     passwordHash,
     shortcuts: defaults.shortcuts as Shortcut[],
-    todos: defaults.todos as Todo[]
+    todos: defaults.todos as Todo[],
+    searchEngines: defaults.searchEngines as SearchEngine[]
   }
   
   await setUserData(c.env.KV_BINDING, DEFAULT_USER_ID, userData)
@@ -174,16 +175,23 @@ app.post('/api/auth/logout', async (c) => {
 
 app.get('/api/auth/check', async (c) => {
   const userData = await getUserData(c.env.KV_BINDING, DEFAULT_USER_ID)
-  return c.json({ hasPassword: !!userData })
+  const hasPassword = !!userData
+  
+  const authHeader = c.req.header('Authorization')
+  let isValid = false
+  if (authHeader) {
+    const token = authHeader.replace('Bearer ', '')
+    const userId = await validateAndRefreshSession(c.env.KV_BINDING, token)
+    isValid = userId === DEFAULT_USER_ID
+  }
+  
+  return c.json({ hasPassword, isValid })
 })
 
-app.get('/api/search-engines', async (c) => {
-  return c.json({ searchEngines: defaults.searchEngines as SearchEngine[] })
-})
-
-app.get('/api/shortcuts', async (c) => {
+app.get('/api/data', async (c) => {
   const userData = await getUserData(c.env.KV_BINDING, DEFAULT_USER_ID)
-  return c.json({ shortcuts: userData?.shortcuts || [] })
+  const { passwordHash, ...data } = userData || { passwordHash: '' }
+  return c.json(data)
 })
 
 app.post('/api/shortcuts', async (c) => {
@@ -231,11 +239,6 @@ app.delete('/api/shortcuts/:id', async (c) => {
     await setUserData(c.env.KV_BINDING, DEFAULT_USER_ID, userData)
     return c.json({ success: true })
   })
-})
-
-app.get('/api/todos', async (c) => {
-  const userData = await getUserData(c.env.KV_BINDING, DEFAULT_USER_ID)
-  return c.json({ todos: userData?.todos || [] })
 })
 
 app.post('/api/todos', async (c) => {
