@@ -43,6 +43,27 @@
           </div>
         </div>
 
+        <div class="search-section">
+          <div class="search-box">
+            <button id="search-engine-btn" class="search-engine-btn" title="Select search engine">
+              <span id="current-engine-icon"></span>
+              <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </button>
+            <div id="search-engine-dropdown" class="dropdown search-engine-dropdown">
+              <div id="search-engine-list"></div>
+            </div>
+            <input type="text" id="search-input" placeholder="Search the web..." autocomplete="off">
+            <button id="search-btn" class="search-btn" title="Search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+            </button>
+          </div>
+        </div>
+
         <div class="middle-section">
           <div id="shortcuts" class="shortcuts"></div>
         </div>
@@ -88,6 +109,8 @@
         </form>
       </div>
     </div>
+
+    <div id="toast-container" class="toast-container"></div>
   </div>
   
   <script type="module" src="/scripts/main.js"></script>

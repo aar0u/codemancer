@@ -1,21 +1,89 @@
-interface Shortcut {
-  id: string
-  name: string
-  url: string
-  icon?: string
-}
-
-interface Todo {
-  id: string
-  text: string
-  completed: boolean
-}
+import { Shortcut, Todo, SearchEngine } from '../types'
 
 const API_BASE = ''
 
-let shortcuts: Shortcut[] = []
-let todos: Todo[] = []
-let editingShortcutId: string | null = null
+const state = {
+  shortcuts: [] as Shortcut[],
+  todos: [] as Todo[],
+  searchEngines: [] as SearchEngine[],
+  currentSearchEngine: null as SearchEngine | null,
+  editingShortcutId: null as string | null,
+  clockInterval: null as ReturnType<typeof setInterval> | null,
+  searchDebounceTimer: null as ReturnType<typeof setTimeout> | null,
+}
+
+const toastContainer = document.getElementById('toast-container')!
+
+type ToastType = 'success' | 'error' | 'info'
+
+function showToast(message: string, type: ToastType = 'info', duration = 3000) {
+  const toast = document.createElement('div')
+  toast.className = `toast ${type}`
+  toast.textContent = message
+  toastContainer.appendChild(toast)
+  
+  requestAnimationFrame(() => {
+    toast.classList.add('show')
+  })
+  
+  setTimeout(() => {
+    toast.classList.remove('show')
+    setTimeout(() => toast.remove(), 300)
+  }, duration)
+}
+
+function getAuthHeaders(): HeadersInit {
+  const password = localStorage.getItem('hometab_auth')
+  return {
+    'Content-Type': 'application/json',
+    ...(password ? { 'Authorization': `Bearer ${password}` } : {})
+  }
+}
+
+function handleUnauthorized() {
+  localStorage.removeItem('hometab_auth')
+  location.reload()
+}
+
+async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      ...getAuthHeaders(),
+      ...options.headers
+    }
+  })
+  
+  if (response.status === 401) {
+    handleUnauthorized()
+    throw new Error('Unauthorized')
+  }
+  
+  return response
+}
+
+function renderIcon(icon: string | undefined, options?: { name?: string; fallbackUrl?: string }): string {
+  const { name = '', fallbackUrl } = options || {}
+  
+  if (icon) {
+    const trimmed = icon.trim()
+    const isSvg = trimmed.startsWith('<svg')
+    if (isSvg) return icon
+    
+    const isUrl = /^(https?:)?\/\//.test(trimmed) || trimmed.startsWith('data:')
+    if (isUrl) return `<img src="${icon}" alt="${name}">`
+    
+    return `<span class="icon-text">${icon.toUpperCase()}</span>`
+  }
+  
+  if (fallbackUrl) {
+    return `<img src="${fallbackUrl}" alt="${name}">`
+  }
+  
+  const isCJK = /[\u4e00-\u9fff\u3040-\u30ff]/.test(name)
+  const text = name.slice(0, isCJK ? 2 : 3).toUpperCase()
+  return `<span class="icon-text">${text}</span>`
+}
 
 const passwordModal = document.getElementById('password-modal')!
 const passwordForm = document.getElementById('password-form') as HTMLFormElement
@@ -47,41 +115,33 @@ const shortcutIconInput = document.getElementById('shortcut-icon-input') as HTML
 const shortcutCancel = document.getElementById('shortcut-cancel')!
 const shortcutModalTitle = document.getElementById('shortcut-modal-title')!
 
-function getTodayKey() {
-  const now = new Date()
-  return `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`
-}
+const searchInput = document.getElementById('search-input') as HTMLInputElement
+const searchBtn = document.getElementById('search-btn')!
+const searchEngineBtn = document.getElementById('search-engine-btn')!
+const searchEngineDropdown = document.getElementById('search-engine-dropdown')!
+const searchEngineList = document.getElementById('search-engine-list')!
+const currentEngineIcon = document.getElementById('current-engine-icon')!
 
 async function setDynamicBackground(forceRefresh = false) {
-  const todayKey = getTodayKey()
+  const now = new Date()
+  const todayKey = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`
   const cached = localStorage.getItem('hometab_bg')
   
   if (!forceRefresh && cached) {
-    const { date, imageId } = JSON.parse(cached)
-    if (date === todayKey && imageId) {
-      const width = window.innerWidth
-      const height = Math.round(window.innerHeight * 1.2)
-      background.style.backgroundImage = `url(https://picsum.photos/id/${imageId}/${width}/${height})`
+    const { date, imageUrl } = JSON.parse(cached)
+    if (date === todayKey && imageUrl) {
+      background.style.backgroundImage = `url(${imageUrl})`
       return
     }
   }
   
   const width = window.innerWidth
   const height = Math.round(window.innerHeight * 1.2)
+  const res = await fetch(`https://picsum.photos/${width}/${height}`)
   
-  try {
-    const res = await fetch(`https://picsum.photos/${width}/${height}`)
-    const imageId = res.url.match(/\/id\/(\d+)\//)?.[1] || null
-    
-    const blob = await res.blob()
-    const blobUrl = URL.createObjectURL(blob)
-    background.style.backgroundImage = `url(${blobUrl})`
-    
-    if (imageId) {
-      localStorage.setItem('hometab_bg', JSON.stringify({ date: todayKey, imageId }))
-    }
-  } catch {
-    background.style.backgroundImage = `url(https://picsum.photos/${width}/${height})`
+  if (res.url) {
+    localStorage.setItem('hometab_bg', JSON.stringify({ date: todayKey, imageUrl: res.url }))
+    background.style.backgroundImage = `url(${res.url})`
   }
 }
 
@@ -110,28 +170,100 @@ function getFaviconUrl(url: string): string | null {
   }
 }
 
+function normalizeUrl(input: string): string | null {
+  let url = input.trim()
+  if (!url) return null
+  
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = `https://${url}`
+  }
+  
+  try {
+    new URL(url)
+    return url
+  } catch {
+    return null
+  }
+}
+
 function closeAllDropdowns() {
-  document.querySelectorAll('.shortcut-dropdown.open').forEach(dropdown => {
+  document.querySelectorAll('.dropdown.open').forEach(dropdown => {
     dropdown.classList.remove('open')
   })
+}
+
+let shortcutsEventsInitialized = false
+
+function setupShortcutsEventDelegation() {
+  if (shortcutsEventsInitialized) return
+  shortcutsEventsInitialized = true
+
+  shortcutsEl.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement
+    
+    if (target.closest('.add-shortcut')) {
+      openShortcutModal()
+      return
+    }
+    
+    if (target.closest('.shortcut-menu-btn')) {
+      e.stopPropagation()
+      const btn = target.closest('.shortcut-menu-btn') as HTMLElement
+      const id = btn.dataset.id!
+      const dropdown = document.querySelector(`.shortcut-dropdown[data-id="${id}"]`)
+      const isOpen = dropdown?.classList.contains('open')
+      closeAllDropdowns()
+      if (!isOpen && dropdown) {
+        dropdown.classList.add('open')
+      }
+      return
+    }
+    
+    if (target.closest('.dropdown-item.edit')) {
+      e.stopPropagation()
+      closeAllDropdowns()
+      const btn = target.closest('.dropdown-item.edit') as HTMLElement
+      const id = btn.dataset.id!
+      const shortcut = state.shortcuts.find(s => s.id === id)
+      if (shortcut) openShortcutModal(shortcut)
+      return
+    }
+    
+    if (target.closest('.delete-shortcut')) {
+      e.stopPropagation()
+      closeAllDropdowns()
+      const btn = target.closest('.delete-shortcut') as HTMLElement
+      const id = btn.dataset.id!
+      deleteShortcut(id)
+      return
+    }
+    
+    const link = target.closest('.shortcut a') as HTMLElement
+    if (link) {
+      const shortcut = link.closest('.shortcut')
+      const icon = shortcut?.querySelector('.shortcut-icon')
+      const img = icon?.querySelector('img')
+      const defaultIconSpan = icon?.querySelector('span:not(.hidden)')
+      const loadingIcon = icon?.querySelector('.loading-icon')
+      
+      if (img) img.classList.add('hidden')
+      if (defaultIconSpan) defaultIconSpan.classList.add('hidden')
+      if (loadingIcon) loadingIcon.classList.remove('hidden')
+      shortcut?.classList.add('loading')
+    }
+  })
+  
+  setupDragAndDrop()
 }
 
 function renderShortcuts() {
   shortcutsEl.innerHTML = ''
   
-  shortcuts.forEach(shortcut => {
-    const icon = shortcut.icon
-    const isSvg = icon?.trim().startsWith('<svg')
-    const fallbackUrl = getFaviconUrl(shortcut.url)
-    
-    let iconHtml = ''
-    if (isSvg && icon) {
-      iconHtml = icon
-    } else if (icon) {
-      iconHtml = `<img src="${icon}" alt="${shortcut.name}" onerror="this.style.display='none';this.nextElementSibling.classList.remove('hidden')">`
-    } else if (fallbackUrl) {
-      iconHtml = `<img src="${fallbackUrl}" alt="${shortcut.name}" onerror="this.style.display='none';this.nextElementSibling.classList.remove('hidden')">`
-    }
+  state.shortcuts.forEach(shortcut => {
+    const iconHtml = renderIcon(shortcut.icon, {
+      name: shortcut.name,
+      fallbackUrl: getFaviconUrl(shortcut.url) || undefined
+    })
     
     const div = document.createElement('div')
     div.className = 'shortcut'
@@ -141,10 +273,10 @@ function renderShortcuts() {
       <a href="${shortcut.url}" rel="noreferrer">
         <div class="shortcut-icon">
           ${iconHtml}
-          <svg class="default-icon ${iconHtml ? 'hidden' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"></circle>
-            <line x1="2" y1="12" x2="22" y2="12"></line>
-            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+          <svg class="loading-icon hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10" stroke-dasharray="60" stroke-dashoffset="0">
+              <animate attributeName="stroke-dashoffset" values="0;250" dur="1s" repeatCount="indefinite"/>
+            </circle>
           </svg>
         </div>
         <span class="shortcut-name">${shortcut.name}</span>
@@ -156,7 +288,7 @@ function renderShortcuts() {
           <circle cx="12" cy="19" r="1.5"></circle>
         </svg>
       </button>
-      <div class="shortcut-dropdown" data-id="${shortcut.id}">
+      <div class="dropdown shortcut-dropdown" data-id="${shortcut.id}">
         <button class="dropdown-item edit" data-id="${shortcut.id}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
@@ -164,7 +296,7 @@ function renderShortcuts() {
           </svg>
           <span>Edit</span>
         </button>
-        <button class="dropdown-item delete" data-id="${shortcut.id}">
+        <button class="dropdown-item danger delete-shortcut" data-id="${shortcut.id}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="18" y1="6" x2="6" y2="18"></line>
             <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -187,102 +319,82 @@ function renderShortcuts() {
     </div>
     <span class="shortcut-name">Add</span>
   `
-  addBtn.addEventListener('click', () => openShortcutModal())
   shortcutsEl.appendChild(addBtn)
   
-  document.querySelectorAll('.shortcut-menu-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation()
-      const id = (btn as HTMLElement).dataset.id!
-      const dropdown = document.querySelector(`.shortcut-dropdown[data-id="${id}"]`)
-      const isOpen = dropdown?.classList.contains('open')
-      closeAllDropdowns()
-      if (!isOpen && dropdown) {
-        dropdown.classList.add('open')
-      }
-    })
-  })
-  
-  document.querySelectorAll('.dropdown-item.edit').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation()
-      closeAllDropdowns()
-      const id = (btn as HTMLElement).dataset.id!
-      const shortcut = shortcuts.find(s => s.id === id)
-      if (shortcut) openShortcutModal(shortcut)
-    })
-  })
-  
-  document.querySelectorAll('.dropdown-item.delete').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation()
-      closeAllDropdowns()
-      const id = (btn as HTMLElement).dataset.id!
-      await deleteShortcut(id)
-    })
-  })
-  
-  setupDragAndDrop()
+  setupShortcutsEventDelegation()
 }
 
 let draggedId: string | null = null
+let dragDropInitialized = false
 
 function setupDragAndDrop() {
-  const items = shortcutsEl.querySelectorAll('.shortcut')
+  if (dragDropInitialized) return
+  dragDropInitialized = true
   
-  items.forEach(item => {
-    item.addEventListener('dragstart', (e) => {
-      draggedId = (item as HTMLElement).dataset.id!
-      item.classList.add('dragging')
-      ;(e as DragEvent).dataTransfer!.effectAllowed = 'move'
-    })
-    
-    item.addEventListener('dragend', () => {
-      item.classList.remove('dragging')
-      document.querySelectorAll('.shortcut.drag-over').forEach(el => el.classList.remove('drag-over'))
-      draggedId = null
-    })
-    
-    item.addEventListener('dragover', (e) => {
-      e.preventDefault()
-      ;(e as DragEvent).dataTransfer!.dropEffect = 'move'
-      document.querySelectorAll('.shortcut.drag-over').forEach(el => el.classList.remove('drag-over'))
-      if ((item as HTMLElement).dataset.id !== draggedId) {
-        item.classList.add('drag-over')
-      }
-    })
-    
-    item.addEventListener('dragleave', () => {
-      item.classList.remove('drag-over')
-    })
-    
-    item.addEventListener('drop', async (e) => {
-      e.preventDefault()
-      item.classList.remove('drag-over')
-      const targetId = (item as HTMLElement).dataset.id!
-      if (draggedId && draggedId !== targetId) {
-        await reorderShortcuts(draggedId, targetId)
-      }
-    })
+  shortcutsEl.addEventListener('dragstart', (e) => {
+    const item = (e.target as HTMLElement).closest('.shortcut') as HTMLElement | null
+    if (!item) return
+    draggedId = item.dataset.id!
+    item.classList.add('dragging')
+    ;(e as DragEvent).dataTransfer!.effectAllowed = 'move'
+  })
+  
+  shortcutsEl.addEventListener('dragend', (e) => {
+    const item = (e.target as HTMLElement).closest('.shortcut') as HTMLElement | null
+    if (item) item.classList.remove('dragging')
+    document.querySelectorAll('.shortcut.drag-over').forEach(el => el.classList.remove('drag-over'))
+    draggedId = null
+  })
+  
+  shortcutsEl.addEventListener('dragover', (e) => {
+    e.preventDefault()
+    const item = (e.target as HTMLElement).closest('.shortcut') as HTMLElement | null
+    if (!item) return
+    ;(e as DragEvent).dataTransfer!.dropEffect = 'move'
+    document.querySelectorAll('.shortcut.drag-over').forEach(el => el.classList.remove('drag-over'))
+    if (item.dataset.id !== draggedId) {
+      item.classList.add('drag-over')
+    }
+  })
+  
+  shortcutsEl.addEventListener('dragleave', (e) => {
+    const item = (e.target as HTMLElement).closest('.shortcut') as HTMLElement | null
+    if (item) item.classList.remove('drag-over')
+  })
+  
+  shortcutsEl.addEventListener('drop', async (e) => {
+    e.preventDefault()
+    const item = (e.target as HTMLElement).closest('.shortcut') as HTMLElement | null
+    if (!item) return
+    item.classList.remove('drag-over')
+    const targetId = item.dataset.id!
+    if (draggedId && draggedId !== targetId) {
+      await reorderShortcuts(draggedId, targetId)
+    }
   })
 }
 
 async function reorderShortcuts(draggedId: string, targetId: string) {
-  const draggedIndex = shortcuts.findIndex(s => s.id === draggedId)
-  const targetIndex = shortcuts.findIndex(s => s.id === targetId)
+  const draggedIndex = state.shortcuts.findIndex(s => s.id === draggedId)
+  const targetIndex = state.shortcuts.findIndex(s => s.id === targetId)
   
   if (draggedIndex === -1 || targetIndex === -1) return
   
-  const [dragged] = shortcuts.splice(draggedIndex, 1)
-  shortcuts.splice(targetIndex, 0, dragged)
+  const [dragged] = state.shortcuts.splice(draggedIndex, 1)
+  state.shortcuts.splice(targetIndex, 0, dragged)
   
-  await fetch(`${API_BASE}/api/shortcuts/reorder`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ shortcuts })
-  })
-  
-  renderShortcuts()
+  try {
+    await fetchWithAuth(`${API_BASE}/api/shortcuts/reorder`, {
+      method: 'PUT',
+      body: JSON.stringify({ shortcuts: state.shortcuts })
+    })
+    renderShortcuts()
+    showToast('Shortcuts reordered', 'success')
+  } catch (error) {
+    console.error('Failed to reorder shortcuts:', error)
+    showToast('Failed to reorder shortcuts', 'error')
+    await loadData()
+  }
 }
 
 document.addEventListener('click', (e) => {
@@ -295,10 +407,10 @@ document.addEventListener('click', (e) => {
 function renderTodos() {
   todoItems.innerHTML = ''
   
-  if (todos.length === 0) {
+  if (state.todos.length === 0) {
     todoItems.innerHTML = '<p style="text-align:center;color:rgba(255,255,255,0.5);font-size:0.875rem;padding:1rem;">No tasks yet. Add one above!</p>'
   } else {
-    todos.forEach(todo => {
+    state.todos.forEach(todo => {
       const div = document.createElement('div')
       div.className = 'todo-item'
       div.innerHTML = `
@@ -319,36 +431,45 @@ function renderTodos() {
     })
   }
   
-  const completedCount = todos.filter(t => t.completed).length
-  todoCount.textContent = `${completedCount}/${todos.length} done`
+  const completedCount = state.todos.filter(t => t.completed).length
+  todoCount.textContent = `${completedCount}/${state.todos.length} done`
   
-  document.querySelectorAll('.todo-item .checkbox').forEach(checkbox => {
-    checkbox.addEventListener('click', async () => {
+  setupTodosEventDelegation()
+}
+
+let todosEventsInitialized = false
+
+function setupTodosEventDelegation() {
+  if (todosEventsInitialized) return
+  todosEventsInitialized = true
+
+  todoItems.addEventListener('click', async (e) => {
+    const target = e.target as HTMLElement
+    
+    const checkbox = target.closest('.checkbox')
+    if (checkbox) {
       const id = (checkbox as HTMLElement).dataset.id!
-      const todo = todos.find(t => t.id === id)
-      if (todo) {
-        await toggleTodo(id, !todo.completed)
-      }
-    })
-  })
-  
-  document.querySelectorAll('.todo-item .delete-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const id = (btn as HTMLElement).dataset.id!
-      await deleteTodo(id)
-    })
+      const todo = state.todos.find(t => t.id === id)
+      if (todo) await toggleTodo(id, !todo.completed)
+      return
+    }
+    
+    const deleteBtn = target.closest('.delete-btn')
+    if (deleteBtn) {
+      await deleteTodo((deleteBtn as HTMLElement).dataset.id!)
+    }
   })
 }
 
 function openShortcutModal(shortcut?: Shortcut) {
   if (shortcut) {
-    editingShortcutId = shortcut.id
+    state.editingShortcutId = shortcut.id
     shortcutModalTitle.textContent = 'Edit Shortcut'
     shortcutNameInput.value = shortcut.name
     shortcutUrlInput.value = shortcut.url
     shortcutIconInput.value = shortcut.icon || ''
   } else {
-    editingShortcutId = null
+    state.editingShortcutId = null
     shortcutModalTitle.textContent = 'Add Shortcut'
     shortcutNameInput.value = ''
     shortcutUrlInput.value = ''
@@ -360,93 +481,147 @@ function openShortcutModal(shortcut?: Shortcut) {
 
 function closeShortcutModal() {
   shortcutModal.classList.add('hidden')
-  editingShortcutId = null
+  state.editingShortcutId = null
 }
 
 async function saveShortcut() {
   const name = shortcutNameInput.value.trim()
-  let url = shortcutUrlInput.value.trim()
+  const urlInput = shortcutUrlInput.value.trim()
   const icon = shortcutIconInput.value.trim() || undefined
   
-  if (!name || !url) return
+  if (!name || !urlInput) return
   
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    url = `https://${url}`
+  const url = normalizeUrl(urlInput)
+  if (!url) {
+    showToast('Please enter a valid URL', 'error')
+    return
   }
   
-  if (editingShortcutId) {
-    await fetch(`${API_BASE}/api/shortcuts/${editingShortcutId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, url, icon })
-    })
-  } else {
-    await fetch(`${API_BASE}/api/shortcuts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: Date.now().toString(), name, url, icon })
-    })
-  }
+  const saveBtn = document.getElementById('shortcut-save') as HTMLButtonElement
+  saveBtn.disabled = true
+  saveBtn.textContent = 'Saving...'
   
-  closeShortcutModal()
-  await loadData()
+  try {
+    if (state.editingShortcutId) {
+      await fetchWithAuth(`${API_BASE}/api/shortcuts/${state.editingShortcutId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ name, url, icon })
+      })
+      showToast('Shortcut updated', 'success')
+    } else {
+      await fetchWithAuth(`${API_BASE}/api/shortcuts`, {
+        method: 'POST',
+        body: JSON.stringify({ id: Date.now().toString(), name, url, icon })
+      })
+      showToast('Shortcut added', 'success')
+    }
+    
+    closeShortcutModal()
+    await loadData()
+  } catch (error) {
+    console.error('Failed to save shortcut:', error)
+    showToast('Failed to save shortcut', 'error')
+  } finally {
+    saveBtn.disabled = false
+    saveBtn.textContent = 'Save'
+  }
 }
 
 async function deleteShortcut(id: string) {
-  await fetch(`${API_BASE}/api/shortcuts/${id}`, { method: 'DELETE' })
-  await loadData()
+  try {
+    await fetchWithAuth(`${API_BASE}/api/shortcuts/${id}`, { method: 'DELETE' })
+    await loadData()
+    showToast('Shortcut deleted', 'success')
+  } catch (error) {
+    console.error('Failed to delete shortcut:', error)
+    showToast('Failed to delete shortcut', 'error')
+  }
 }
 
 async function addTodo() {
   const text = todoInput.value.trim()
   if (!text) return
   
-  await fetch(`${API_BASE}/api/todos`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: Date.now().toString(), text, completed: false })
-  })
-  
-  todoInput.value = ''
-  await loadData()
+  try {
+    await fetchWithAuth(`${API_BASE}/api/todos`, {
+      method: 'POST',
+      body: JSON.stringify({ id: Date.now().toString(), text, completed: false })
+    })
+    
+    todoInput.value = ''
+    await loadData()
+    showToast('Task added', 'success')
+  } catch (error) {
+    console.error('Failed to add todo:', error)
+    showToast('Failed to add task', 'error')
+  }
 }
 
 async function toggleTodo(id: string, completed: boolean) {
-  await fetch(`${API_BASE}/api/todos/${id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ completed })
-  })
-  await loadData()
+  try {
+    await fetchWithAuth(`${API_BASE}/api/todos/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ completed })
+    })
+    await loadData()
+  } catch (error) {
+    console.error('Failed to toggle todo:', error)
+    showToast('Failed to update task', 'error')
+  }
 }
 
 async function deleteTodo(id: string) {
-  await fetch(`${API_BASE}/api/todos/${id}`, { method: 'DELETE' })
-  await loadData()
+  try {
+    await fetchWithAuth(`${API_BASE}/api/todos/${id}`, { method: 'DELETE' })
+    await loadData()
+    showToast('Task deleted', 'success')
+  } catch (error) {
+    console.error('Failed to delete todo:', error)
+    showToast('Failed to delete task', 'error')
+  }
 }
 
 async function checkPasswordExists(): Promise<boolean> {
-  const res = await fetch(`${API_BASE}/api/auth/check`)
-  const data = await res.json()
-  return (data as { hasPassword: boolean }).hasPassword
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/check`)
+    const data = await res.json()
+    return (data as { hasPassword: boolean }).hasPassword
+  } catch (error) {
+    console.error('Failed to check password:', error)
+    return false
+  }
 }
 
-async function setupPassword(password: string): Promise<boolean> {
-  const res = await fetch(`${API_BASE}/api/auth/setup`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password })
-  })
-  return res.ok
+async function setupPassword(password: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    return (data as { token?: string }).token || null
+  } catch (error) {
+    console.error('Failed to setup password:', error)
+    return null
+  }
 }
 
-async function verifyPassword(password: string): Promise<boolean> {
-  const res = await fetch(`${API_BASE}/api/auth/verify`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password })
-  })
-  return res.ok
+async function verifyPassword(password: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    return (data as { token?: string }).token || null
+  } catch (error) {
+    console.error('Failed to verify password:', error)
+    return null
+  }
 }
 
 function showError(message: string) {
@@ -480,17 +655,17 @@ async function handlePasswordSubmit() {
       return
     }
     
-    const success = await setupPassword(password)
-    if (success) {
-      localStorage.setItem('hometab_auth', password)
+    const token = await setupPassword(password)
+    if (token) {
+      localStorage.setItem('hometab_auth', token)
       showMainContent()
     } else {
       showError('Failed to set password')
     }
   } else {
-    const success = await verifyPassword(password)
-    if (success) {
-      localStorage.setItem('hometab_auth', password)
+    const token = await verifyPassword(password)
+    if (token) {
+      localStorage.setItem('hometab_auth', token)
       showMainContent()
     } else {
       showError('Invalid password')
@@ -504,34 +679,61 @@ async function showMainContent() {
   await loadData()
   await setDynamicBackground()
   updateClock()
-  setInterval(updateClock, 1000)
+  if (state.clockInterval) clearInterval(state.clockInterval)
+  state.clockInterval = setInterval(updateClock, 1000)
 }
 
 async function loadData() {
-  const [shortcutsRes, todosRes] = await Promise.all([
-    fetch(`${API_BASE}/api/shortcuts`),
-    fetch(`${API_BASE}/api/todos`)
-  ])
-  
-  const shortcutsData = await shortcutsRes.json()
-  const todosData = await todosRes.json()
-  
-  shortcuts = (shortcutsData as { shortcuts: Shortcut[] }).shortcuts || []
-  todos = (todosData as { todos: Todo[] }).todos || []
-  
-  renderShortcuts()
-  renderTodos()
+  try {
+    const [shortcutsRes, todosRes, searchEnginesRes] = await Promise.all([
+      fetchWithAuth(`${API_BASE}/api/shortcuts`),
+      fetchWithAuth(`${API_BASE}/api/todos`),
+      fetch(`${API_BASE}/api/search-engines`)
+    ])
+    
+    if (!shortcutsRes.ok || !todosRes.ok || !searchEnginesRes.ok) {
+      throw new Error('Failed to load data')
+    }
+    
+    const shortcutsData = await shortcutsRes.json()
+    const todosData = await todosRes.json()
+    const searchEnginesData = await searchEnginesRes.json()
+    
+    state.shortcuts = (shortcutsData as { shortcuts: Shortcut[] }).shortcuts || []
+    state.todos = (todosData as { todos: Todo[] }).todos || []
+    state.searchEngines = (searchEnginesData as { searchEngines: SearchEngine[] }).searchEngines || []
+    
+    const savedEngineId = localStorage.getItem('hometab_search_engine')
+    if (savedEngineId) {
+      state.currentSearchEngine = state.searchEngines.find(e => e.id === savedEngineId) || state.searchEngines[0]
+    } else {
+      state.currentSearchEngine = state.searchEngines[0]
+    }
+    
+    renderShortcuts()
+    renderTodos()
+    renderSearchEngines()
+  } catch (error) {
+    console.error('Failed to load data:', error)
+  }
 }
 
 async function init() {
-  const storedPassword = localStorage.getItem('hometab_auth')
+  const storedToken = localStorage.getItem('hometab_auth')
   
-  if (storedPassword) {
-    const success = await verifyPassword(storedPassword)
-    if (success) {
-      showMainContent()
-      return
+  if (storedToken) {
+    try {
+      const res = await fetch(`${API_BASE}/api/shortcuts`, {
+        headers: { 'Authorization': `Bearer ${storedToken}` }
+      })
+      if (res.ok) {
+        showMainContent()
+        return
+      }
+    } catch {
+      // Token invalid, continue to show password modal
     }
+    localStorage.removeItem('hometab_auth')
   }
   
   const hasPassword = await checkPasswordExists()
@@ -549,6 +751,53 @@ async function init() {
   }
   
   passwordModal.classList.remove('hidden')
+}
+
+function renderSearchEngines() {
+  if (!state.currentSearchEngine) return
+  
+  currentEngineIcon.innerHTML = renderIcon(state.currentSearchEngine.icon, { name: state.currentSearchEngine.name })
+  
+  searchEngineList.innerHTML = ''
+  state.searchEngines.forEach(engine => {
+    const btn = document.createElement('button')
+    btn.className = `dropdown-item search-engine-item${engine.id === state.currentSearchEngine?.id ? ' selected' : ''}`
+    btn.innerHTML = `
+      ${renderIcon(engine.icon, { name: engine.name })}
+      <span>${engine.name}</span>
+    `
+    btn.addEventListener('click', () => selectSearchEngine(engine))
+    searchEngineList.appendChild(btn)
+  })
+}
+
+function selectSearchEngine(engine: SearchEngine) {
+  state.currentSearchEngine = engine
+  localStorage.setItem('hometab_search_engine', engine.id)
+  renderSearchEngines()
+  closeAllDropdowns()
+  searchEngineBtn.classList.remove('active')
+  searchInput.focus()
+}
+
+function performSearch() {
+  const query = searchInput.value.trim()
+  if (!query || !state.currentSearchEngine) return
+  
+  searchBtn.classList.add('loading')
+  searchInput.disabled = true
+  
+  const searchUrl = state.currentSearchEngine.url.replace('%s', encodeURIComponent(query))
+  window.open(searchUrl, '_self')
+}
+
+function toggleSearchEngineDropdown() {
+  const isOpen = searchEngineDropdown.classList.contains('open')
+  closeAllDropdowns()
+  if (!isOpen) {
+    searchEngineDropdown.classList.add('open')
+    searchEngineBtn.classList.add('active')
+  }
 }
 
 passwordForm.addEventListener('submit', (e) => {
@@ -574,6 +823,50 @@ todoHeader.addEventListener('click', () => {
 
 document.getElementById('refresh-bg')!.addEventListener('click', () => {
   setDynamicBackground(true)
+})
+
+searchEngineBtn.addEventListener('click', (e) => {
+  e.stopPropagation()
+  toggleSearchEngineDropdown()
+})
+
+searchBtn.addEventListener('click', performSearch)
+
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    if (state.searchDebounceTimer) clearTimeout(state.searchDebounceTimer)
+    state.searchDebounceTimer = setTimeout(performSearch, 150)
+  }
+})
+
+document.addEventListener('click', (e) => {
+  if (!searchEngineDropdown.contains(e.target as Node) && !searchEngineBtn.contains(e.target as Node)) {
+    searchEngineDropdown.classList.remove('open')
+    searchEngineBtn.classList.remove('active')
+  }
+})
+
+function resetLoadingStates() {
+  document.querySelectorAll('.shortcut.loading').forEach(shortcut => {
+    shortcut.classList.remove('loading')
+    const icon = shortcut.querySelector('.shortcut-icon')
+    const img = icon?.querySelector('img')
+    const defaultIconSpan = icon?.querySelector('span.hidden')
+    const loadingIcon = icon?.querySelector('.loading-icon')
+    
+    if (img) img.classList.remove('hidden')
+    if (defaultIconSpan) defaultIconSpan.classList.add('hidden')
+    if (loadingIcon) loadingIcon.classList.add('hidden')
+  })
+  
+  searchBtn.classList.remove('loading')
+  searchInput.disabled = false
+}
+
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) {
+    resetLoadingStates()
+  }
 })
 
 init()
