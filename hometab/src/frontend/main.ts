@@ -855,6 +855,23 @@ searchInput.addEventListener('keydown', (e) => {
     if (state.searchDebounceTimer) clearTimeout(state.searchDebounceTimer)
     state.searchDebounceTimer = setTimeout(performSearch, 150)
   }
+  
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    e.preventDefault()
+    const engines = state.searchEngines
+    if (engines.length === 0) return
+    
+    const currentIndex = engines.findIndex(e => e.id === state.currentSearchEngine?.id)
+    let newIndex: number
+    
+    if (e.key === 'ArrowUp') {
+      newIndex = currentIndex <= 0 ? engines.length - 1 : currentIndex - 1
+    } else {
+      newIndex = currentIndex >= engines.length - 1 ? 0 : currentIndex + 1
+    }
+    
+    selectSearchEngine(engines[newIndex])
+  }
 })
 
 document.addEventListener('click', (e) => {
@@ -886,6 +903,30 @@ function resetLoadingStates() {
 window.addEventListener('pageshow', (e) => {
   if (e.persisted) {
     resetLoadingStates()
+  }
+})
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === '/') {
+    const activeElement = document.activeElement
+    const isInputFocused = activeElement && (
+      activeElement.tagName === 'INPUT' ||
+      activeElement.tagName === 'TEXTAREA' ||
+      activeElement.tagName === 'SELECT' ||
+      (activeElement as HTMLElement).isContentEditable
+    )
+    
+    if (!isInputFocused) {
+      e.preventDefault()
+      searchInput.focus()
+      searchInput.select()
+    }
+  }
+  
+  if (e.key === 'Escape') {
+    if (!shortcutModal.classList.contains('hidden')) {
+      closeShortcutModal()
+    }
   }
 })
 
