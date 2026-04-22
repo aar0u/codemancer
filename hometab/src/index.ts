@@ -1,14 +1,26 @@
 import { Hono, Context, MiddlewareHandler } from 'hono'
 import { cors } from 'hono/cors'
 import defaults from './defaults.json'
-import { Shortcut, Todo, SearchEngine, UserData, DEFAULT_USER_ID } from './types'
+import {
+  Shortcut,
+  Todo,
+  SearchEngine,
+  AuthData,
+  UserData,
+  DEFAULT_USER_ID,
+  KV_KEYS,
+} from './types'
 
 type Bindings = {
   KV_BINDING: KVNamespace
   ASSETS: Fetcher
 }
 
-const app = new Hono<{ Bindings: Bindings }>()
+type Variables = {
+  userId: string
+}
+
+const app = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 
 app.use('/*', cors())
 
@@ -18,23 +30,24 @@ type RateLimitOptions = {
   message?: string
 }
 
-function rateLimit(options: RateLimitOptions): MiddlewareHandler<{ Bindings: Bindings }> {
+function rateLimit(options: RateLimitOptions): MiddlewareHandler<{ Bindings: Bindings; Variables: Variables }> {
   const { windowMs, max, message = 'Too many requests, please try again later.' } = options
-  
+
   return async (c, next) => {
-    const ip = c.req.header('CF-Connecting-IP') || 
-               c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 
-               'unknown'
-    const key = `ratelimit:${ip}:${Math.floor(Date.now() / windowMs)}`
-    
+    const ip =
+      c.req.header('CF-Connecting-IP') ||
+      c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() ||
+      'unknown'
+    const key = KV_KEYS.rateLimit(ip, Math.floor(Date.now() / windowMs))
+
     const kv = c.env.KV_BINDING
     const current = await kv.get(key)
     const count = current ? parseInt(current, 10) : 0
-    
+
     if (count >= max) {
       return c.json({ error: message }, 429)
     }
-    
+
     await kv.put(key, String(count + 1), { expirationTtl: Math.ceil(windowMs / 1000) })
     await next()
   }
@@ -47,122 +60,179 @@ async function hashPassword(password: string): Promise<string> {
   const data = encoder.encode(password)
   const hashBuffer = await crypto.subtle.digest('SHA-256', data)
   const hashArray = Array.from(new Uint8Array(hashBuffer))
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 function generateToken(): string {
   const bytes = new Uint8Array(32)
   crypto.getRandomValues(bytes)
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
 }
 
 async function createSession(kv: KVNamespace, userId: string): Promise<string> {
   const token = generateToken()
-  await kv.put(`session:${token}`, userId, { expirationTtl: SESSION_TTL })
+  await kv.put(KV_KEYS.session(token), userId, { expirationTtl: SESSION_TTL })
   return token
 }
 
-async function validateAndRefreshSession(kv: KVNamespace, token: string): Promise<string | null> {
-  const userId = await kv.get(`session:${token}`)
+async function validateAndRefreshSession(
+  kv: KVNamespace,
+  token: string
+): Promise<string | null> {
+  const userId = await kv.get(KV_KEYS.session(token))
   if (userId) {
-    await kv.put(`session:${token}`, userId, { expirationTtl: SESSION_TTL })
+    await kv.put(KV_KEYS.session(token), userId, { expirationTtl: SESSION_TTL })
   }
   return userId
 }
 
 async function deleteSession(kv: KVNamespace, token: string): Promise<void> {
-  await kv.delete(`session:${token}`)
+  await kv.delete(KV_KEYS.session(token))
 }
 
-async function getUserData(kv: KVNamespace, userId: string): Promise<UserData | null> {
-  const data = await kv.get(`user:${userId}`)
+async function getAuthData(kv: KVNamespace, userId: string): Promise<AuthData | null> {
+  const data = await kv.get(KV_KEYS.auth(userId))
   return data ? JSON.parse(data) : null
 }
 
-async function setUserData(kv: KVNamespace, userId: string, data: UserData): Promise<void> {
-  await kv.put(`user:${userId}`, JSON.stringify(data))
+async function setAuthData(kv: KVNamespace, userId: string, data: AuthData): Promise<void> {
+  await kv.put(KV_KEYS.auth(userId), JSON.stringify(data))
 }
 
-async function withUserData(
-  c: Context<{ Bindings: Bindings }>,
-  handler: (userData: UserData) => Promise<Response>
-): Promise<Response> {
-  const userData = await getUserData(c.env.KV_BINDING, DEFAULT_USER_ID)
-  if (!userData) {
-    return c.json({ error: 'User not found' }, 404)
-  }
-  return handler(userData)
+async function getShortcuts(kv: KVNamespace, userId: string): Promise<Shortcut[]> {
+  const data = await kv.get(KV_KEYS.shortcuts(userId))
+  return data ? JSON.parse(data) : []
 }
 
-async function verifyAuth(c: Context<{ Bindings: Bindings }>): Promise<boolean> {
+async function setShortcuts(kv: KVNamespace, userId: string, shortcuts: Shortcut[]): Promise<void> {
+  await kv.put(KV_KEYS.shortcuts(userId), JSON.stringify(shortcuts))
+}
+
+async function getTodos(kv: KVNamespace, userId: string): Promise<Todo[]> {
+  const data = await kv.get(KV_KEYS.todos(userId))
+  return data ? JSON.parse(data) : []
+}
+
+async function setTodos(kv: KVNamespace, userId: string, todos: Todo[]): Promise<void> {
+  await kv.put(KV_KEYS.todos(userId), JSON.stringify(todos))
+}
+
+async function getSearchEngines(kv: KVNamespace, userId: string): Promise<SearchEngine[]> {
+  const data = await kv.get(KV_KEYS.searchEngines(userId))
+  return data ? JSON.parse(data) : []
+}
+
+async function setSearchEngines(
+  kv: KVNamespace,
+  userId: string,
+  searchEngines: SearchEngine[]
+): Promise<void> {
+  await kv.put(KV_KEYS.searchEngines(userId), JSON.stringify(searchEngines))
+}
+
+async function getUserData(kv: KVNamespace, userId: string): Promise<UserData> {
+  const [shortcuts, todos, searchEngines] = await Promise.all([
+    getShortcuts(kv, userId),
+    getTodos(kv, userId),
+    getSearchEngines(kv, userId),
+  ])
+  return { shortcuts, todos, searchEngines }
+}
+
+async function initializeUserData(
+  kv: KVNamespace,
+  userId: string,
+  passwordHash: string
+): Promise<void> {
+  await Promise.all([
+    setAuthData(kv, userId, { passwordHash }),
+    setShortcuts(kv, userId, defaults.shortcuts as Shortcut[]),
+    setTodos(kv, userId, defaults.todos as Todo[]),
+    setSearchEngines(kv, userId, defaults.searchEngines as SearchEngine[]),
+  ])
+}
+
+async function verifyAuth(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>
+): Promise<{ valid: boolean; userId: string | null }> {
   const authHeader = c.req.header('Authorization')
-  if (!authHeader) return false
-  
+  if (!authHeader) return { valid: false, userId: null }
+
   const token = authHeader.replace('Bearer ', '')
   const userId = await validateAndRefreshSession(c.env.KV_BINDING, token)
-  return userId === DEFAULT_USER_ID
+  return { valid: userId !== null, userId }
 }
 
-app.use('/api/shortcuts/*', async (c, next) => {
-  if (!(await verifyAuth(c))) {
+const authMiddleware: MiddlewareHandler<{ Bindings: Bindings; Variables: Variables }> = async (c, next) => {
+  const { valid, userId } = await verifyAuth(c)
+  if (!valid || !userId) {
     return c.json({ error: 'Unauthorized' }, 401)
   }
+  c.set('userId', userId)
   await next()
-})
+}
 
-app.use('/api/todos/*', async (c, next) => {
-  if (!(await verifyAuth(c))) {
-    return c.json({ error: 'Unauthorized' }, 401)
-  }
-  await next()
-})
+app.use('/api/shortcuts/*', authMiddleware)
+app.use('/api/todos/*', authMiddleware)
+app.use('/api/data', authMiddleware)
 
-app.post('/api/auth/setup', rateLimit({ windowMs: 60 * 60 * 1000, max: 3, message: 'Too many setup attempts. Try again in 1 hour.' }), async (c) => {
-  const { password } = await c.req.json()
-  
-  if (!password || typeof password !== 'string') {
-    return c.json({ error: 'Password is required' }, 400)
-  }
-  
-  const existing = await getUserData(c.env.KV_BINDING, DEFAULT_USER_ID)
-  if (existing) {
-    return c.json({ error: 'Password already set' }, 400)
-  }
-  
-  const passwordHash = await hashPassword(password)
-  const userData: UserData = {
-    passwordHash,
-    shortcuts: defaults.shortcuts as Shortcut[],
-    todos: defaults.todos as Todo[],
-    searchEngines: defaults.searchEngines as SearchEngine[]
-  }
-  
-  await setUserData(c.env.KV_BINDING, DEFAULT_USER_ID, userData)
-  
-  const token = await createSession(c.env.KV_BINDING, DEFAULT_USER_ID)
-  return c.json({ success: true, token })
-})
+app.post(
+  '/api/auth/setup',
+  rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 3,
+    message: 'Too many setup attempts. Try again in 1 hour.',
+  }),
+  async (c) => {
+    const { password } = await c.req.json()
 
-app.post('/api/auth/verify', rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: 'Too many login attempts. Try again in 15 minutes.' }), async (c) => {
-  const { password } = await c.req.json()
-  
-  if (!password || typeof password !== 'string') {
-    return c.json({ error: 'Password is required' }, 400)
+    if (!password || typeof password !== 'string') {
+      return c.json({ error: 'Password is required' }, 400)
+    }
+
+    const existing = await getAuthData(c.env.KV_BINDING, DEFAULT_USER_ID)
+    if (existing) {
+      return c.json({ error: 'Password already set' }, 400)
+    }
+
+    const passwordHash = await hashPassword(password)
+    await initializeUserData(c.env.KV_BINDING, DEFAULT_USER_ID, passwordHash)
+
+    const token = await createSession(c.env.KV_BINDING, DEFAULT_USER_ID)
+    return c.json({ success: true, token })
   }
-  
-  const userData = await getUserData(c.env.KV_BINDING, DEFAULT_USER_ID)
-  if (!userData) {
-    return c.json({ error: 'User not found' }, 404)
+)
+
+app.post(
+  '/api/auth/verify',
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    message: 'Too many login attempts. Try again in 15 minutes.',
+  }),
+  async (c) => {
+    const { password } = await c.req.json()
+
+    if (!password || typeof password !== 'string') {
+      return c.json({ error: 'Password is required' }, 400)
+    }
+
+    const authData = await getAuthData(c.env.KV_BINDING, DEFAULT_USER_ID)
+    if (!authData) {
+      return c.json({ error: 'User not found' }, 404)
+    }
+
+    const passwordHash = await hashPassword(password)
+    if (passwordHash !== authData.passwordHash) {
+      return c.json({ error: 'Invalid password' }, 401)
+    }
+
+    const token = await createSession(c.env.KV_BINDING, DEFAULT_USER_ID)
+    return c.json({ success: true, token })
   }
-  
-  const passwordHash = await hashPassword(password)
-  if (passwordHash !== userData.passwordHash) {
-    return c.json({ error: 'Invalid password' }, 401)
-  }
-  
-  const token = await createSession(c.env.KV_BINDING, DEFAULT_USER_ID)
-  return c.json({ success: true, token })
-})
+)
 
 app.post('/api/auth/logout', async (c) => {
   const authHeader = c.req.header('Authorization')
@@ -174,108 +244,113 @@ app.post('/api/auth/logout', async (c) => {
 })
 
 app.get('/api/auth/check', async (c) => {
-  const userData = await getUserData(c.env.KV_BINDING, DEFAULT_USER_ID)
-  const hasPassword = !!userData
-  
+  const authData = await getAuthData(c.env.KV_BINDING, DEFAULT_USER_ID)
+  const hasPassword = !!authData
+
   const authHeader = c.req.header('Authorization')
   let isValid = false
   if (authHeader) {
     const token = authHeader.replace('Bearer ', '')
     const userId = await validateAndRefreshSession(c.env.KV_BINDING, token)
-    isValid = userId === DEFAULT_USER_ID
+    isValid = userId !== null
   }
-  
+
   return c.json({ hasPassword, isValid })
 })
 
 app.get('/api/data', async (c) => {
-  const userData = await getUserData(c.env.KV_BINDING, DEFAULT_USER_ID)
-  const { passwordHash, ...data } = userData || { passwordHash: '' }
+  const data = await getUserData(c.env.KV_BINDING, c.get('userId'))
   return c.json(data)
 })
 
 app.post('/api/shortcuts', async (c) => {
   const shortcut: Shortcut = await c.req.json()
-  
-  return withUserData(c, async (userData) => {
-    userData.shortcuts.push(shortcut)
-    await setUserData(c.env.KV_BINDING, DEFAULT_USER_ID, userData)
-    return c.json({ success: true, shortcut })
-  })
+  const kv = c.env.KV_BINDING
+  const userId = c.get('userId')
+
+  const shortcuts = await getShortcuts(kv, userId)
+  shortcuts.push(shortcut)
+  await setShortcuts(kv, userId, shortcuts)
+
+  return c.json({ success: true, shortcut })
 })
 
 app.put('/api/shortcuts/reorder', async (c) => {
   const { shortcuts } = await c.req.json()
-  
-  return withUserData(c, async (userData) => {
-    userData.shortcuts = shortcuts
-    await setUserData(c.env.KV_BINDING, DEFAULT_USER_ID, userData)
-    return c.json({ success: true })
-  })
+  await setShortcuts(c.env.KV_BINDING, c.get('userId'), shortcuts)
+  return c.json({ success: true })
 })
 
 app.put('/api/shortcuts/:id', async (c) => {
   const id = c.req.param('id')
   const updates: Partial<Shortcut> = await c.req.json()
-  
-  return withUserData(c, async (userData) => {
-    const index = userData.shortcuts.findIndex(s => s.id === id)
-    if (index === -1) {
-      return c.json({ error: 'Shortcut not found' }, 404)
-    }
-    
-    userData.shortcuts[index] = { ...userData.shortcuts[index], ...updates }
-    await setUserData(c.env.KV_BINDING, DEFAULT_USER_ID, userData)
-    
-    return c.json({ success: true, shortcut: userData.shortcuts[index] })
-  })
+  const kv = c.env.KV_BINDING
+  const userId = c.get('userId')
+
+  const shortcuts = await getShortcuts(kv, userId)
+  const index = shortcuts.findIndex((s) => s.id === id)
+  if (index === -1) {
+    return c.json({ error: 'Shortcut not found' }, 404)
+  }
+
+  shortcuts[index] = { ...shortcuts[index], ...updates }
+  await setShortcuts(kv, userId, shortcuts)
+
+  return c.json({ success: true, shortcut: shortcuts[index] })
 })
 
 app.delete('/api/shortcuts/:id', async (c) => {
   const id = c.req.param('id')
-  
-  return withUserData(c, async (userData) => {
-    userData.shortcuts = userData.shortcuts.filter(s => s.id !== id)
-    await setUserData(c.env.KV_BINDING, DEFAULT_USER_ID, userData)
-    return c.json({ success: true })
-  })
+  const kv = c.env.KV_BINDING
+  const userId = c.get('userId')
+
+  const shortcuts = await getShortcuts(kv, userId)
+  const filtered = shortcuts.filter((s) => s.id !== id)
+  await setShortcuts(kv, userId, filtered)
+
+  return c.json({ success: true })
 })
 
 app.post('/api/todos', async (c) => {
   const todo: Todo = await c.req.json()
-  
-  return withUserData(c, async (userData) => {
-    userData.todos.push(todo)
-    await setUserData(c.env.KV_BINDING, DEFAULT_USER_ID, userData)
-    return c.json({ success: true, todo })
-  })
+  const kv = c.env.KV_BINDING
+  const userId = c.get('userId')
+
+  const todos = await getTodos(kv, userId)
+  todos.push(todo)
+  await setTodos(kv, userId, todos)
+
+  return c.json({ success: true, todo })
 })
 
 app.put('/api/todos/:id', async (c) => {
   const id = c.req.param('id')
   const updates: Partial<Todo> = await c.req.json()
-  
-  return withUserData(c, async (userData) => {
-    const index = userData.todos.findIndex(t => t.id === id)
-    if (index === -1) {
-      return c.json({ error: 'Todo not found' }, 404)
-    }
-    
-    userData.todos[index] = { ...userData.todos[index], ...updates }
-    await setUserData(c.env.KV_BINDING, DEFAULT_USER_ID, userData)
-    
-    return c.json({ success: true, todo: userData.todos[index] })
-  })
+  const kv = c.env.KV_BINDING
+  const userId = c.get('userId')
+
+  const todos = await getTodos(kv, userId)
+  const index = todos.findIndex((t) => t.id === id)
+  if (index === -1) {
+    return c.json({ error: 'Todo not found' }, 404)
+  }
+
+  todos[index] = { ...todos[index], ...updates }
+  await setTodos(kv, userId, todos)
+
+  return c.json({ success: true, todo: todos[index] })
 })
 
 app.delete('/api/todos/:id', async (c) => {
   const id = c.req.param('id')
-  
-  return withUserData(c, async (userData) => {
-    userData.todos = userData.todos.filter(t => t.id !== id)
-    await setUserData(c.env.KV_BINDING, DEFAULT_USER_ID, userData)
-    return c.json({ success: true })
-  })
+  const kv = c.env.KV_BINDING
+  const userId = c.get('userId')
+
+  const todos = await getTodos(kv, userId)
+  const filtered = todos.filter((t) => t.id !== id)
+  await setTodos(kv, userId, filtered)
+
+  return c.json({ success: true })
 })
 
 export default app
