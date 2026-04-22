@@ -191,7 +191,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding-top: 2rem;
+  padding-bottom: 1rem;
 }
 
 .clock {
@@ -232,7 +232,6 @@ body {
   width: 100%;
   display: flex;
   justify-content: center;
-  padding: 1.5rem 0;
 }
 
 .search-box {
@@ -243,7 +242,7 @@ body {
   background: var(--glass-bg);
   backdrop-filter: blur(20px);
   border: 1px solid var(--glass-border);
-  border-radius: 3rem;
+  border-radius: var(--radius);
   overflow: visible;
   transition: all 0.2s;
 }
@@ -263,7 +262,7 @@ body {
   border: none;
   cursor: pointer;
   transition: all 0.2s;
-  border-radius: 3rem 0 0 3rem;
+  border-radius: var(--radius) 0 0 var(--radius);
 }
 
 .search-engine-btn:hover {
@@ -288,7 +287,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 1.75rem;
+  width: 2rem;
   height: 1.5rem;
   overflow: hidden;
 }
@@ -306,7 +305,7 @@ body {
   background: rgba(30,30,30,0.95);
   backdrop-filter: blur(12px);
   border: 1px solid var(--glass-border-subtle);
-  border-radius: 0.625rem;
+  border-radius: var(--radius);
   padding: 0.375rem;
   opacity: 0;
   visibility: hidden;
@@ -327,7 +326,7 @@ body {
   gap: 0.5rem;
   padding: 0.5rem 0.75rem;
   border: none;
-  border-radius: 0.375rem;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--text-primary);
   font-size: 0.8125rem;
@@ -394,12 +393,12 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0.75rem 1.25rem 0.75rem 0.75rem;
+  padding: 0.75rem 1rem 0.75rem 0.75rem;
   background: transparent;
   border: none;
   cursor: pointer;
   transition: all 0.2s;
-  border-radius: 0 3rem 3rem 0;
+  border-radius: 0 var(--radius) var(--radius) 0;
 }
 
 .search-btn:hover {
@@ -416,8 +415,9 @@ body {
 }
 
 .search-btn svg {
-  width: 1.25rem;
-  height: 1.25rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0.25rem;
   color: var(--text-secondary);
 }
 
@@ -438,8 +438,8 @@ body {
 
 @media (min-width: 640px) {
   .shortcuts {
-    grid-template-columns: repeat(6, 1fr);
-    max-width: 800px;
+    grid-template-columns: repeat(10, 1fr);
+    max-width: 1200px;
   }
 }
 
@@ -454,7 +454,7 @@ body {
   align-items: center;
   gap: 0.5rem;
   padding: 0.75rem;
-  border-radius: 0.75rem;
+  border-radius: var(--radius);
   background: var(--glass-bg);
   backdrop-filter: blur(12px);
   border: 1px solid var(--glass-border);
@@ -499,7 +499,7 @@ body {
 .shortcut-icon {
   width: 2.5rem;
   height: 2.5rem;
-  border-radius: 0.5rem;
+  border-radius: var(--radius);
   background: var(--glass-bg);
   display: flex;
   align-items: center;
@@ -523,7 +523,7 @@ body {
 }
 
 .icon-text {
-  font-size: 0.75rem;
+  font-size: 0.875rem;
   font-weight: 600;
   color: var(--text-primary);
   min-width: 1.75rem;
@@ -557,7 +557,7 @@ body {
   right: 0.25rem;
   width: 0.75rem;
   height: 1rem;
-  border-radius: 0.25rem;
+  border-radius: var(--radius);
   border: none;
   background: var(--glass-bg);
   color: var(--text-secondary);
@@ -602,7 +602,7 @@ body {
   align-items: center;
   gap: 0.5rem;
   padding: 0.75rem;
-  border-radius: 0.75rem;
+  border-radius: var(--radius);
   background: var(--glass-bg-subtle);
   backdrop-filter: blur(12px);
   border: 1px dashed var(--glass-border-hover);
@@ -630,10 +630,10 @@ body {
 
 .todo-list {
   width: 100%;
-  max-width: 24rem;
+  max-width: 28rem;
   background: var(--glass-bg);
   backdrop-filter: blur(20px);
-  border-radius: 1rem;
+  border-radius: var(--radius);
   border: 1px solid var(--glass-border);
   overflow: hidden;
 }
@@ -736,7 +736,7 @@ body {
   align-items: center;
   gap: 0.75rem;
   padding: 0.5rem;
-  border-radius: 0.5rem;
+  border-radius: var(--radius);
   transition: background 0.2s;
 }
 
@@ -793,7 +793,7 @@ body {
   width: 1.5rem;
   height: 1.5rem;
   border: none;
-  border-radius: 0.25rem;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--text-muted);
   display: flex;

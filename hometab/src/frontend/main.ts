@@ -434,7 +434,7 @@ function renderTodos() {
   }
   
   const completedCount = state.todos.filter(t => t.completed).length
-  todoCount.textContent = `${completedCount}/${state.todos.length} done`
+  todoCount.textContent = `${completedCount}/${state.todos.length}`
   
   setupTodosEventDelegation()
 }
