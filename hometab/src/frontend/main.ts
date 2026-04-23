@@ -170,17 +170,22 @@ function getFaviconUrl(url: string): string | null {
   }
 }
 
+const URL_REGEX = /^(https?:\/\/)?[a-zA-Z0-9\u4e00-\u9fa5\-]+(\.[a-zA-Z0-9\u4e00-\u9fa5\-]+)+(:\d+)?(\/[^\s]*)?$/i
+
 function normalizeUrl(input: string): string | null {
-  let url = input.trim()
+  const url = input.trim()
   if (!url) return null
   
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    url = `https://${url}`
+  if (!URL_REGEX.test(url)) {
+    return null
   }
   
+  const hasProtocol = url.startsWith('http://') || url.startsWith('https://')
+  const normalizedUrl = hasProtocol ? url : `https://${url}`
+  
   try {
-    new URL(url)
-    return url
+    new URL(normalizedUrl)
+    return normalizedUrl
   } catch {
     return null
   }
@@ -418,13 +423,19 @@ function renderTodos() {
     state.todos.forEach(todo => {
       const div = document.createElement('div')
       div.className = 'todo-item'
+      
+      const normalizedUrl = normalizeUrl(todo.text)
+      const textHtml = normalizedUrl
+        ? `<a href="${normalizedUrl}" target="_blank" rel="noopener noreferrer" class="text ${todo.completed ? 'completed' : ''}">${todo.text}</a>`
+        : `<span class="text ${todo.completed ? 'completed' : ''}">${todo.text}</span>`
+      
       div.innerHTML = `
         <div class="checkbox ${todo.completed ? 'checked' : ''}" data-id="${todo.id}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
             <polyline points="20 6 9 17 4 12"></polyline>
           </svg>
         </div>
-        <span class="text ${todo.completed ? 'completed' : ''}">${todo.text}</span>
+        ${textHtml}
         <button class="delete-btn" data-id="${todo.id}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="3 6 5 6 21 6"></polyline>

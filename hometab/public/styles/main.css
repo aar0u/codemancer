@@ -819,11 +819,27 @@ body {
   font-size: 0.875rem;
   color: white;
   transition: all 0.2s;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .todo-item .text.completed {
   color: var(--text-muted);
   text-decoration: line-through;
+}
+
+.todo-item a.text {
+  color: var(--text-secondary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.todo-item a.text:hover {
+  color: white;
+}
+
+.todo-item a.text.completed {
+  color: var(--text-muted);
 }
 
 .todo-item .delete-btn {
