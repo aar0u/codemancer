@@ -777,6 +777,43 @@ body {
   opacity: 1;
 }
 
+.todo-item .checkbox.loading {
+  opacity: 0.5;
+  pointer-events: none;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.3; }
+}
+
+.todo-item.loading {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.todo-item .delete-btn.loading {
+  opacity: 1;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.shortcut.saving a {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.shortcut.saving .shortcut-icon::after {
+  content: '';
+  position: absolute;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 2px solid transparent;
+  border-top-color: var(--text-primary);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
 .todo-item .text {
   flex: 1;
   font-size: 0.875rem;

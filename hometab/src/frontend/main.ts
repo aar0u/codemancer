@@ -382,20 +382,23 @@ async function reorderShortcuts(draggedId: string, targetId: string) {
   
   if (draggedIndex === -1 || targetIndex === -1) return
   
-  const [dragged] = state.shortcuts.splice(draggedIndex, 1)
-  state.shortcuts.splice(targetIndex, 0, dragged)
+  const draggedEl = document.querySelector(`.shortcut[data-id="${draggedId}"]`)
+  draggedEl?.classList.add('saving')
+  
+  const newShortcuts = [...state.shortcuts]
+  const [dragged] = newShortcuts.splice(draggedIndex, 1)
+  newShortcuts.splice(targetIndex, 0, dragged)
   
   try {
     await fetchWithAuth(`${API_BASE}/api/shortcuts/reorder`, {
       method: 'PUT',
-      body: JSON.stringify({ shortcuts: state.shortcuts })
+      body: JSON.stringify({ shortcuts: newShortcuts })
     })
+    state.shortcuts = newShortcuts
     renderShortcuts()
-    showToast('Shortcuts reordered', 'success')
   } catch (error) {
     console.error('Failed to reorder shortcuts:', error)
     showToast('Failed to reorder shortcuts', 'error')
-    await loadData()
   }
 }
 
@@ -509,17 +512,21 @@ async function saveShortcut() {
         method: 'PUT',
         body: JSON.stringify({ name, url, icon })
       })
-      showToast('Shortcut updated', 'success')
+      const index = state.shortcuts.findIndex(s => s.id === state.editingShortcutId)
+      if (index !== -1) {
+        state.shortcuts[index] = { ...state.shortcuts[index], name, url, icon }
+      }
     } else {
+      const newShortcut: Shortcut = { id: Date.now().toString(), name, url, icon }
       await fetchWithAuth(`${API_BASE}/api/shortcuts`, {
         method: 'POST',
-        body: JSON.stringify({ id: Date.now().toString(), name, url, icon })
+        body: JSON.stringify(newShortcut)
       })
-      showToast('Shortcut added', 'success')
+      state.shortcuts.push(newShortcut)
     }
     
+    renderShortcuts()
     closeShortcutModal()
-    await loadData()
   } catch (error) {
     console.error('Failed to save shortcut:', error)
     showToast('Failed to save shortcut', 'error')
@@ -530,10 +537,13 @@ async function saveShortcut() {
 }
 
 async function deleteShortcut(id: string) {
+  const shortcutEl = document.querySelector(`.shortcut[data-id="${id}"]`)
+  shortcutEl?.classList.add('saving')
+  
   try {
     await fetchWithAuth(`${API_BASE}/api/shortcuts/${id}`, { method: 'DELETE' })
-    await loadData()
-    showToast('Shortcut deleted', 'success')
+    state.shortcuts = state.shortcuts.filter(s => s.id !== id)
+    renderShortcuts()
   } catch (error) {
     console.error('Failed to delete shortcut:', error)
     showToast('Failed to delete shortcut', 'error')
@@ -544,42 +554,61 @@ async function addTodo() {
   const text = todoInput.value.trim()
   if (!text) return
   
+  const newTodo: Todo = { id: Date.now().toString(), text, completed: false }
+  
+  const addBtn = document.getElementById('add-todo-btn') as HTMLButtonElement
+  addBtn.disabled = true
+  
   try {
     await fetchWithAuth(`${API_BASE}/api/todos`, {
       method: 'POST',
-      body: JSON.stringify({ id: Date.now().toString(), text, completed: false })
+      body: JSON.stringify(newTodo)
     })
-    
+    state.todos.push(newTodo)
     todoInput.value = ''
-    await loadData()
-    showToast('Task added', 'success')
+    renderTodos()
   } catch (error) {
     console.error('Failed to add todo:', error)
     showToast('Failed to add task', 'error')
+  } finally {
+    addBtn.disabled = false
   }
 }
 
 async function toggleTodo(id: string, completed: boolean) {
+  const checkbox = document.querySelector(`.checkbox[data-id="${id}"]`)
+  checkbox?.classList.add('loading')
+  
   try {
     await fetchWithAuth(`${API_BASE}/api/todos/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ completed })
     })
-    await loadData()
+    const todo = state.todos.find(t => t.id === id)
+    if (todo) {
+      todo.completed = completed
+      renderTodos()
+    }
   } catch (error) {
     console.error('Failed to toggle todo:', error)
     showToast('Failed to update task', 'error')
+    checkbox?.classList.remove('loading')
   }
 }
 
 async function deleteTodo(id: string) {
+  const todoItem = document.querySelector(`.todo-item:has(.checkbox[data-id="${id}"])`)
+  const deleteBtn = todoItem?.querySelector('.delete-btn')
+  deleteBtn?.classList.add('loading')
+  
   try {
     await fetchWithAuth(`${API_BASE}/api/todos/${id}`, { method: 'DELETE' })
-    await loadData()
-    showToast('Task deleted', 'success')
+    state.todos = state.todos.filter(t => t.id !== id)
+    renderTodos()
   } catch (error) {
     console.error('Failed to delete todo:', error)
     showToast('Failed to delete task', 'error')
+    deleteBtn?.classList.remove('loading')
   }
 }
 
@@ -686,10 +715,10 @@ function loadCachedData(): boolean {
   }
 }
 
-function renderAll(data: Record<string, unknown>) {
-  state.shortcuts = (data.shortcuts as Shortcut[]) || []
-  state.todos = (data.todos as Todo[]) || []
-  state.searchEngines = (data.searchEngines as SearchEngine[]) || []
+function renderAll(data: { shortcuts?: Shortcut[]; todos?: Todo[]; searchEngines?: SearchEngine[] }) {
+  state.shortcuts = data.shortcuts || []
+  state.todos = data.todos || []
+  state.searchEngines = data.searchEngines || []
   
   const savedEngineId = localStorage.getItem('hometab_search_engine')
   state.currentSearchEngine = state.searchEngines.find(e => e.id === savedEngineId) || state.searchEngines[0]
@@ -725,7 +754,7 @@ async function loadData() {
     const res = await fetchWithAuth(`${API_BASE}/api/data`)
     if (!res.ok) throw new Error('Failed to load data')
     
-    const data = (await res.json()) as Record<string, unknown>
+    const data = await res.json() as { shortcuts?: Shortcut[]; todos?: Todo[]; searchEngines?: SearchEngine[] }
     localStorage.setItem('hometab_data', JSON.stringify(data))
     renderAll(data)
   } catch (error) {
@@ -747,11 +776,15 @@ async function init() {
           showMainContent()
           return
         }
+        // Token is invalid, remove it
+        localStorage.removeItem('hometab_auth')
       }
-    } catch {
-      // Token invalid, continue to show password modal
+      // If res.ok is false (e.g., 500), don't remove token - server error
+    } catch (error) {
+      // Don't remove token on network error or abort
+      // User may be offline or page was refreshed quickly
+      console.error('Auth check failed:', error)
     }
-    localStorage.removeItem('hometab_auth')
   }
   
   const hasPassword = await checkPasswordExists()

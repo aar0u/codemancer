@@ -81,11 +81,21 @@ async function validateAndRefreshSession(
   kv: KVNamespace,
   token: string
 ): Promise<string | null> {
-  const userId = await kv.get(KV_KEYS.session(token))
-  if (userId) {
-    await kv.put(KV_KEYS.session(token), userId, { expirationTtl: SESSION_TTL })
+  const data = await kv.getWithMetadata<{ lastRefresh: number }>(KV_KEYS.session(token))
+  
+  if (data.value) {
+    const now = Date.now()
+    const lastRefresh = data.metadata?.lastRefresh || 0
+    const oneDayMs = 24 * 60 * 60 * 1000
+    
+    if (now - lastRefresh > oneDayMs) {
+      await kv.put(KV_KEYS.session(token), data.value, { 
+        expirationTtl: SESSION_TTL,
+        metadata: { lastRefresh: now }
+      })
+    }
   }
-  return userId
+  return data.value
 }
 
 async function deleteSession(kv: KVNamespace, token: string): Promise<void> {
@@ -141,19 +151,6 @@ async function getUserData(kv: KVNamespace, userId: string): Promise<UserData> {
   return { shortcuts, todos, searchEngines }
 }
 
-async function initializeUserData(
-  kv: KVNamespace,
-  userId: string,
-  passwordHash: string
-): Promise<void> {
-  await Promise.all([
-    setAuthData(kv, userId, { passwordHash }),
-    setShortcuts(kv, userId, defaults.shortcuts as Shortcut[]),
-    setTodos(kv, userId, defaults.todos as Todo[]),
-    setSearchEngines(kv, userId, defaults.searchEngines as SearchEngine[]),
-  ])
-}
-
 async function verifyAuth(
   c: Context<{ Bindings: Bindings; Variables: Variables }>
 ): Promise<{ valid: boolean; userId: string | null }> {
@@ -198,9 +195,16 @@ app.post(
     }
 
     const passwordHash = await hashPassword(password)
-    await initializeUserData(c.env.KV_BINDING, DEFAULT_USER_ID, passwordHash)
+    const kv = c.env.KV_BINDING
+    
+    await Promise.all([
+      setAuthData(kv, DEFAULT_USER_ID, { passwordHash }),
+      getShortcuts(kv, DEFAULT_USER_ID).then(s => { if (s.length === 0) setShortcuts(kv, DEFAULT_USER_ID, defaults.shortcuts as Shortcut[]) }),
+      getTodos(kv, DEFAULT_USER_ID).then(t => { if (t.length === 0) setTodos(kv, DEFAULT_USER_ID, defaults.todos as Todo[]) }),
+      getSearchEngines(kv, DEFAULT_USER_ID).then(e => { if (e.length === 0) setSearchEngines(kv, DEFAULT_USER_ID, defaults.searchEngines as SearchEngine[]) }),
+    ])
 
-    const token = await createSession(c.env.KV_BINDING, DEFAULT_USER_ID)
+    const token = await createSession(kv, DEFAULT_USER_ID)
     return c.json({ success: true, token })
   }
 )
