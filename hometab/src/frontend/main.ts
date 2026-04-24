@@ -2,6 +2,17 @@ import { Shortcut, Todo, SearchEngine } from '../types'
 
 const API_BASE = ''
 
+const ICONS = {
+  edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>`,
+  delete: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`,
+  copy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,
+  menu: `<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"></circle><circle cx="12" cy="12" r="1.5"></circle><circle cx="12" cy="19" r="1.5"></circle></svg>`,
+  link: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`,
+  checkbox: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>`,
+  plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`,
+  loading: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="60" stroke-dashoffset="0"><animate attributeName="stroke-dashoffset" values="0;250" dur="1s" repeatCount="indefinite"/></circle></svg>`,
+}
+
 const state = {
   shortcuts: [] as Shortcut[],
   todos: [] as Todo[],
@@ -13,8 +24,54 @@ const state = {
 }
 
 const toastContainer = document.getElementById('toast-container')!
+const dropdownContainer = document.getElementById('dropdown-container')!
+
+type DropdownType = 'shortcut' | 'todo'
 
 type ToastType = 'success' | 'error' | 'info'
+
+function showDropdown(type: DropdownType, id: string, anchorEl: HTMLElement) {
+  closeDropdown()
+  
+  const rect = anchorEl.getBoundingClientRect()
+  const dropdown = document.createElement('div')
+  dropdown.className = 'dropdown open'
+  dropdown.dataset.type = type
+  dropdown.dataset.id = id
+  
+  if (type === 'shortcut') {
+    dropdown.innerHTML = `
+      <button class="dropdown-item edit-shortcut" data-id="${id}">${ICONS.edit}<span>Edit</span></button>
+      <button class="dropdown-item danger delete-shortcut" data-id="${id}">${ICONS.delete}<span>Delete</span></button>
+    `
+  } else if (type === 'todo') {
+    dropdown.innerHTML = `
+      <button class="dropdown-item copy-todo" data-id="${id}">${ICONS.copy}<span>Copy</span></button>
+      <button class="dropdown-item danger delete-todo" data-id="${id}">${ICONS.delete}<span>Delete</span></button>
+    `
+  }
+  
+  dropdown.style.position = 'fixed'
+  dropdown.style.top = `${rect.bottom + 4}px`
+  dropdown.style.right = `${window.innerWidth - rect.right}px`
+  
+  dropdownContainer.appendChild(dropdown)
+  
+  requestAnimationFrame(() => {
+    const dropdownRect = dropdown.getBoundingClientRect()
+    if (dropdownRect.bottom > window.innerHeight) {
+      dropdown.style.top = `${rect.top - dropdownRect.height - 4}px`
+    }
+  })
+}
+
+function closeDropdown() {
+  dropdownContainer.innerHTML = ''
+  const searchDropdown = document.getElementById('search-engine-dropdown')
+  const searchBtn = document.getElementById('search-engine-btn')
+  searchDropdown?.classList.remove('open')
+  searchBtn?.classList.remove('active')
+}
 
 function showToast(message: string, type: ToastType = 'info', duration = 3000) {
   const toast = document.createElement('div')
@@ -191,12 +248,6 @@ function normalizeUrl(input: string): string | null {
   }
 }
 
-function closeAllDropdowns() {
-  document.querySelectorAll('.dropdown.open').forEach(dropdown => {
-    dropdown.classList.remove('open')
-  })
-}
-
 let shortcutsEventsInitialized = false
 
 function setupShortcutsEventDelegation() {
@@ -215,31 +266,7 @@ function setupShortcutsEventDelegation() {
       e.stopPropagation()
       const btn = target.closest('.shortcut-menu-btn') as HTMLElement
       const id = btn.dataset.id!
-      const dropdown = document.querySelector(`.shortcut-dropdown[data-id="${id}"]`)
-      const isOpen = dropdown?.classList.contains('open')
-      closeAllDropdowns()
-      if (!isOpen && dropdown) {
-        dropdown.classList.add('open')
-      }
-      return
-    }
-    
-    if (target.closest('.dropdown-item.edit')) {
-      e.stopPropagation()
-      closeAllDropdowns()
-      const btn = target.closest('.dropdown-item.edit') as HTMLElement
-      const id = btn.dataset.id!
-      const shortcut = state.shortcuts.find(s => s.id === id)
-      if (shortcut) openShortcutModal(shortcut)
-      return
-    }
-    
-    if (target.closest('.delete-shortcut')) {
-      e.stopPropagation()
-      closeAllDropdowns()
-      const btn = target.closest('.delete-shortcut') as HTMLElement
-      const id = btn.dataset.id!
-      deleteShortcut(id)
+      showDropdown('shortcut', id, btn)
       return
     }
     
@@ -280,37 +307,11 @@ function renderShortcuts() {
       <a href="${shortcut.url}" rel="noreferrer">
         <div class="shortcut-icon">
           ${iconHtml}
-          <svg class="loading-icon hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10" stroke-dasharray="60" stroke-dashoffset="0">
-              <animate attributeName="stroke-dashoffset" values="0;250" dur="1s" repeatCount="indefinite"/>
-            </circle>
-          </svg>
+          ${ICONS.loading.replace('svg', 'svg class="loading-icon hidden"')}
         </div>
         <span class="shortcut-name">${shortcut.name}</span>
       </a>
-      <button class="shortcut-menu-btn" data-id="${shortcut.id}" aria-label="Menu">
-        <svg viewBox="0 0 24 24" fill="currentColor">
-          <circle cx="12" cy="5" r="1.5"></circle>
-          <circle cx="12" cy="12" r="1.5"></circle>
-          <circle cx="12" cy="19" r="1.5"></circle>
-        </svg>
-      </button>
-      <div class="dropdown shortcut-dropdown" data-id="${shortcut.id}">
-        <button class="dropdown-item edit" data-id="${shortcut.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
-          </svg>
-          <span>Edit</span>
-        </button>
-        <button class="dropdown-item danger delete-shortcut" data-id="${shortcut.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="18" y1="6" x2="6" y2="18"></line>
-            <line x1="6" y1="6" x2="18" y2="18"></line>
-          </svg>
-          <span>Delete</span>
-        </button>
-      </div>
+      <button class="shortcut-menu-btn" data-id="${shortcut.id}" aria-label="Menu">${ICONS.menu}</button>
     `
     shortcutsEl.appendChild(div)
   })
@@ -318,12 +319,7 @@ function renderShortcuts() {
   const addBtn = document.createElement('div')
   addBtn.className = 'add-shortcut'
   addBtn.innerHTML = `
-    <div class="shortcut-icon">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <line x1="12" y1="5" x2="12" y2="19"></line>
-        <line x1="5" y1="12" x2="19" y2="12"></line>
-      </svg>
-    </div>
+    <div class="shortcut-icon">${ICONS.plus}</div>
     <span class="shortcut-name">Add</span>
   `
   shortcutsEl.appendChild(addBtn)
@@ -409,8 +405,48 @@ async function reorderShortcuts(draggedId: string, targetId: string) {
 
 document.addEventListener('click', (e) => {
   const target = e.target as HTMLElement
-  if (!target.closest('.shortcut-menu-btn') && !target.closest('.shortcut-dropdown')) {
-    closeAllDropdowns()
+  
+  if (target.closest('.edit-shortcut')) {
+    const btn = target.closest('.edit-shortcut') as HTMLElement
+    const id = btn.dataset.id!
+    const shortcut = state.shortcuts.find(s => s.id === id)
+    if (shortcut) openShortcutModal(shortcut)
+    closeDropdown()
+    return
+  }
+  
+  if (target.closest('.delete-shortcut')) {
+    const btn = target.closest('.delete-shortcut') as HTMLElement
+    const id = btn.dataset.id!
+    deleteShortcut(id)
+    closeDropdown()
+    return
+  }
+  
+  if (target.closest('.copy-todo')) {
+    const btn = target.closest('.copy-todo') as HTMLElement
+    const id = btn.dataset.id!
+    const todo = state.todos.find(t => t.id === id)
+    if (todo) {
+      navigator.clipboard.writeText(todo.text)
+      showToast('Copied to clipboard', 'success')
+    }
+    closeDropdown()
+    return
+  }
+  
+  if (target.closest('.delete-todo')) {
+    const btn = target.closest('.delete-todo') as HTMLElement
+    const id = btn.dataset.id!
+    deleteTodo(id)
+    closeDropdown()
+    return
+  }
+  
+  if (!target.closest('.shortcut-menu-btn') && !target.closest('.todo-menu-btn') &&
+      !target.closest('#dropdown-container') && !target.closest('.search-engine-btn') &&
+      !target.closest('#search-engine-dropdown')) {
+    closeDropdown()
   }
 })
 
@@ -425,23 +461,15 @@ function renderTodos() {
       div.className = 'todo-item'
       
       const normalizedUrl = normalizeUrl(todo.text)
-      const textHtml = normalizedUrl
-        ? `<a href="${normalizedUrl}" target="_blank" rel="noopener noreferrer" class="text ${todo.completed ? 'completed' : ''}">${todo.text}</a>`
-        : `<span class="text ${todo.completed ? 'completed' : ''}">${todo.text}</span>`
+      const linkBtn = normalizedUrl
+        ? `<a href="${normalizedUrl}" target="_blank" rel="noopener noreferrer" class="link-btn" title="Open link">${ICONS.link}</a>`
+        : ''
       
       div.innerHTML = `
-        <div class="checkbox ${todo.completed ? 'checked' : ''}" data-id="${todo.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-            <polyline points="20 6 9 17 4 12"></polyline>
-          </svg>
-        </div>
-        ${textHtml}
-        <button class="delete-btn" data-id="${todo.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="3 6 5 6 21 6"></polyline>
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-          </svg>
-        </button>
+        <div class="checkbox ${todo.completed ? 'checked' : ''}" data-id="${todo.id}">${ICONS.checkbox}</div>
+        <span class="text ${todo.completed ? 'completed' : ''}" data-id="${todo.id}">${todo.text}</span>
+        ${linkBtn}
+        <button class="todo-menu-btn" data-id="${todo.id}" aria-label="Menu">${ICONS.menu}</button>
       `
       todoItems.appendChild(div)
     })
@@ -470,11 +498,79 @@ function setupTodosEventDelegation() {
       return
     }
     
-    const deleteBtn = target.closest('.delete-btn')
-    if (deleteBtn) {
-      await deleteTodo((deleteBtn as HTMLElement).dataset.id!)
+    const menuBtn = target.closest('.todo-menu-btn')
+    if (menuBtn) {
+      const btn = menuBtn as HTMLElement
+      const id = btn.dataset.id!
+      showDropdown('todo', id, btn)
+      return
     }
   })
+  
+  todoItems.addEventListener('dblclick', (e) => {
+    const target = e.target as HTMLElement
+    const textEl = target.closest('.text')
+    if (textEl && !textEl.classList.contains('editing')) {
+      startEditTodo((textEl as HTMLElement).dataset.id!)
+    }
+  })
+}
+
+function startEditTodo(id: string) {
+  const todo = state.todos.find(t => t.id === id)
+  if (!todo) return
+  
+  const textEl = todoItems.querySelector(`.text[data-id="${id}"]`)
+  if (!textEl) return
+  
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.className = 'todo-edit-input'
+  input.value = todo.text
+  
+  textEl.classList.add('editing')
+  textEl.innerHTML = ''
+  textEl.appendChild(input)
+  input.focus()
+  input.select()
+  
+  const saveEdit = async () => {
+    const newText = input.value.trim()
+    if (newText && newText !== todo.text) {
+      await updateTodoText(id, newText)
+    } else {
+      renderTodos()
+    }
+  }
+  
+  input.addEventListener('blur', saveEdit)
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      input.blur()
+    }
+    if (e.key === 'Escape') {
+      renderTodos()
+    }
+  })
+}
+
+async function updateTodoText(id: string, text: string) {
+  try {
+    await fetchWithAuth(`${API_BASE}/api/todos/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ text })
+    })
+    const todo = state.todos.find(t => t.id === id)
+    if (todo) {
+      todo.text = text
+      renderTodos()
+    }
+  } catch (error) {
+    console.error('Failed to update todo:', error)
+    showToast('Failed to update task', 'error')
+    renderTodos()
+  }
 }
 
 function openShortcutModal(shortcut?: Shortcut) {
@@ -837,8 +933,7 @@ function selectSearchEngine(engine: SearchEngine) {
   state.currentSearchEngine = engine
   localStorage.setItem('hometab_search_engine', engine.id)
   renderSearchEngines()
-  closeAllDropdowns()
-  searchEngineBtn.classList.remove('active')
+  closeDropdown()
   searchInput.focus()
 }
 
@@ -855,7 +950,7 @@ function performSearch() {
 
 function toggleSearchEngineDropdown() {
   const isOpen = searchEngineDropdown.classList.contains('open')
-  closeAllDropdowns()
+  closeDropdown()
   if (!isOpen) {
     searchEngineDropdown.classList.add('open')
     searchEngineBtn.classList.add('active')
@@ -915,13 +1010,6 @@ searchInput.addEventListener('keydown', (e) => {
     }
     
     selectSearchEngine(engines[newIndex])
-  }
-})
-
-document.addEventListener('click', (e) => {
-  if (!searchEngineDropdown.contains(e.target as Node) && !searchEngineBtn.contains(e.target as Node)) {
-    searchEngineDropdown.classList.remove('open')
-    searchEngineBtn.classList.remove('active')
   }
 })
 
