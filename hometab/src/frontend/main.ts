@@ -31,7 +31,12 @@ type DropdownType = 'shortcut' | 'todo'
 type ToastType = 'success' | 'error' | 'info'
 
 function showDropdown(type: DropdownType, id: string, anchorEl: HTMLElement) {
+  const existingDropdown = dropdownContainer.querySelector<HTMLElement>('.dropdown')
+  const isSameDropdown =
+    existingDropdown?.dataset.type === type && existingDropdown?.dataset.id === id
+
   closeDropdown()
+  if (isSameDropdown) return
   
   const rect = anchorEl.getBoundingClientRect()
   const dropdown = document.createElement('div')
@@ -39,16 +44,29 @@ function showDropdown(type: DropdownType, id: string, anchorEl: HTMLElement) {
   dropdown.dataset.type = type
   dropdown.dataset.id = id
   
+  const createDropdownButton = (
+    className: string,
+    iconSvg: string,
+    label: string,
+    isDanger = false
+  ): HTMLButtonElement => {
+    const button = document.createElement('button')
+    button.className = `dropdown-item ${className}${isDanger ? ' danger' : ''}`
+    button.dataset.id = id
+    button.appendChild(createSvgElement(iconSvg))
+
+    const text = document.createElement('span')
+    text.textContent = label
+    button.appendChild(text)
+    return button
+  }
+
   if (type === 'shortcut') {
-    dropdown.innerHTML = `
-      <button class="dropdown-item edit-shortcut" data-id="${id}">${ICONS.edit}<span>Edit</span></button>
-      <button class="dropdown-item danger delete-shortcut" data-id="${id}">${ICONS.delete}<span>Delete</span></button>
-    `
+    dropdown.appendChild(createDropdownButton('edit-shortcut', ICONS.edit, 'Edit'))
+    dropdown.appendChild(createDropdownButton('delete-shortcut', ICONS.delete, 'Delete', true))
   } else if (type === 'todo') {
-    dropdown.innerHTML = `
-      <button class="dropdown-item copy-todo" data-id="${id}">${ICONS.copy}<span>Copy</span></button>
-      <button class="dropdown-item danger delete-todo" data-id="${id}">${ICONS.delete}<span>Delete</span></button>
-    `
+    dropdown.appendChild(createDropdownButton('copy-todo', ICONS.copy, 'Copy'))
+    dropdown.appendChild(createDropdownButton('delete-todo', ICONS.delete, 'Delete', true))
   }
   
   dropdown.style.position = 'fixed'
@@ -66,7 +84,7 @@ function showDropdown(type: DropdownType, id: string, anchorEl: HTMLElement) {
 }
 
 function closeDropdown() {
-  dropdownContainer.innerHTML = ''
+  dropdownContainer.replaceChildren()
   const searchDropdown = document.getElementById('search-engine-dropdown')
   const searchBtn = document.getElementById('search-engine-btn')
   searchDropdown?.classList.remove('open')
@@ -90,21 +108,19 @@ function showToast(message: string, type: ToastType = 'info', duration = 3000) {
 }
 
 function getAuthHeaders(): HeadersInit {
-  const password = localStorage.getItem('hometab_auth')
   return {
     'Content-Type': 'application/json',
-    ...(password ? { 'Authorization': `Bearer ${password}` } : {})
   }
 }
 
 function handleUnauthorized() {
-  localStorage.removeItem('hometab_auth')
   location.reload()
 }
 
 async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
   const response = await fetch(url, {
     ...options,
+    credentials: 'include',
     headers: {
       ...getAuthHeaders(),
       ...options.headers
@@ -119,27 +135,55 @@ async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Re
   return response
 }
 
-function renderIcon(icon: string | undefined, options?: { name?: string; fallbackUrl?: string }): string {
+function createSvgElement(svg: string): HTMLElement {
+  const template = document.createElement('template')
+  template.innerHTML = svg.trim()
+  const element = template.content.firstElementChild
+  return (element as HTMLElement) || document.createElement('span')
+}
+
+function renderIcon(icon: string | undefined, options?: { name?: string; fallbackUrl?: string }): HTMLElement {
   const { name = '', fallbackUrl } = options || {}
-  
+
+  const textIcon = (value: string) => {
+    const span = document.createElement('span')
+    span.className = 'icon-text'
+    span.textContent = value
+    return span
+  }
+
   if (icon) {
     const trimmed = icon.trim()
+
     const isSvg = trimmed.startsWith('<svg')
-    if (isSvg) return icon
-    
+    if (isSvg) {
+      const svgEl = createSvgElement(trimmed)
+      if (svgEl.tagName.toLowerCase() === 'svg') {
+        return svgEl
+      }
+    }
+
     const isUrl = /^(https?:)?\/\//.test(trimmed) || trimmed.startsWith('data:')
-    if (isUrl) return `<img src="${icon}" alt="${name}">`
-    
-    return `<span class="icon-text">${icon.toUpperCase()}</span>`
+    if (isUrl) {
+      const img = document.createElement('img')
+      img.src = icon
+      img.alt = name
+      return img
+    }
+
+    return textIcon(icon.toUpperCase())
   }
-  
+
   if (fallbackUrl) {
-    return `<img src="${fallbackUrl}" alt="${name}">`
+    const img = document.createElement('img')
+    img.src = fallbackUrl
+    img.alt = name
+    return img
   }
-  
+
   const isCJK = /[\u4e00-\u9fff\u3040-\u30ff]/.test(name)
   const text = name.slice(0, isCJK ? 2 : 3).toUpperCase()
-  return `<span class="icon-text">${text}</span>`
+  return textIcon(text)
 }
 
 const passwordModal = document.getElementById('password-modal')!
@@ -291,37 +335,58 @@ function setupShortcutsEventDelegation() {
 }
 
 function renderShortcuts() {
-  shortcutsEl.innerHTML = ''
+  shortcutsEl.replaceChildren()
   
   state.shortcuts.forEach(shortcut => {
-    const iconHtml = renderIcon(shortcut.icon, {
+    const iconEl = renderIcon(shortcut.icon, {
       name: shortcut.name,
       fallbackUrl: getFaviconUrl(shortcut.url) || undefined
     })
-    
+
     const div = document.createElement('div')
     div.className = 'shortcut'
     div.draggable = true
     div.dataset.id = shortcut.id
-    div.innerHTML = `
-      <a href="${shortcut.url}" rel="noreferrer">
-        <div class="shortcut-icon">
-          ${iconHtml}
-          ${ICONS.loading.replace('svg', 'svg class="loading-icon hidden"')}
-        </div>
-        <span class="shortcut-name">${shortcut.name}</span>
-      </a>
-      <button class="shortcut-menu-btn" data-id="${shortcut.id}" aria-label="Menu">${ICONS.menu}</button>
-    `
+
+    const link = document.createElement('a')
+    link.href = shortcut.url
+    link.rel = 'noreferrer'
+
+    const shortcutIcon = document.createElement('div')
+    shortcutIcon.className = 'shortcut-icon'
+    shortcutIcon.appendChild(iconEl)
+    const loadingIcon = createSvgElement(ICONS.loading)
+    loadingIcon.classList.add('loading-icon', 'hidden')
+    shortcutIcon.appendChild(loadingIcon)
+    link.appendChild(shortcutIcon)
+
+    const nameSpan = document.createElement('span')
+    nameSpan.className = 'shortcut-name'
+    nameSpan.textContent = shortcut.name
+    link.appendChild(nameSpan)
+
+    const menuBtn = document.createElement('button')
+    menuBtn.className = 'shortcut-menu-btn'
+    menuBtn.dataset.id = shortcut.id
+    menuBtn.setAttribute('aria-label', 'Menu')
+    menuBtn.appendChild(createSvgElement(ICONS.menu))
+
+    div.appendChild(link)
+    div.appendChild(menuBtn)
     shortcutsEl.appendChild(div)
   })
-  
+
   const addBtn = document.createElement('div')
   addBtn.className = 'add-shortcut'
-  addBtn.innerHTML = `
-    <div class="shortcut-icon">${ICONS.plus}</div>
-    <span class="shortcut-name">Add</span>
-  `
+  const addIcon = document.createElement('div')
+  addIcon.className = 'shortcut-icon'
+  addIcon.appendChild(createSvgElement(ICONS.plus))
+
+  const addText = document.createElement('span')
+  addText.className = 'shortcut-name'
+  addText.textContent = 'Add'
+  addBtn.appendChild(addIcon)
+  addBtn.appendChild(addText)
   shortcutsEl.appendChild(addBtn)
   
   setupShortcutsEventDelegation()
@@ -451,26 +516,53 @@ document.addEventListener('click', (e) => {
 })
 
 function renderTodos() {
-  todoItems.innerHTML = ''
+  todoItems.replaceChildren()
   
   if (state.todos.length === 0) {
-    todoItems.innerHTML = '<p style="text-align:center;color:rgba(255,255,255,0.5);font-size:0.875rem;padding:1rem;">No tasks yet. Add one above!</p>'
+    const empty = document.createElement('p')
+    empty.style.textAlign = 'center'
+    empty.style.color = 'rgba(255,255,255,0.5)'
+    empty.style.fontSize = '0.875rem'
+    empty.style.padding = '1rem'
+    empty.textContent = 'No tasks yet. Add one above!'
+    todoItems.appendChild(empty)
   } else {
     state.todos.forEach(todo => {
       const div = document.createElement('div')
       div.className = 'todo-item'
-      
+
+      const checkbox = document.createElement('div')
+      checkbox.className = `checkbox ${todo.completed ? 'checked' : ''}`
+      checkbox.dataset.id = todo.id
+      checkbox.appendChild(createSvgElement(ICONS.checkbox))
+
+      const text = document.createElement('span')
+      text.className = `text ${todo.completed ? 'completed' : ''}`
+      text.dataset.id = todo.id
+      text.textContent = todo.text
+
       const normalizedUrl = normalizeUrl(todo.text)
-      const linkBtn = normalizedUrl
-        ? `<a href="${normalizedUrl}" target="_blank" rel="noopener noreferrer" class="link-btn" title="Open link">${ICONS.link}</a>`
-        : ''
-      
-      div.innerHTML = `
-        <div class="checkbox ${todo.completed ? 'checked' : ''}" data-id="${todo.id}">${ICONS.checkbox}</div>
-        <span class="text ${todo.completed ? 'completed' : ''}" data-id="${todo.id}">${todo.text}</span>
-        ${linkBtn}
-        <button class="todo-menu-btn" data-id="${todo.id}" aria-label="Menu">${ICONS.menu}</button>
-      `
+      let linkBtn: HTMLAnchorElement | null = null
+      if (normalizedUrl) {
+        linkBtn = document.createElement('a')
+        linkBtn.href = normalizedUrl
+        linkBtn.target = '_blank'
+        linkBtn.rel = 'noopener noreferrer'
+        linkBtn.className = 'link-btn'
+        linkBtn.title = 'Open link'
+        linkBtn.appendChild(createSvgElement(ICONS.link))
+      }
+
+      const menuBtn = document.createElement('button')
+      menuBtn.className = 'todo-menu-btn'
+      menuBtn.dataset.id = todo.id
+      menuBtn.setAttribute('aria-label', 'Menu')
+      menuBtn.appendChild(createSvgElement(ICONS.menu))
+
+      div.appendChild(checkbox)
+      div.appendChild(text)
+      if (linkBtn) div.appendChild(linkBtn)
+      div.appendChild(menuBtn)
       todoItems.appendChild(div)
     })
   }
@@ -529,8 +621,7 @@ function startEditTodo(id: string) {
   input.value = todo.text
   
   textEl.classList.add('editing')
-  textEl.innerHTML = ''
-  textEl.appendChild(input)
+  textEl.replaceChildren(input)
   input.focus()
   input.select()
   
@@ -705,8 +796,6 @@ async function toggleTodo(id: string, completed: boolean) {
 
 async function deleteTodo(id: string) {
   const todoItem = document.querySelector(`.todo-item:has(.checkbox[data-id="${id}"])`)
-  const deleteBtn = todoItem?.querySelector('.delete-btn')
-  deleteBtn?.classList.add('loading')
   
   try {
     await fetchWithAuth(`${API_BASE}/api/todos/${id}`, { method: 'DELETE' })
@@ -715,7 +804,6 @@ async function deleteTodo(id: string) {
   } catch (error) {
     console.error('Failed to delete todo:', error)
     showToast('Failed to delete task', 'error')
-    deleteBtn?.classList.remove('loading')
   }
 }
 
@@ -730,35 +818,33 @@ async function checkPasswordExists(): Promise<boolean> {
   }
 }
 
-async function setupPassword(password: string): Promise<string | null> {
+async function setupPassword(password: string): Promise<boolean> {
   try {
     const res = await fetch(`${API_BASE}/api/auth/setup`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password })
     })
-    if (!res.ok) return null
-    const data = await res.json()
-    return (data as { token?: string }).token || null
+    return res.ok
   } catch (error) {
     console.error('Failed to setup password:', error)
-    return null
+    return false
   }
 }
 
-async function verifyPassword(password: string): Promise<string | null> {
+async function verifyPassword(password: string): Promise<boolean> {
   try {
     const res = await fetch(`${API_BASE}/api/auth/verify`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password })
     })
-    if (!res.ok) return null
-    const data = await res.json()
-    return (data as { token?: string }).token || null
+    return res.ok
   } catch (error) {
     console.error('Failed to verify password:', error)
-    return null
+    return false
   }
 }
 
@@ -793,17 +879,15 @@ async function handlePasswordSubmit() {
       return
     }
     
-    const token = await setupPassword(password)
-    if (token) {
-      localStorage.setItem('hometab_auth', token)
+    const success = await setupPassword(password)
+    if (success) {
       showMainContent()
     } else {
       showError('Failed to set password')
     }
   } else {
-    const token = await verifyPassword(password)
-    if (token) {
-      localStorage.setItem('hometab_auth', token)
+    const success = await verifyPassword(password)
+    if (success) {
       showMainContent()
     } else {
       showError('Invalid password')
@@ -870,28 +954,17 @@ async function loadData() {
 }
 
 async function init() {
-  const storedToken = localStorage.getItem('hometab_auth')
-  
-  if (storedToken) {
-    try {
-      const res = await fetch(`${API_BASE}/api/auth/check`, {
-        headers: { 'Authorization': `Bearer ${storedToken}` }
-      })
-      if (res.ok) {
-        const data = await res.json()
-        if ((data as { isValid?: boolean }).isValid) {
-          showMainContent()
-          return
-        }
-        // Token is invalid, remove it
-        localStorage.removeItem('hometab_auth')
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/check`, { credentials: 'include' })
+    if (res.ok) {
+      const data = await res.json()
+      if ((data as { isValid?: boolean }).isValid) {
+        showMainContent()
+        return
       }
-      // If res.ok is false (e.g., 500), don't remove token - server error
-    } catch (error) {
-      // Don't remove token on network error or abort
-      // User may be offline or page was refreshed quickly
-      console.error('Auth check failed:', error)
     }
+  } catch (error) {
+    console.error('Auth check failed:', error)
   }
   
   const hasPassword = await checkPasswordExists()
@@ -913,17 +986,18 @@ async function init() {
 
 function renderSearchEngines() {
   if (!state.currentSearchEngine) return
-  
-  currentEngineIcon.innerHTML = renderIcon(state.currentSearchEngine.icon, { name: state.currentSearchEngine.name })
-  
-  searchEngineList.innerHTML = ''
+
+  currentEngineIcon.replaceChildren(renderIcon(state.currentSearchEngine.icon, { name: state.currentSearchEngine.name }))
+
+  searchEngineList.replaceChildren()
   state.searchEngines.forEach(engine => {
     const btn = document.createElement('button')
     btn.className = `dropdown-item search-engine-item${engine.id === state.currentSearchEngine?.id ? ' selected' : ''}`
-    btn.innerHTML = `
-      ${renderIcon(engine.icon, { name: engine.name })}
-      <span>${engine.name}</span>
-    `
+
+    btn.appendChild(renderIcon(engine.icon, { name: engine.name }))
+    const text = document.createElement('span')
+    text.textContent = engine.name
+    btn.appendChild(text)
     btn.addEventListener('click', () => selectSearchEngine(engine))
     searchEngineList.appendChild(btn)
   })

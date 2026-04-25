@@ -555,8 +555,8 @@ body {
   position: absolute;
   top: 0.125rem;
   right: 0.125rem;
-  width: 0.75rem;
-  height: 1rem;
+  width: 1.5rem;
+  height: 1.5rem;
   border-radius: var(--radius);
   border: none;
   background: transparent;
@@ -576,6 +576,12 @@ body {
 
 .shortcut-menu-btn:hover {
   color: white;
+  background: var(--glass-bg);
+}
+
+.shortcut-menu-btn:active {
+  transform: scale(0.9);
+  background: var(--glass-bg-subtle);
 }
 
 .shortcut-menu-btn svg {
@@ -586,6 +592,7 @@ body {
 @media (max-width: 767px) {
   .shortcut-menu-btn {
     opacity: 1;
+    width: 1rem;
   }
 }
 
@@ -720,7 +727,7 @@ body {
 }
 
 .todo-items {
-  max-height: 16rem;
+  max-width: 50vh;
   overflow-y: auto;
 }
 
@@ -785,11 +792,6 @@ body {
 .todo-item.loading {
   opacity: 0.5;
   pointer-events: none;
-}
-
-.todo-item .delete-btn.loading {
-  opacity: 1;
-  animation: pulse 1s ease-in-out infinite;
 }
 
 .shortcut.saving a {
@@ -890,6 +892,12 @@ body {
 
 .todo-item .todo-menu-btn:hover {
   color: white;
+  background: var(--glass-bg);
+}
+
+.todo-item .todo-menu-btn:active {
+  transform: scale(0.9);
+  background: var(--glass-bg-subtle);
 }
 
 .todo-item .todo-menu-btn svg {

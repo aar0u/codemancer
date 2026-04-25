@@ -1,0 +1,12 @@
+{
+  "passwordHash": "",
+  "todos": [],
+  "searchEngines": [
+    {
+      "id": "google",
+      "name": "Google",
+      "url": "https://www.google.com/search?q=%s"
+    }
+  ],
+  "shortcuts": []
+}

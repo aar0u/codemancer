@@ -1,6 +1,6 @@
 import { Hono, Context, MiddlewareHandler } from 'hono'
 import { cors } from 'hono/cors'
-import defaults from './defaults.json'
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import {
   Shortcut,
   Todo,
@@ -30,6 +30,17 @@ type RateLimitOptions = {
   message?: string
 }
 
+const AUTH_COOKIE_NAME = 'hometab_auth'
+
+function getCookieSecurity(c: Context<{ Bindings: Bindings; Variables: Variables }>) {
+  const forwardedProto = c.req.header('X-Forwarded-Proto')
+  const isHttps = c.req.url.startsWith('https://') || forwardedProto === 'https'
+  return {
+    secure: isHttps,
+    sameSite: 'Lax' as const,
+  }
+}
+
 function rateLimit(options: RateLimitOptions): MiddlewareHandler<{ Bindings: Bindings; Variables: Variables }> {
   const { windowMs, max, message = 'Too many requests, please try again later.' } = options
 
@@ -39,16 +50,19 @@ function rateLimit(options: RateLimitOptions): MiddlewareHandler<{ Bindings: Bin
       c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() ||
       'unknown'
     const key = KV_KEYS.rateLimit(ip, Math.floor(Date.now() / windowMs))
+    const ttlSeconds = Math.max(60, Math.ceil(windowMs / 1000))
 
     const kv = c.env.KV_BINDING
     const current = await kv.get(key)
-    const count = current ? parseInt(current, 10) : 0
+    const count = Number.parseInt(current || '0', 10)
 
+    // NOTE: KV increment here is not atomic. Under high concurrency, a small over-allow window may happen.
+    // We accept this trade-off for simplicity and document the risk in README.
     if (count >= max) {
       return c.json({ error: message }, 429)
     }
 
-    await kv.put(key, String(count + 1), { expirationTtl: Math.ceil(windowMs / 1000) })
+    await kv.put(key, String(count + 1), { expirationTtl: ttlSeconds })
     await next()
   }
 }
@@ -154,10 +168,12 @@ async function getUserData(kv: KVNamespace, userId: string): Promise<UserData> {
 async function verifyAuth(
   c: Context<{ Bindings: Bindings; Variables: Variables }>
 ): Promise<{ valid: boolean; userId: string | null }> {
+  const cookieToken = getCookie(c, AUTH_COOKIE_NAME)
   const authHeader = c.req.header('Authorization')
-  if (!authHeader) return { valid: false, userId: null }
+  const bearerToken = authHeader?.replace('Bearer ', '').trim()
+  const token = cookieToken || bearerToken
+  if (!token) return { valid: false, userId: null }
 
-  const token = authHeader.replace('Bearer ', '')
   const userId = await validateAndRefreshSession(c.env.KV_BINDING, token)
   return { valid: userId !== null, userId }
 }
@@ -199,13 +215,26 @@ app.post(
     
     await Promise.all([
       setAuthData(kv, DEFAULT_USER_ID, { passwordHash }),
-      getShortcuts(kv, DEFAULT_USER_ID).then(s => { if (s.length === 0) setShortcuts(kv, DEFAULT_USER_ID, defaults.shortcuts as Shortcut[]) }),
-      getTodos(kv, DEFAULT_USER_ID).then(t => { if (t.length === 0) setTodos(kv, DEFAULT_USER_ID, defaults.todos as Todo[]) }),
-      getSearchEngines(kv, DEFAULT_USER_ID).then(e => { if (e.length === 0) setSearchEngines(kv, DEFAULT_USER_ID, defaults.searchEngines as SearchEngine[]) }),
+      getShortcuts(kv, DEFAULT_USER_ID).then((s) => {
+        if (s.length === 0) setShortcuts(kv, DEFAULT_USER_ID, [])
+      }),
+      getTodos(kv, DEFAULT_USER_ID).then((t) => {
+        if (t.length === 0) setTodos(kv, DEFAULT_USER_ID, [])
+      }),
+      getSearchEngines(kv, DEFAULT_USER_ID).then((e) => {
+        if (e.length === 0) setSearchEngines(kv, DEFAULT_USER_ID, [])
+      }),
     ])
 
     const token = await createSession(kv, DEFAULT_USER_ID)
-    return c.json({ success: true, token })
+    setCookie(c, AUTH_COOKIE_NAME, token, {
+      httpOnly: true,
+      path: '/',
+      maxAge: SESSION_TTL,
+      ...getCookieSecurity(c),
+    })
+
+    return c.json({ success: true })
   }
 )
 
@@ -234,16 +263,23 @@ app.post(
     }
 
     const token = await createSession(c.env.KV_BINDING, DEFAULT_USER_ID)
-    return c.json({ success: true, token })
+    setCookie(c, AUTH_COOKIE_NAME, token, {
+      httpOnly: true,
+      path: '/',
+      maxAge: SESSION_TTL,
+      ...getCookieSecurity(c),
+    })
+
+    return c.json({ success: true })
   }
 )
 
 app.post('/api/auth/logout', async (c) => {
-  const authHeader = c.req.header('Authorization')
-  if (authHeader) {
-    const token = authHeader.replace('Bearer ', '')
+  const token = getCookie(c, AUTH_COOKIE_NAME)
+  if (token) {
     await deleteSession(c.env.KV_BINDING, token)
   }
+  deleteCookie(c, AUTH_COOKIE_NAME, { path: '/' })
   return c.json({ success: true })
 })
 
@@ -251,13 +287,7 @@ app.get('/api/auth/check', async (c) => {
   const authData = await getAuthData(c.env.KV_BINDING, DEFAULT_USER_ID)
   const hasPassword = !!authData
 
-  const authHeader = c.req.header('Authorization')
-  let isValid = false
-  if (authHeader) {
-    const token = authHeader.replace('Bearer ', '')
-    const userId = await validateAndRefreshSession(c.env.KV_BINDING, token)
-    isValid = userId !== null
-  }
+  const { valid: isValid } = await verifyAuth(c)
 
   return c.json({ hasPassword, isValid })
 })

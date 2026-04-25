@@ -148,9 +148,24 @@ def create_svg_icon(path_data: str, color: str = "#ffffff", size: int = ICON_SIZ
     return icon
 
 def get_app_icon() -> QIcon:
-    """Get the application icon with correct path resolution."""
-    icon_path = str(Path(__file__).parent / ICON_FILENAME)
-    return QIcon(icon_path)
+    """Get the application icon, falling back to a generated placeholder if file is missing."""
+    icon_path = Path(__file__).parent / ICON_FILENAME
+    if icon_path.exists():
+        return QIcon(str(icon_path))
+
+    # Generate a simple "S" placeholder icon
+    size = 64
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor("#0078d4"))
+    with QPainter(pixmap) as painter:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        font = QFont()
+        font.setBold(True)
+        font.setPixelSize(42)
+        painter.setFont(font)
+        painter.setPen(QColor("white"))
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "S")
+    return QIcon(pixmap)
 
 def get_app_controller() -> Optional["AppController"]:
     """Safely get the global AppController from QApplication instance."""
@@ -260,9 +275,12 @@ class AppController(QObject):
         self._setup_tray()
         self._setup_hotkey()
         self._setup_single_instance_handler()
+        self._setup_screen_change_handler()
 
-        self.screenshot_triggered.connect(self._prepare_fullscreen_capture)
-        self.pin_clipboard_triggered.connect(self._pin_clipboard_image)
+        # Use QueuedConnection to ensure slots always run in the main Qt thread,
+        # even when signals are emitted from pynput's background thread.
+        self.screenshot_triggered.connect(self._prepare_fullscreen_capture, Qt.ConnectionType.QueuedConnection)
+        self.pin_clipboard_triggered.connect(self._pin_clipboard_image, Qt.ConnectionType.QueuedConnection)
 
     # Initialization Methods
     def _setup_about_window(self):
@@ -337,6 +355,40 @@ class AppController(QObject):
         self.single_instance.new_instance_detected.connect(
             lambda msg: self._show_about() if msg == "new_instance" else None
         )
+
+    def _setup_screen_change_handler(self):
+        """React to monitor plug/unplug events."""
+        app = QApplication.instance()
+        app.screenAdded.connect(self._on_screens_changed)
+        app.screenRemoved.connect(self._on_screens_changed)
+
+    def _on_screens_changed(self, _screen=None):
+        """Handle monitor configuration changes."""
+        logger.info("Screen configuration changed, refreshing state")
+
+        # Abort any in-progress capture – its geometry and pixmap are now stale.
+        if self.capture_overlay and self.capture_overlay.isVisible():
+            logger.warning("Closing stale CaptureOverlay due to screen change")
+            self.capture_overlay.close()
+
+        # Move any PinnedOverlay windows that are now entirely off-screen.
+        screens = QApplication.screens()
+        if not screens:
+            return
+        for pinned in self.pinned_windows:
+            if not pinned.isVisible():
+                continue
+            win_rect = pinned.frameGeometry()
+            on_screen = any(
+                screen.geometry().intersects(win_rect) for screen in screens
+            )
+            if not on_screen:
+                primary = QApplication.primaryScreen()
+                target = primary.geometry() if primary else screens[0].geometry()
+                new_x = max(target.left(), min(win_rect.left(), target.right() - win_rect.width()))
+                new_y = max(target.top(), min(win_rect.top(), target.bottom() - win_rect.height()))
+                pinned.move(new_x, new_y)
+                logger.info(f"Moved {pinned.display_name} back on-screen to ({new_x}, {new_y})")
 
     # Event Handlers
     def _tray_icon_activated(self, reason):
@@ -487,6 +539,9 @@ class FocusPreservingEventFilter(QObject):
     def _restore_focus(self):
         active_widget = self.actionbar.linked_widget
         if not active_widget:
+            return
+        # Do not attempt to restore focus to a hidden/closed widget.
+        if not active_widget.isVisible():
             return
         if not active_widget.isActiveWindow():
             active_widget.activateWindow()
@@ -1297,7 +1352,12 @@ class OverlayBase(QWidget):
     def closeEvent(self, event):
         """Clean up actionbar and release resources when closing."""
         if (actionbar := get_actionbar()):
-            actionbar.hide()
+            if actionbar.linked_widget is self:
+                # Properly dismiss and unlink to avoid stale references.
+                actionbar.dismiss()
+                actionbar.linked_widget = None
+            else:
+                actionbar.hide()
         self.annotation_states.clear()
         self.base_pixmap = None
         logger.info(f"<<< [{self.display_name}] CLOSED")
@@ -1307,25 +1367,26 @@ class CaptureOverlay(OverlayBase):
 
     def __init__(self):
         super().__init__()
+        self.setCursor(Qt.CursorShape.CrossCursor)
 
+    # Initialization Methods
+    def _refresh_geometry(self):
+        """Update overlay geometry to match the current virtual desktop layout."""
         screens = QApplication.screens()
         if screens:
             min_x, min_y, max_x, max_y = get_virtual_desktop_bounds(screens)
             virtual_width = max_x - min_x + 1
             virtual_height = max_y - min_y + 1
             self.setGeometry(min_x, min_y, virtual_width, virtual_height)
-            logger.debug(f"CaptureOverlay geometry set to virtual desktop: {min_x}, {min_y}, {virtual_width}x{virtual_height}")
+            logger.debug(f"CaptureOverlay geometry refreshed: {min_x}, {min_y}, {virtual_width}x{virtual_height}")
         else:
             screen = QApplication.primaryScreen()
             if screen:
-                full_geometry = screen.geometry()
-                self.setGeometry(full_geometry)
+                self.setGeometry(screen.geometry())
 
-        self.setCursor(Qt.CursorShape.CrossCursor)
-
-    # Initialization Methods
     def new_capture(self, full_screen: QPixmap):
         """Initialize a new capture session."""
+        self._refresh_geometry()
         self.display_id += 1
         self.base_pixmap = full_screen
 
