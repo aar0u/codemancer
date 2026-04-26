@@ -146,6 +146,18 @@ async function setTodos(kv: KVNamespace, userId: string, todos: Todo[]): Promise
   await kv.put(KV_KEYS.todos(userId), JSON.stringify(todos))
 }
 
+async function moveToTrash(
+  kv: KVNamespace,
+  userId: string,
+  type: 'shortcuts' | 'todos',
+  id: string,
+  data: Shortcut | Todo
+): Promise<void> {
+  await kv.put(KV_KEYS.trash(userId, type, id), JSON.stringify(data), {
+    expirationTtl: 43200,
+  })
+}
+
 async function getSearchEngines(kv: KVNamespace, userId: string): Promise<SearchEngine[]> {
   const data = await kv.get(KV_KEYS.searchEngines(userId))
   return data ? JSON.parse(data) : []
@@ -447,8 +459,12 @@ app.delete('/api/shortcuts/:id', async (c) => {
   const userId = c.get('userId')
 
   const shortcuts = await getShortcuts(kv, userId)
-  const filtered = shortcuts.filter((s) => s.id !== id)
-  await setShortcuts(kv, userId, filtered)
+  const index = shortcuts.findIndex((s) => s.id === id)
+  if (index === -1) return c.json({ success: true })
+
+  const [deleted] = shortcuts.splice(index, 1)
+  await setShortcuts(kv, userId, shortcuts)
+  await moveToTrash(kv, userId, 'shortcuts', id, deleted)
 
   return c.json({ success: true })
 })
@@ -489,8 +505,12 @@ app.delete('/api/todos/:id', async (c) => {
   const userId = c.get('userId')
 
   const todos = await getTodos(kv, userId)
-  const filtered = todos.filter((t) => t.id !== id)
-  await setTodos(kv, userId, filtered)
+  const index = todos.findIndex((t) => t.id === id)
+  if (index === -1) return c.json({ success: true })
+
+  const [deleted] = todos.splice(index, 1)
+  await setTodos(kv, userId, todos)
+  await moveToTrash(kv, userId, 'todos', id, deleted)
 
   return c.json({ success: true })
 })

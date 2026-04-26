@@ -44,4 +44,5 @@ export const KV_KEYS = {
   tabs: (userId: string, machineId: string) => `tabs:${userId}:${machineId}`,
   session: (token: string) => `session:${token}`,
   rateLimit: (ip: string, window: number) => `ratelimit:${ip}:${window}`,
+  trash: (userId: string, type: 'shortcuts' | 'todos', id: string) => `trash:${userId}:${type}:${id}`,
 }
