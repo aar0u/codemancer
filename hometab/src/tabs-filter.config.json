@@ -1,0 +1,50 @@
+{
+  "browserProtocols": [
+    "^about:",
+    "^chrome:",
+    "^edge:",
+    "^brave:",
+    "^chrome-extension:",
+    "^file:",
+    "^data:"
+  ],
+  "localPatterns": [
+    "localhost",
+    "127\\.0\\.0\\.1",
+    "192\\.168\\.",
+    "10\\.",
+    "172\\.(1[6-9]|2[0-9]|3[0-1])\\.",
+    "\\.local$",
+    "\\.test$",
+    "\\.dev$",
+    "\\.internal$"
+  ],
+  "searchEngines": [
+    "google\\.com/search",
+    "bing\\.com/search",
+    "baidu\\.com/s",
+    "duckduckgo\\.com"
+  ],
+  "privacyPaths": [
+    "/login",
+    "/signin",
+    "/signup",
+    "/register",
+    "/payment",
+    "/checkout",
+    "/reset-password",
+    "/verify"
+  ],
+  "sensitiveDomains": [
+    "bank\\.",
+    "pay\\.",
+    "mail\\.google\\.com",
+    "outlook\\.live\\.com"
+  ],
+  "tempKeywords": [
+    "token=",
+    "session=",
+    "\\btemp\\b",
+    "\\btmp\\b"
+  ]
+}

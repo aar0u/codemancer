@@ -41,6 +41,24 @@ node scripts/kv.mjs parse favourites.html
 node scripts/kv.mjs parse favourites.html --folder "Bookmarks Bar"
 ```
 
+## Tabs API
+
+- `POST /api/tabs` (auth required)
+  - Body: `{ "machine_id": "home-pc", "content": "..." }`
+  - Stores tabs content per machine in KV.
+- `GET /tabs` (auth required)
+  - Returns an overview page of all machines.
+- `GET /tabs?machine_id=<id>` (auth required)
+  - Returns single-machine tabs page.
+
+### Get Bearer Token Script
+
+```bash
+bash scripts/get-token.sh
+```
+
+The script will prompt for password and output the token for use with client applications.
+
 ## Tech Stack
 
 - Cloudflare Workers + Hono

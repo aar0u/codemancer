@@ -28,6 +28,12 @@ export interface UserData {
   searchEngines: SearchEngine[]
 }
 
+export interface TabsRecord {
+  machineId: string
+  content: string
+  updatedAt: string
+}
+
 export const DEFAULT_USER_ID = 'default'
 
 export const KV_KEYS = {
@@ -35,6 +41,7 @@ export const KV_KEYS = {
   shortcuts: (userId: string) => `shortcuts:${userId}`,
   todos: (userId: string) => `todos:${userId}`,
   searchEngines: (userId: string) => `searchEngines:${userId}`,
+  tabs: (userId: string, machineId: string) => `tabs:${userId}:${machineId}`,
   session: (token: string) => `session:${token}`,
   rateLimit: (ip: string, window: number) => `ratelimit:${ip}:${window}`,
 }

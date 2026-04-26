@@ -7,9 +7,12 @@ import {
   SearchEngine,
   AuthData,
   UserData,
+  TabsRecord,
   DEFAULT_USER_ID,
   KV_KEYS,
 } from './types'
+import TABS_TEMPLATE from './tabs-template.html'
+import TABS_FILTER_CONFIG from './tabs-filter.config.json'
 
 type Bindings = {
   KV_BINDING: KVNamespace
@@ -165,6 +168,109 @@ async function getUserData(kv: KVNamespace, userId: string): Promise<UserData> {
   return { shortcuts, todos, searchEngines }
 }
 
+async function getTabsByMachine(
+  kv: KVNamespace,
+  userId: string,
+  machineId: string
+): Promise<TabsRecord | null> {
+  const data = await kv.get(KV_KEYS.tabs(userId, machineId))
+  if (!data) return null
+  try {
+    return JSON.parse(data)
+  } catch {
+    return null
+  }
+}
+
+async function upsertTabsByMachine(
+  kv: KVNamespace,
+  userId: string,
+  machineId: string,
+  content: string
+): Promise<TabsRecord> {
+  const record: TabsRecord = {
+    machineId,
+    content,
+    updatedAt: new Date().toISOString(),
+  }
+  await kv.put(KV_KEYS.tabs(userId, machineId), JSON.stringify(record))
+  return record
+}
+
+async function getAllTabsRecords(
+  kv: KVNamespace,
+  userId: string
+): Promise<TabsRecord[]> {
+  const prefix = `tabs:${userId}:`
+  const list = await kv.list({ prefix })
+  const keys = list.keys.map((k) => k.name.slice(prefix.length))
+  const records = await Promise.all(
+    keys.map((machineId) => getTabsByMachine(kv, userId, machineId))
+  )
+  return records.filter((r): r is TabsRecord => r !== null)
+}
+
+function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function filterTabsContent(content: string): string {
+  const lines = content.split('\n')
+  
+  const filteredLines = lines.filter(line => {
+    const urlMatch = line.match(/\]\(([^)]+)\)/)
+    if (!urlMatch) return true
+    
+    const url = urlMatch[1]
+    
+    for (const category of Object.values(TABS_FILTER_CONFIG)) {
+      for (const pattern of category) {
+        if (new RegExp(pattern, 'i').test(url)) {
+          return false
+        }
+      }
+    }
+    
+    return true
+  })
+  
+  return filteredLines.join('\n')
+}
+
+function linkifyUrls(input: string): string {
+  return input.replace(/\((https?:\/\/[^)]+)\)/g, (_, url) => {
+    return `(<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>)`
+  })
+}
+
+function renderTabsHtml(record: TabsRecord): string {
+  const content = linkifyUrls(escapeHtml(record.content))
+  const template = TABS_TEMPLATE.match(/<template id="tabs-template">([\s\S]*?)<\/template>/)?.[1] || ''
+  const header = `${escapeHtml(record.machineId)} <a href="/tabs">< Back</a>`
+  const html = template.replace('{{HEADER}}', header).replace('{{CONTENT}}', content)
+  return TABS_TEMPLATE.replace(/<template id="tabs-template">[\s\S]*?<\/template>/, html)
+}
+
+function renderTabsOverviewHtml(records: TabsRecord[]): string {
+  const template = TABS_TEMPLATE.match(/<template id="tabs-template">([\s\S]*?)<\/template>/)?.[1] || ''
+  const items = records
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .map((record) => {
+      const lines = record.content.split('\n').slice(0, 5).join('\n')
+      const summary = linkifyUrls(escapeHtml(lines))
+      const header = `<a href="/tabs?machine_id=${encodeURIComponent(record.machineId)}">${escapeHtml(record.machineId)}</a>`
+      return template.replace('{{HEADER}}', header).replace('{{CONTENT}}', summary)
+    })
+    .join('\n')
+
+  return TABS_TEMPLATE.replace(/<template id="tabs-template">[\s\S]*?<\/template>/, items)
+}
+
 async function verifyAuth(
   c: Context<{ Bindings: Bindings; Variables: Variables }>
 ): Promise<{ valid: boolean; userId: string | null }> {
@@ -190,6 +296,8 @@ const authMiddleware: MiddlewareHandler<{ Bindings: Bindings; Variables: Variabl
 app.use('/api/shortcuts/*', authMiddleware)
 app.use('/api/todos/*', authMiddleware)
 app.use('/api/data', authMiddleware)
+app.use('/api/tabs', authMiddleware)
+app.use('/tabs', authMiddleware)
 
 app.post(
   '/api/auth/setup',
@@ -270,7 +378,7 @@ app.post(
       ...getCookieSecurity(c),
     })
 
-    return c.json({ success: true })
+    return c.json({ token, tokenType: 'Bearer' })
   }
 )
 
@@ -385,6 +493,48 @@ app.delete('/api/todos/:id', async (c) => {
   await setTodos(kv, userId, filtered)
 
   return c.json({ success: true })
+})
+
+app.post('/api/tabs', async (c) => {
+  const userId = c.get('userId')
+  const { content, machine_id: machineIdRaw } = await c.req.json<{
+    content?: unknown
+    machine_id?: unknown
+  }>()
+
+  if (typeof content !== 'string') {
+    return c.text('Bad Request: content must be a string', 400)
+  }
+
+  if (typeof machineIdRaw !== 'string' || machineIdRaw.trim().length === 0) {
+    return c.text('Bad Request: machine_id must be a non-empty string', 400)
+  }
+
+  const machineId = machineIdRaw.trim()
+  const filteredContent = filterTabsContent(content)
+  
+  if (!filteredContent.trim()) {
+    return c.text('Content filtered: no valid tabs to save', 200)
+  }
+  
+  await upsertTabsByMachine(c.env.KV_BINDING, userId, machineId, filteredContent)
+  return c.text('Content received successfully')
+})
+
+app.get('/tabs', async (c) => {
+  const userId = c.get('userId')
+  const machineId = c.req.query('machine_id')?.trim()
+
+  if (machineId) {
+    const record = await getTabsByMachine(c.env.KV_BINDING, userId, machineId)
+    if (!record) {
+      return c.text('No data found', 404)
+    }
+    return c.html(renderTabsHtml(record))
+  }
+
+  const records = await getAllTabsRecords(c.env.KV_BINDING, userId)
+  return c.html(renderTabsOverviewHtml(records))
 })
 
 export default app

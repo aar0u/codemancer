@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Open Tabs</title>
+  <link rel="stylesheet" href="/styles/main.css">
+  <link rel="icon" type="image/svg+xml" href="/icon.svg">
+  <style>
+    body { padding: 2rem; max-width: 48rem; margin: 0 auto; }
+    .tabs-item { margin-bottom: 2rem; }
+    .tabs-title { margin: 0 0 .5rem 0; font-weight: 500; }
+    a { color: #06c; text-decoration: underline; }
+    a:hover { opacity: .6; }
+    .content-box {
+      background: var(--secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+      font-family: ui-monospace, monospace;
+      font-size: .875rem;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <template id="tabs-template">
+    <div class="tabs-item">
+      <div class="tabs-title">{{HEADER}}</div>
+      <div class="content-box">{{CONTENT}}</div>
+    </div>
+  </template>
+</body>
+</html>
