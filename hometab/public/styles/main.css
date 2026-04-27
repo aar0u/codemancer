@@ -681,23 +681,45 @@ body {
   margin-bottom: 1rem;
 }
 
-.todo-input-group input {
-  flex: 1;
+.todo-textarea {
+  width: 100%;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius);
   background: var(--glass-bg);
   color: white;
   font-size: 0.875rem;
+  font-family: inherit;
+  resize: none;
+  min-height: 2.25rem;
+  max-height: 8rem;
+  line-height: 1.4;
 }
 
-.todo-input-group input::placeholder {
+.todo-textarea::placeholder {
   color: var(--text-muted);
 }
 
-.todo-input-group input:focus {
+.todo-textarea:focus {
   outline: none;
   border-color: var(--text-muted);
+}
+
+.todo-textarea::-webkit-scrollbar {
+  width: 4px;
+}
+
+.todo-textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.todo-textarea::-webkit-scrollbar-thumb {
+  background: var(--glass-border);
+  border-radius: 2px;
+}
+
+.todo-textarea::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
 }
 
 .icon-btn {
@@ -817,6 +839,7 @@ body {
   transition: all 0.2s;
   word-break: break-word;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .todo-item .text.completed {
@@ -828,17 +851,6 @@ body {
   color: var(--text-secondary);
   text-decoration: underline;
   text-underline-offset: 2px;
-}
-
-.todo-edit-input {
-  width: 100%;
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--text-muted);
-  color: white;
-  font-size: 0.875rem;
-  outline: none;
-  padding-bottom: 0.25rem;
 }
 
 .todo-item .link-btn {

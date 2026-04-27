@@ -202,7 +202,7 @@ const timeEl = document.getElementById('time')!
 const dateEl = document.getElementById('date')!
 const shortcutsEl = document.getElementById('shortcuts')!
 const todoItems = document.getElementById('todo-items')!
-const todoInput = document.getElementById('todo-input') as HTMLInputElement
+const todoInput = document.getElementById('todo-input') as HTMLTextAreaElement
 const addTodoBtn = document.getElementById('add-todo-btn')!
 const todoCount = document.getElementById('todo-count')!
 const todoHeader = document.querySelector('.todo-header')!
@@ -615,18 +615,25 @@ function startEditTodo(id: string) {
   const textEl = todoItems.querySelector(`.text[data-id="${id}"]`)
   if (!textEl) return
   
-  const input = document.createElement('input')
-  input.type = 'text'
-  input.className = 'todo-edit-input'
-  input.value = todo.text
+  const textarea = document.createElement('textarea')
+  textarea.className = 'todo-textarea'
+  textarea.value = todo.text
+  textarea.rows = 1
   
   textEl.classList.add('editing')
-  textEl.replaceChildren(input)
-  input.focus()
-  input.select()
+  textEl.replaceChildren(textarea)
+  textarea.focus()
+  textarea.select()
+  
+  const adjustHeight = () => {
+    textarea.style.height = 'auto'
+    textarea.style.height = Math.min(textarea.scrollHeight, 96) + 'px'
+  }
+  
+  adjustHeight()
   
   const saveEdit = async () => {
-    const newText = input.value.trim()
+    const newText = textarea.value.trim()
     if (newText && newText !== todo.text) {
       await updateTodoText(id, newText)
     } else {
@@ -634,11 +641,12 @@ function startEditTodo(id: string) {
     }
   }
   
-  input.addEventListener('blur', saveEdit)
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
+  textarea.addEventListener('input', adjustHeight)
+  textarea.addEventListener('blur', saveEdit)
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      input.blur()
+      textarea.blur()
     }
     if (e.key === 'Escape') {
       renderTodos()
@@ -764,6 +772,7 @@ async function addTodo() {
     })
     state.todos.push(newTodo)
     todoInput.value = ''
+    todoInput.style.height = 'auto'
     renderTodos()
   } catch (error) {
     console.error('Failed to add todo:', error)
@@ -1045,7 +1054,14 @@ shortcutCancel.addEventListener('click', closeShortcutModal)
 
 addTodoBtn.addEventListener('click', addTodo)
 todoInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') addTodo()
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    addTodo()
+  }
+})
+todoInput.addEventListener('input', () => {
+  todoInput.style.height = 'auto'
+  todoInput.style.height = Math.min(todoInput.scrollHeight, 128) + 'px'
 })
 
 todoHeader.addEventListener('click', () => {
