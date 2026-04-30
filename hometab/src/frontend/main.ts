@@ -229,7 +229,7 @@ async function setDynamicBackground(forceRefresh = false) {
   const cached = localStorage.getItem('hometab_bg')
   
   if (!forceRefresh && cached) {
-    const { date, imageUrl } = JSON.parse(cached)
+    const { date, imageUrl, imageId } = JSON.parse(cached)
     if (date === todayKey && imageUrl) {
       background.style.backgroundImage = `url(${imageUrl})`
       return
@@ -241,7 +241,9 @@ async function setDynamicBackground(forceRefresh = false) {
   const res = await fetch(`https://picsum.photos/${width}/${height}`)
   
   if (res.url) {
-    localStorage.setItem('hometab_bg', JSON.stringify({ date: todayKey, imageUrl: res.url }))
+    const match = res.url.match(/\/id\/(\d+)\//)
+    const imageId = match ? match[1] : null
+    localStorage.setItem('hometab_bg', JSON.stringify({ date: todayKey, imageUrl: res.url, imageId }))
     background.style.backgroundImage = `url(${res.url})`
   }
 }
@@ -1068,8 +1070,69 @@ todoHeader.addEventListener('click', () => {
   todoContent.classList.toggle('hidden')
 })
 
-document.getElementById('refresh-bg')!.addEventListener('click', () => {
+const downloadBtn = document.getElementById('download-bg')!
+const fullscreenBtn = document.getElementById('fullscreen-btn')!
+const refreshBtn = document.getElementById('refresh-bg')!
+
+function flashButton(btn: HTMLElement) {
+  btn.classList.add('flash')
+  setTimeout(() => btn.classList.remove('flash'), 300)
+}
+
+refreshBtn.addEventListener('click', function() {
+  flashButton(this)
   setDynamicBackground(true)
+})
+
+async function downloadOriginalImage(this: HTMLElement) {
+  flashButton(this)
+  const imageId = JSON.parse(localStorage.getItem('hometab_bg') || '{}').imageId
+  if (!imageId) {
+    showToast('No background image to download', 'error')
+    return
+  }
+  
+  try {
+    const info = await fetch(`https://picsum.photos/id/${imageId}/info`).then(r => r.json()) as { download_url: string; author: string }
+    const blob = await fetch(info.download_url).then(r => r.blob())
+    
+    const url = URL.createObjectURL(blob)
+    const link = Object.assign(document.createElement('a'), {
+      href: url,
+      download: `picsum_${imageId}_${info.author.replace(/\s+/g, '_')}.jpg`
+    })
+    link.click()
+    URL.revokeObjectURL(url)
+    
+    showToast('Image downloaded', 'success')
+  } catch {
+    showToast('Failed to download image', 'error')
+  }
+}
+
+downloadBtn.addEventListener('click', downloadOriginalImage)
+
+let isFullscreenMode = false
+
+function toggleFullscreenMode(this: HTMLElement) {
+  flashButton(this)
+  isFullscreenMode = !isFullscreenMode
+  document.body.classList.toggle('fullscreen-mode', isFullscreenMode)
+  
+  if (isFullscreenMode) {
+    void document.documentElement.requestFullscreen()
+  } else if (document.fullscreenElement) {
+    void document.exitFullscreen()
+  }
+}
+
+fullscreenBtn.addEventListener('click', toggleFullscreenMode)
+
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && isFullscreenMode) {
+    isFullscreenMode = false
+    document.body.classList.remove('fullscreen-mode')
+  }
 })
 
 searchEngineBtn.addEventListener('click', (e) => {
@@ -1129,19 +1192,36 @@ window.addEventListener('pageshow', (e) => {
 })
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === '/') {
-    const activeElement = document.activeElement
-    const isInputFocused = activeElement && (
-      activeElement.tagName === 'INPUT' ||
-      activeElement.tagName === 'TEXTAREA' ||
-      activeElement.tagName === 'SELECT' ||
-      (activeElement as HTMLElement).isContentEditable
-    )
-    
-    if (!isInputFocused) {
+  const activeElement = document.activeElement
+  const isInputFocused = activeElement && (
+    activeElement.tagName === 'INPUT' ||
+    activeElement.tagName === 'TEXTAREA' ||
+    activeElement.tagName === 'SELECT' ||
+    (activeElement as HTMLElement).isContentEditable
+  )
+  
+  const hasModifier = e.ctrlKey || e.metaKey || e.altKey || e.shiftKey
+  
+  if (!isInputFocused && !hasModifier) {
+    if (e.key === '/') {
       e.preventDefault()
       searchInput.focus()
       searchInput.select()
+    }
+    
+    if (e.key === 'r') {
+      e.preventDefault()
+      refreshBtn.click()
+    }
+    
+    if (e.key === 'd') {
+      e.preventDefault()
+      downloadBtn.click()
+    }
+    
+    if (e.key === 'f') {
+      e.preventDefault()
+      fullscreenBtn.click()
     }
   }
   
