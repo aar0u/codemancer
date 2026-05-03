@@ -90,7 +90,10 @@ function generateToken(): string {
 
 async function createSession(kv: KVNamespace, userId: string): Promise<string> {
   const token = generateToken()
-  await kv.put(KV_KEYS.session(token), userId, { expirationTtl: SESSION_TTL })
+  await kv.put(KV_KEYS.session(token), userId, { 
+    expirationTtl: SESSION_TTL,
+    metadata: { lastRefresh: Date.now() }
+  })
   return token
 }
 
@@ -100,17 +103,21 @@ async function validateAndRefreshSession(
 ): Promise<string | null> {
   const data = await kv.getWithMetadata<{ lastRefresh: number }>(KV_KEYS.session(token))
   
-  if (data.value) {
-    const now = Date.now()
-    const lastRefresh = data.metadata?.lastRefresh || 0
-    const oneDayMs = 24 * 60 * 60 * 1000
-    
-    if (now - lastRefresh > oneDayMs) {
-      await kv.put(KV_KEYS.session(token), data.value, { 
-        expirationTtl: SESSION_TTL,
-        metadata: { lastRefresh: now }
-      })
-    }
+  if (!data.value) {
+    console.log('[Session] Not found:', token.slice(0, 8) + '...')
+    return null
+  }
+  
+  const now = Date.now()
+  const lastRefresh = data.metadata?.lastRefresh || 0
+  const oneDayMs = 24 * 60 * 60 * 1000
+  
+  if (now - lastRefresh > oneDayMs) {
+    console.log('[Session] Refresh:', data.value, 'lastRefresh:', new Date(lastRefresh).toISOString())
+    await kv.put(KV_KEYS.session(token), data.value, { 
+      expirationTtl: SESSION_TTL,
+      metadata: { lastRefresh: now }
+    })
   }
   return data.value
 }
@@ -273,8 +280,10 @@ function renderTabsOverviewHtml(records: TabsRecord[]): string {
   const items = records
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .map((record) => {
-      const lines = record.content.split('\n').slice(0, 5).join('\n')
-      const summary = linkifyUrls(escapeHtml(lines))
+      const allLines = record.content.split('\n')
+      const isTruncated = allLines.length > 5
+      const lines = allLines.slice(0, 5).join('\n')
+      const summary = linkifyUrls(escapeHtml(lines)) + (isTruncated ? '\n...' : '')
       const header = `<a href="/tabs?machine_id=${encodeURIComponent(record.machineId)}">${escapeHtml(record.machineId)}</a>`
       return template.replace('{{HEADER}}', header).replace('{{CONTENT}}', summary)
     })
@@ -290,9 +299,23 @@ async function verifyAuth(
   const authHeader = c.req.header('Authorization')
   const bearerToken = authHeader?.replace('Bearer ', '').trim()
   const token = cookieToken || bearerToken
-  if (!token) return { valid: false, userId: null }
+  
+  if (!token) {
+    console.log('[Auth] No token')
+    return { valid: false, userId: null }
+  }
 
   const userId = await validateAndRefreshSession(c.env.KV_BINDING, token)
+  
+  if (userId) {
+    setCookie(c, AUTH_COOKIE_NAME, token, {
+      httpOnly: true,
+      path: '/',
+      maxAge: SESSION_TTL,
+      ...getCookieSecurity(c),
+    })
+  }
+  
   return { valid: userId !== null, userId }
 }
 
