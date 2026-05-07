@@ -21,6 +21,7 @@ const state = {
   editingShortcutId: null as string | null,
   clockInterval: null as ReturnType<typeof setInterval> | null,
   searchDebounceTimer: null as ReturnType<typeof setTimeout> | null,
+  shortcutSearchIndex: -1,
 }
 
 const toastContainer = document.getElementById('toast-container')!
@@ -85,10 +86,78 @@ function showDropdown(type: DropdownType, id: string, anchorEl: HTMLElement) {
 
 function closeDropdown() {
   dropdownContainer.replaceChildren()
+  state.shortcutSearchIndex = -1
   const searchDropdown = document.getElementById('search-engine-dropdown')
   const searchBtn = document.getElementById('search-engine-btn')
   searchDropdown?.classList.remove('open')
   searchBtn?.classList.remove('active')
+}
+
+function getShortcutLink(id: string): HTMLElement | null {
+  return shortcutsEl.querySelector(`.shortcut[data-id="${id}"] a`)
+}
+
+function showShortcutSearchDropdown(results: Shortcut[]) {
+  closeDropdown()
+  if (results.length === 0) return
+  
+  const searchBox = document.querySelector('.search-box') as HTMLElement
+  const rect = searchBox.getBoundingClientRect()
+  
+  const dropdown = document.createElement('div')
+  dropdown.className = 'dropdown open shortcut-search-dropdown'
+  dropdown.style.position = 'fixed'
+  dropdown.style.top = `${rect.bottom + 8}px`
+  dropdown.style.left = `${rect.left}px`
+  dropdown.style.width = `${rect.width}px`
+  
+  results.forEach(shortcut => {
+    const item = document.createElement('button')
+    item.className = 'dropdown-item shortcut-search-item'
+    item.dataset.shortcutId = shortcut.id
+    
+    const icon = document.createElement('div')
+    icon.className = 'shortcut-search-icon'
+    
+    const existingShortcut = shortcutsEl.querySelector(`.shortcut[data-id="${shortcut.id}"]`)
+    const iconEl = existingShortcut?.querySelector('.shortcut-icon img, .shortcut-icon svg, .shortcut-icon .icon-text')
+    if (iconEl) {
+      icon.appendChild(iconEl.cloneNode(true))
+    }
+    item.appendChild(icon)
+    
+    const nameSpan = document.createElement('span')
+    nameSpan.className = 'shortcut-search-name'
+    nameSpan.textContent = shortcut.name
+    item.appendChild(nameSpan)
+    
+    const urlSpan = document.createElement('span')
+    urlSpan.className = 'shortcut-search-url'
+    urlSpan.textContent = new URL(shortcut.url).hostname
+    item.appendChild(urlSpan)
+    
+    item.addEventListener('click', () => {
+      getShortcutLink(shortcut.id)?.click()
+      closeShortcutSearchDropdown()
+    })
+    
+    dropdown.appendChild(item)
+  })
+  
+  dropdownContainer.appendChild(dropdown)
+}
+
+function closeShortcutSearchDropdown() {
+  const dropdown = dropdownContainer.querySelector('.shortcut-search-dropdown')
+  dropdown?.remove()
+  state.shortcutSearchIndex = -1
+}
+
+function updateShortcutSearchSelection() {
+  const items = dropdownContainer.querySelectorAll('.shortcut-search-item')
+  items.forEach((item, index) => {
+    item.classList.toggle('selected', index === state.shortcutSearchIndex)
+  })
 }
 
 function showToast(message: string, type: ToastType = 'info', duration = 3000) {
@@ -292,6 +361,14 @@ function normalizeUrl(input: string): string | null {
   } catch {
     return null
   }
+}
+
+function cycleIndex(current: number, length: number, direction: 'up' | 'down'): number {
+  if (length === 0) return 0
+  if (direction === 'down') {
+    return current < length - 1 ? current + 1 : 0
+  }
+  return current > 0 ? current - 1 : length - 1
 }
 
 let shortcutsEventsInitialized = false
@@ -1143,26 +1220,69 @@ searchEngineBtn.addEventListener('click', (e) => {
 searchBtn.addEventListener('click', performSearch)
 
 searchInput.addEventListener('keydown', (e) => {
+  const items = dropdownContainer.querySelectorAll('.shortcut-search-item')
+  
   if (e.key === 'Enter') {
+    if (state.shortcutSearchIndex >= 0 && items.length > 0) {
+      const selectedItem = items[state.shortcutSearchIndex] as HTMLElement
+      const shortcutId = selectedItem.dataset.shortcutId
+      if (shortcutId) {
+        getShortcutLink(shortcutId)?.click()
+        closeShortcutSearchDropdown()
+        searchInput.value = ''
+      }
+      return
+    }
     if (state.searchDebounceTimer) clearTimeout(state.searchDebounceTimer)
     state.searchDebounceTimer = setTimeout(performSearch, 150)
+    return
   }
   
   if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    if (items.length > 0) {
+      e.preventDefault()
+      state.shortcutSearchIndex = cycleIndex(
+        state.shortcutSearchIndex,
+        items.length,
+        e.key === 'ArrowDown' ? 'down' : 'up'
+      )
+      updateShortcutSearchSelection()
+      return
+    }
+    
     e.preventDefault()
     const engines = state.searchEngines
     if (engines.length === 0) return
     
     const currentIndex = engines.findIndex(e => e.id === state.currentSearchEngine?.id)
-    let newIndex: number
-    
-    if (e.key === 'ArrowUp') {
-      newIndex = currentIndex <= 0 ? engines.length - 1 : currentIndex - 1
-    } else {
-      newIndex = currentIndex >= engines.length - 1 ? 0 : currentIndex + 1
-    }
-    
+    const newIndex = cycleIndex(currentIndex, engines.length, e.key === 'ArrowDown' ? 'down' : 'up')
     selectSearchEngine(engines[newIndex])
+    return
+  }
+  
+  if (e.key === 'Escape') {
+    closeShortcutSearchDropdown()
+  }
+})
+
+searchInput.addEventListener('input', () => {
+  const query = searchInput.value.trim().toLowerCase()
+  
+  if (!query) {
+    closeShortcutSearchDropdown()
+    return
+  }
+  
+  const results = state.shortcuts.filter(s => 
+    s.name.toLowerCase().includes(query) || s.url.toLowerCase().includes(query)
+  )
+  
+  state.shortcutSearchIndex = -1
+  
+  if (results.length > 0) {
+    showShortcutSearchDropdown(results)
+  } else {
+    closeShortcutSearchDropdown()
   }
 })
 

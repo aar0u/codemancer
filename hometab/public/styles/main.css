@@ -382,6 +382,57 @@ body {
   font-size: 0.875rem;
 }
 
+.shortcut-search-dropdown {
+  max-height: 20rem;
+  overflow-y: auto;
+}
+
+.shortcut-search-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.625rem 0.875rem;
+}
+
+.shortcut-search-item.selected {
+  background: var(--glass-bg-hover);
+}
+
+.shortcut-search-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 0.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--glass-bg);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.shortcut-search-icon img,
+.shortcut-search-icon svg {
+  width: 1rem;
+  height: 1rem;
+  object-fit: contain;
+}
+
+.shortcut-search-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.875rem;
+}
+
+.shortcut-search-url {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
 #search-input {
   flex: 1;
   padding: 0.875rem 0.5rem;
