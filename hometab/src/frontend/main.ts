@@ -87,10 +87,9 @@ function showDropdown(type: DropdownType, id: string, anchorEl: HTMLElement) {
 function closeDropdown() {
   dropdownContainer.replaceChildren()
   state.shortcutSearchIndex = -1
-  const searchDropdown = document.getElementById('search-engine-dropdown')
-  const searchBtn = document.getElementById('search-engine-btn')
-  searchDropdown?.classList.remove('open')
-  searchBtn?.classList.remove('active')
+  document.getElementById('search-engine-dropdown')?.classList.remove('open')
+  document.getElementById('search-engine-btn')?.classList.remove('active')
+  document.querySelector('.shortcut-search-dropdown')?.remove()
 }
 
 function getShortcutLink(id: string): HTMLElement | null {
@@ -102,14 +101,9 @@ function showShortcutSearchDropdown(results: Shortcut[]) {
   if (results.length === 0) return
   
   const searchBox = document.querySelector('.search-box') as HTMLElement
-  const rect = searchBox.getBoundingClientRect()
   
   const dropdown = document.createElement('div')
   dropdown.className = 'dropdown open shortcut-search-dropdown'
-  dropdown.style.position = 'fixed'
-  dropdown.style.top = `${rect.bottom + 8}px`
-  dropdown.style.left = `${rect.left}px`
-  dropdown.style.width = `${rect.width}px`
   
   results.forEach(shortcut => {
     const item = document.createElement('button')
@@ -144,17 +138,17 @@ function showShortcutSearchDropdown(results: Shortcut[]) {
     dropdown.appendChild(item)
   })
   
-  dropdownContainer.appendChild(dropdown)
+  searchBox.appendChild(dropdown)
 }
 
 function closeShortcutSearchDropdown() {
-  const dropdown = dropdownContainer.querySelector('.shortcut-search-dropdown')
+  const dropdown = document.querySelector('.shortcut-search-dropdown')
   dropdown?.remove()
   state.shortcutSearchIndex = -1
 }
 
 function updateShortcutSearchSelection() {
-  const items = dropdownContainer.querySelectorAll('.shortcut-search-item')
+  const items = document.querySelectorAll('.shortcut-search-item')
   items.forEach((item, index) => {
     item.classList.toggle('selected', index === state.shortcutSearchIndex)
   })
@@ -589,7 +583,7 @@ document.addEventListener('click', (e) => {
   
   if (!target.closest('.shortcut-menu-btn') && !target.closest('.todo-menu-btn') &&
       !target.closest('#dropdown-container') && !target.closest('.search-engine-btn') &&
-      !target.closest('#search-engine-dropdown')) {
+      !target.closest('#search-engine-dropdown') && !target.closest('.shortcut-search-dropdown')) {
     closeDropdown()
   }
 })
@@ -1220,7 +1214,7 @@ searchEngineBtn.addEventListener('click', (e) => {
 searchBtn.addEventListener('click', performSearch)
 
 searchInput.addEventListener('keydown', (e) => {
-  const items = dropdownContainer.querySelectorAll('.shortcut-search-item')
+  const items = document.querySelectorAll('.shortcut-search-item')
   
   if (e.key === 'Enter') {
     if (state.shortcutSearchIndex >= 0 && items.length > 0) {

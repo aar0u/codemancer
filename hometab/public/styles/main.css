@@ -383,6 +383,9 @@ body {
 }
 
 .shortcut-search-dropdown {
+  top: calc(100% + 0.5rem);
+  left: 0;
+  right: 0;
   max-height: 20rem;
   overflow-y: auto;
 }
