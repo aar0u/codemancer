@@ -21,9 +21,13 @@ public class JvaScheduler extends JPanel {
     }
 
     private LocalDateTime clickTime;
+    private LocalDateTime endTime;
     private final JLabel label;
     private final Timer timer;
     private final Timer otpTimer;
+    private final JSpinner hourSpinner;
+    private final JSpinner minuteSpinner;
+    private JButton startButton;
     private List<OTPConfig> otpConfigs;
     private List<JLabel> otpLabels;
     private List<JLabel> countdownLabels;
@@ -47,33 +51,66 @@ public class JvaScheduler extends JPanel {
         gbc.gridx = 0;
         gbc.gridy = 0;
         gbc.weightx = 1.0;
-        gbc.insets = new Insets(0, 0, 0, 10);
+        gbc.insets = new Insets(0, 0, 0, 0);
         gbc.anchor = GridBagConstraints.WEST;
         timerPanel.add(label, gbc);
 
-        JButton btn = new JButton("Start");
-        btn.setPreferredSize(new Dimension(80, 50));
-        btn.addActionListener(
+        hourSpinner = new JSpinner(new SpinnerNumberModel(18, 0, 23, 1));
+        hourSpinner.setPreferredSize(new Dimension(60, 30));
+        gbc.gridx = 1;
+        gbc.gridy = 0;
+        gbc.weightx = 0.0;
+        gbc.insets = new Insets(0, 0, 10, 2);
+        gbc.anchor = GridBagConstraints.EAST;
+        timerPanel.add(hourSpinner, gbc);
+
+        JLabel colonLabel = new JLabel(":");
+        colonLabel.setFont(new Font("Arial", Font.BOLD, 14));
+        gbc.gridx = 2;
+        gbc.gridy = 0;
+        gbc.weightx = 0.0;
+        gbc.insets = new Insets(0, 0, 10, 2);
+        gbc.anchor = GridBagConstraints.EAST;
+        timerPanel.add(colonLabel, gbc);
+
+        minuteSpinner = new JSpinner(new SpinnerNumberModel(16, 0, 59, 1));
+        minuteSpinner.setPreferredSize(new Dimension(60, 30));
+        gbc.gridx = 3;
+        gbc.gridy = 0;
+        gbc.weightx = 0.0;
+        gbc.insets = new Insets(0, 0, 10, 2);
+        gbc.anchor = GridBagConstraints.EAST;
+        timerPanel.add(minuteSpinner, gbc);
+
+        startButton = new JButton("Start");
+        startButton.setPreferredSize(new Dimension(80, 50));
+        startButton.addActionListener(
                 new ActionListener() {
                     @Override
                     public void actionPerformed(ActionEvent e) {
                         if (timer.isRunning()) {
-                            timer.stop();
-                            clickTime = null;
-                            btn.setText("Start");
+                            stopTimer();
                         } else {
                             clickTime = LocalDateTime.now();
+                            int targetHour = (int) hourSpinner.getValue();
+                            int targetMinute = (int) minuteSpinner.getValue();
+                            endTime = LocalDateTime.now().withHour(targetHour).withMinute(targetMinute).withSecond(0).withNano(0);
+                            
+                            if (endTime.isBefore(LocalDateTime.now())) {
+                                endTime = endTime.plusDays(1);
+                            }
+                            
                             timer.start();
-                            btn.setText("Stop");
+                            startButton.setText("Stop");
                         }
                     }
                 });
-        gbc.gridx = 1;
+        gbc.gridx = 4;
         gbc.gridy = 0;
         gbc.weightx = 0.0;
-        gbc.insets = new Insets(0, 10, 0, 0);
+        gbc.insets = new Insets(0, 10, 10, 0);
         gbc.anchor = GridBagConstraints.EAST;
-        timerPanel.add(btn, gbc);
+        timerPanel.add(startButton, gbc);
 
         listPanel.add(timerPanel);
 
@@ -165,6 +202,12 @@ public class JvaScheduler extends JPanel {
                 500,
                 e -> {
                     LocalDateTime now = LocalDateTime.now();
+                    
+                    if (endTime != null && now.isAfter(endTime)) {
+                        stopTimer();
+                        return;
+                    }
+                    
                     Duration duration = Duration.between(now, clickTime);
                     label.setText(format(duration));
                     if (duration.isNegative()) {
@@ -180,6 +223,14 @@ public class JvaScheduler extends JPanel {
         otpTimer = new Timer(1000, e -> updateOTPDisplays());
         otpTimer.start();
         updateOTPDisplays();
+    }
+
+    private void stopTimer() {
+        timer.stop();
+        clickTime = null;
+        endTime = null;
+        label.setText("Stopped");
+        startButton.setText("Start");
     }
 
     private void updateOTPDisplays() {
