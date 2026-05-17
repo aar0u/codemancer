@@ -717,7 +717,7 @@ function startEditTodo(id: string) {
   textarea.addEventListener('input', adjustHeight)
   textarea.addEventListener('blur', saveEdit)
   textarea.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && e.shiftKey) {
       e.preventDefault()
       textarea.blur()
     }
@@ -1127,7 +1127,7 @@ shortcutCancel.addEventListener('click', closeShortcutModal)
 
 addTodoBtn.addEventListener('click', addTodo)
 todoInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key === 'Enter' && e.shiftKey) {
     e.preventDefault()
     addTodo()
   }
