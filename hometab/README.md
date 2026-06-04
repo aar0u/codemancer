@@ -1,13 +1,15 @@
 # HomeTab
 
-A minimal custom new tab page with shortcuts and todos.
+A minimal Cloudflare Workers new tab page with shortcuts, todos, password auth, and a tabs sync API.
 
-## Development
+## Quick Start
 
 ```bash
 pnpm install
 pnpm dev
 ```
+
+The dev server runs with Wrangler, usually at `http://127.0.0.1:8787`.
 
 ## Deploy
 
@@ -15,51 +17,114 @@ pnpm dev
 pnpm run deploy
 ```
 
-## Reset Data
+## Data and Backups
 
-Go to Cloudflare Dashboard → KV → Delete `user:default` key.
+HomeTab stores user data in Cloudflare KV:
 
-## Configuration
+- auth data: `auth:default`
+- shortcuts: `shortcuts:default`
+- todos: `todos:default`
+- search engines: `searchEngines:default`
+- tabs data: per-machine KV records
 
-- Data is initialized from empty arrays in KV when first setup runs.
-- Copy `defaults.example.json` to `defaults.json` and customize it.
-- Use the KV management script to import/export data:
+### Regular Production Backup
+
+Run this periodically to export production KV data:
 
 ```bash
-# Import defaults.json to local KV (for development)
-node scripts/kv.mjs import --local
+pnpm wrangler login
+node scripts/kv.mjs export --remote
+```
 
-# Import defaults.json to remote KV (for production)
-node scripts/kv.mjs import --remote
+The export writes a timestamped file, for example:
 
-# Export KV data to timestamped file (prevents overwriting)
+```text
+defaults-2026-04-24T12-30-45.json
+```
+
+Keep backup files private. They may contain `passwordHash`, shortcuts, todos, and other personal data.
+
+### Local Backup
+
+```bash
 node scripts/kv.mjs export --local
-# Output: defaults-2026-04-24T12-30-45.json
+```
 
-# Parse browser bookmarks HTML to defaults.json
+### Restore / Import
+
+Create or edit `defaults.json` first. You can start from the example file:
+
+```bash
+cp defaults.example.json defaults.json
+```
+
+Import into local KV:
+
+```bash
+node scripts/kv.mjs import defaults.json --local
+```
+
+Import into production KV:
+
+```bash
+node scripts/kv.mjs import defaults.json --remote
+```
+
+### Parse Browser Bookmarks
+
+Convert a browser bookmarks HTML export into HomeTab defaults JSON:
+
+```bash
 node scripts/kv.mjs parse favourites.html
 node scripts/kv.mjs parse favourites.html --folder "Bookmarks Bar"
 ```
 
-## Tabs API
+## Reset Data
 
-- `POST /api/tabs` (auth required)
+To reset the app password and user data, delete the relevant KV keys in the Cloudflare Dashboard.
+
+For password reset only, delete:
+
+```text
+auth:default
+```
+
+## API
+
+### Tabs API
+
+All tabs endpoints require auth.
+
+- `POST /api/tabs`
   - Body: `{ "machine_id": "home-pc", "content": "..." }`
   - Stores tabs content per machine in KV.
-- `GET /tabs` (auth required)
+- `GET /tabs`
   - Returns an overview page of all machines.
-- `GET /tabs?machine_id=<id>` (auth required)
-  - Returns single-machine tabs page.
+- `GET /tabs?machine_id=<id>`
+  - Returns a single-machine tabs page.
 
-### Get Bearer Token Script
+### Get a Bearer Token
 
 ```bash
 bash scripts/get-token.sh
 ```
 
-The script will prompt for password and output the token for use with client applications.
+The script prompts for the HomeTab password and prints a bearer token for client applications.
+
+By default it calls `http://127.0.0.1:8787`. Override with `BASE_URL`:
+
+```bash
+BASE_URL=https://your-domain.example bash scripts/get-token.sh
+```
+
+## Configuration Notes
+
+- `wrangler.toml` contains the Worker name, KV binding, and route.
+- `defaults.example.json` is safe to commit; real exported defaults/backups should stay private.
 
 ## Tech Stack
 
-- Cloudflare Workers + Hono
+- Cloudflare Workers
+- Hono
 - TypeScript
+- Wrangler
