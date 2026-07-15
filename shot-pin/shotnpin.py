@@ -177,6 +177,44 @@ def get_actionbar() -> Optional["ActionBar"]:
     controller = get_app_controller()
     return getattr(controller, 'actionbar', None)
 
+def log_macos_permissions():
+    """Log privacy permission state without prompting the user."""
+    if sys.platform != "darwin":
+        return
+
+    from ApplicationServices import AXIsProcessTrusted
+    from Quartz import CGPreflightListenEventAccess
+
+    logger.info(
+        "macOS permissions: accessibility=%s, input_monitoring=%s",
+        bool(AXIsProcessTrusted()),
+        bool(CGPreflightListenEventAccess()),
+    )
+
+
+def set_macos_overlay_level(widget: QWidget):
+    """Keep a Qt overlay above the macOS Dock and menu bar."""
+    if sys.platform != "darwin":
+        return
+
+    import objc
+    from AppKit import (NSWindowCollectionBehaviorCanJoinAllSpaces,
+                        NSWindowCollectionBehaviorFullScreenAuxiliary,
+                        NSWindowCollectionBehaviorStationary)
+    from Quartz import CGWindowLevelForKey, kCGScreenSaverWindowLevelKey
+
+    view = objc.objc_object(c_void_p=int(widget.winId()))
+    window = view.window()
+    window.setLevel_(CGWindowLevelForKey(kCGScreenSaverWindowLevelKey))
+    window.setHidesOnDeactivate_(False)
+    window.setCollectionBehavior_(
+        window.collectionBehavior()
+        | NSWindowCollectionBehaviorCanJoinAllSpaces
+        | NSWindowCollectionBehaviorFullScreenAuxiliary
+        | NSWindowCollectionBehaviorStationary
+    )
+
+
 def get_virtual_desktop_bounds(screens) -> Tuple[int, int, int, int]:
     """Calculate the virtual desktop bounds from multiple screens."""
     if not screens:
@@ -587,6 +625,10 @@ class ActionBar(QWidget):
         self._setup_styles()
         self._init_buttons(layout)
         self.adjustSize()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        set_macos_overlay_level(self)
 
     # Initialization Methods
     def _setup_styles(self):
@@ -1104,6 +1146,10 @@ class OverlayBase(QWidget):
         self.resize_handle_size = RESIZE_HANDLE_SIZE
 
         QShortcut(QKeySequence("Esc"), self).activated.connect(self._handle_esc_shortcut)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        set_macos_overlay_level(self)
 
     # Properties
     @property
@@ -1984,6 +2030,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("ShotNPin")
     app.setWindowIcon(get_app_icon())
+    log_macos_permissions()
 
     single_instance = SingleInstance()
     if single_instance.is_already_running():
