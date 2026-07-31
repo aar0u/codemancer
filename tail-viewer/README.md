@@ -37,7 +37,7 @@ build-graal.bat
 ### Python Version
 
 ```bash
-python simple_tail_gui.py [logfile]
+uv run --script simple_tail_gui.py [logfile]
 ```
 
 ### Generate Test Logs

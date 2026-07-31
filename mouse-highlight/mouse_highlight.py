@@ -1,3 +1,12 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
+#     "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+# ]
+# ///
+
 """Native mouse highlighter: ctypes on Windows, PyObjC on macOS."""
 
 import argparse
@@ -184,6 +193,8 @@ def run_windows(theme):
     hwnd = user32.CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, class_name, None, WS_POPUP, x, y, width, height, None, None, instance, None)
     user32.GetCursorPos(ctypes.byref(state["point"]))
     user32.SetLayeredWindowAttributes(hwnd, BLACK, HIGHLIGHT_ALPHA, LWA_COLORKEY | LWA_ALPHA)
+    WDA_EXCLUDEFROMCAPTURE = 0x11
+    user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)  # keep overlay out of screenshots/recordings (Windows 10 2004+); no-op on older builds
     tray_icon = create_tray_icon()
     tray = NOTIFYICONDATA()
     tray.cbSize = ctypes.sizeof(tray)
@@ -210,14 +221,14 @@ def run_macos(theme):
                             NSMenuItem, NSPanel, NSScreen, NSStatusBar,
                             NSVariableStatusItemLength, NSView, NSWindowCollectionBehaviorCanJoinAllSpaces,
                             NSWindowCollectionBehaviorFullScreenAuxiliary, NSWindowCollectionBehaviorStationary,
-                            NSWindowStyleMaskBorderless, NSEventMaskLeftMouseDown,
+                            NSWindowSharingNone, NSWindowStyleMaskBorderless, NSEventMaskLeftMouseDown,
                             NSEventMaskLeftMouseUp, NSEventMaskRightMouseDown,
                             NSEventMaskRightMouseUp, NSEventTypeLeftMouseDown,
                             NSEventTypeRightMouseDown)
         from Foundation import NSObject, NSMakePoint, NSMakeRect, NSTimer
         from Quartz import CGWindowLevelForKey, kCGScreenSaverWindowLevelKey
     except ImportError as error:
-        raise SystemExit("macOS requires: python -m pip install pyobjc-framework-Cocoa pyobjc-framework-Quartz") from error
+        raise SystemExit("macOS dependencies are declared in this script; run it with: uv run --script mouse_highlight.py") from error
 
     state = {"pressed": False, "point": NSMakePoint(0, 0), "theme": theme}
 
@@ -262,6 +273,7 @@ def run_macos(theme):
     panel.setHasShadow_(False)
     panel.setHidesOnDeactivate_(False)
     panel.setIgnoresMouseEvents_(True)
+    panel.setSharingType_(NSWindowSharingNone)  # keep overlay out of screenshots/screen recordings
     panel.setLevel_(CGWindowLevelForKey(kCGScreenSaverWindowLevelKey))
     panel.setCollectionBehavior_(NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorStationary)
     panel.setContentView_(HighlightView.alloc().initWithFrame_origin_(NSMakeRect(0, 0, desktop.size.width, desktop.size.height), desktop.origin))

@@ -1,1 +1,1 @@
-pyinstaller --onedir --noconfirm --windowed --icon icons8-screenshot-100.ico --add-data "icons8-screenshot-100.png:." --contents-directory . --workpath Z:\build\temp --distpath Z:\build shotnpin.py
+uv run --with pyinstaller --with pyqt6==6.9.1 --with pynput==1.8.2 pyinstaller --onedir --noconfirm --windowed --icon icons8-screenshot-100.ico --add-data "icons8-screenshot-100.png:." --contents-directory . --workpath Z:\build\temp --distpath Z:\build shotnpin.py

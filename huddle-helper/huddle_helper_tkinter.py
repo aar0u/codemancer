@@ -1,3 +1,9 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+
 import os, sys
 import tkinter as tk
 from tkinter import messagebox
@@ -41,7 +47,7 @@ class CheckboxListApp(tk.Tk):
         self.update_idletasks()
         min_width = 180
         min_height = 400
- 
+
         desired_width = max(min_width, max_text_width + 60) # checkbox and margins padding
         desired_height = max(min_height, len(names) * row_height + 60)  # top/bottom padding
         self.geometry(f"{desired_width}x{desired_height}")
@@ -62,15 +68,21 @@ class CheckboxListApp(tk.Tk):
         row = tk.Frame(parent)
         row.pack(fill=tk.X, padx=8, pady=2)
         var = tk.BooleanVar()
-        cb = tk.Checkbutton(row, text=name, variable=var, font=("Segoe UI", 11), anchor="w")
+        cb = tk.Checkbutton(
+            row,
+            text=name,
+            variable=var,
+            font=("Segoe UI", 11),
+            anchor="w",
+            command=lambda n=name: self.handle_left_click(n),
+        )
         cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
         cb.bind("<Button-3>", lambda e, n=name, c=cb, v=var: self.handle_right_click(n, c, v))
-        cb.bind("<Button-1>", lambda e, n=name, c=cb, v=var: self.handle_left_click(n, c, v))
         self.x_states[name] = False
         self.checkboxes[name] = (cb, var)
 
-    def handle_left_click(self, name, cb, var):
-        var.set(not var.get())
+    def handle_left_click(self, name):
+        cb, _ = self.checkboxes[name]
         self.x_states[name] = False
         cb.config(text=name, fg="black")
 

@@ -1,4 +1,13 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pynput==1.8.2",
+#     "pyqt6==6.9.1",
+#     "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
+#     "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+# ]
+# ///
 """
 ShotNPin - Simple screenshot, annotation, and pinning tool
 
@@ -10,6 +19,7 @@ A lightweight application for capturing, annotating, and pinning screenshots.
 # ============================================================================
 import logging
 import sys
+from math import ceil, floor
 from pathlib import Path
 from typing import Optional, Tuple, List, Callable
 
@@ -21,13 +31,13 @@ from pynput import keyboard
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtGui import (
-    QPixmap, QPainter, QPen, QBrush, QColor, QShortcut, QKeySequence, 
-    QCursor, QIcon, QFont
+    QPixmap, QPainter, QPen, QBrush, QColor, QShortcut, QKeySequence,
+    QCursor, QIcon, QFont, QFontMetrics
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, 
-    QColorDialog, QSlider, QHBoxLayout, QFileDialog, QLineEdit, 
+    QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel,
+    QColorDialog, QSlider, QHBoxLayout, QFileDialog, QLineEdit,
     QSystemTrayIcon, QMenu, QMessageBox
 )
 
@@ -63,7 +73,7 @@ DEFAULT_FONT_SIZE = 16
 MAX_HISTORY = 20
 
 # Keyboard Shortcuts
-GLOBAL_HOTKEY_CAP = '<ctrl>+<alt>+1'
+GLOBAL_HOTKEY_CAP = '<ctrl>+<shift>+q'
 GLOBAL_HOTKEY_PIN = '<ctrl>+<alt>+2'
 KEYBOARD_STEP_SMALL = 1
 KEYBOARD_STEP_LARGE = 10
@@ -85,6 +95,99 @@ GLOW_LAYERS = [
     (QColor(220, 220, 220, 20), 5),
     (QColor(220, 220, 220, 10), 9),
 ]
+
+# ============================================================================
+# Shared Stylesheets (QSS)
+# ============================================================================
+# Centralized here so widget classes stay focused on behavior, and so all
+# visual styling can be themed/tweaked in one place.
+
+ACTIONBAR_STYLESHEET = f"""
+    QWidget {{
+        background-color: {TOOLBAR_BG_COLOR};
+        border-radius: 5px;
+        border: 1px solid {BORDER_COLOR};
+    }}
+    QPushButton {{
+        background-color: {BUTTON_BG_COLOR};
+        color: white;
+        border: 1px solid {BORDER_COLOR};
+        border-radius: 3px;
+        padding: 5px;
+    }}
+    QPushButton:hover {{
+        background-color: {BUTTON_HOVER_COLOR};
+    }}
+    QPushButton:pressed, QPushButton:checked {{
+        background-color: {BUTTON_ACTIVE_COLOR};
+    }}
+    QSlider::groove:horizontal {{
+        border: 1px solid {BORDER_COLOR};
+        height: 6px;
+        background: {BUTTON_BG_COLOR};
+        border-radius: 3px;
+    }}
+    QSlider::handle:horizontal {{
+        background: {BUTTON_ACTIVE_COLOR};
+        border: 1px solid {BORDER_COLOR};
+        width: 12px;
+        margin: -4px 0;
+        border-radius: 6px;
+    }}
+    QSlider {{
+        min-width: 60px;
+        max-width: 60px;
+    }}
+    QLabel {{
+        color: white;
+    }}
+"""
+
+HINT_LABEL_STYLESHEET = (
+    "background-color: rgba(0, 0, 0, 180); "
+    "color: white; "
+    "padding: 10px 20px; "
+    "border-radius: 5px; "
+    "font-size: 14px;"
+)
+
+OPACITY_LABEL_STYLESHEET = f"""
+    QLabel {{
+        background-color: rgba(0, 0, 0, 180);
+        color: white;
+        border: 1px solid {BUTTON_ACTIVE_COLOR};
+        border-radius: 3px;
+        padding: 4px 8px;
+        font-size: 12px;
+        font-weight: bold;
+    }}
+"""
+
+
+def _text_annotation_stylesheet(bg_color: str, text_color: str) -> str:
+    """Build the stylesheet for the in-place text annotation QLineEdit."""
+    return f"""
+        QLineEdit {{
+            background-color: {bg_color};
+            color: {text_color};
+            border: none;
+            padding: 0px;
+            margin: 0px;
+            font-weight: bold;
+        }}
+    """
+
+
+def _color_button_stylesheet(color: QColor) -> str:
+    """Build the stylesheet for the actionbar color-picker button."""
+    text_color = 'white' if color.lightness() < 128 else 'black'
+    return (
+        f"background-color: {color.name()}; "
+        f"color: {text_color}; "
+        f"border: 1px solid #555; "
+        f"border-radius: 3px;"
+    )
+
 
 # ============================================================================
 # SVG Icons
@@ -115,9 +218,25 @@ class SnapshotItem:
 
 @dataclass
 class AnnotationState:
-    """Represents an annotation state for undo/redo."""
-    screenshot: QPixmap
+    """Represents an annotation state for undo/redo.
+
+    Either a full keyframe (`screenshot` set) or a lightweight incremental
+    diff (`dirty_rect` + `patch` set) capturing only the pixels that changed.
+    `dirty_rect` is in content-local logical coordinates for QPainter replay;
+    `patch` is the corresponding physical-pixel raster.
+    This avoids storing a full-image copy for
+    every small edit (a single text label or a short pen stroke) while
+    staying pure raster/pixel-based — no vector re-rendering, so undo/redo
+    results are pixel-identical regardless of platform/font/DPI.
+    """
     selection_rect: Optional[QRect] = None
+    screenshot: Optional[QPixmap] = None
+    dirty_rect: Optional[QRect] = None
+    patch: Optional[QPixmap] = None
+
+    @property
+    def is_keyframe(self) -> bool:
+        return self.screenshot is not None
 
 # ============================================================================
 # Helper Functions
@@ -166,16 +285,6 @@ def get_app_icon() -> QIcon:
         painter.setPen(QColor("white"))
         painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "S")
     return QIcon(pixmap)
-
-def get_app_controller() -> Optional["AppController"]:
-    """Safely get the global AppController from QApplication instance."""
-    app = QApplication.instance()
-    return getattr(app, 'controller', None)
-
-def get_actionbar() -> Optional["ActionBar"]:
-    """Safely get the shared global actionbar from the AppController."""
-    controller = get_app_controller()
-    return getattr(controller, 'actionbar', None)
 
 def log_macos_permissions():
     """Log privacy permission state without prompting the user."""
@@ -227,6 +336,15 @@ def get_virtual_desktop_bounds(screens) -> Tuple[int, int, int, int]:
 
     return (min_x, min_y, max_x, max_y)
 
+
+def _logical_rect_to_device_pixels(rect: QRect, device_pixel_ratio: float) -> QRect:
+    """Convert a logical rectangle to a physical-pixel rectangle without clipping it."""
+    left = floor(rect.x() * device_pixel_ratio)
+    top = floor(rect.y() * device_pixel_ratio)
+    right = ceil((rect.x() + rect.width()) * device_pixel_ratio)
+    bottom = ceil((rect.y() + rect.height()) * device_pixel_ratio)
+    return QRect(left, top, right - left, bottom - top)
+
 # ============================================================================
 # Single Instance Management
 # ============================================================================
@@ -258,7 +376,10 @@ class SingleInstance(QObject):
 
         self.server = QLocalServer()
         if not self.server.listen(self.key):
-            logger.error(f"Failed to create local server: {self.server.errorString()}")
+            logger.error(
+                f"Failed to create local server (not a duplicate instance): "
+                f"{self.server.errorString()}"
+            )
             return True
 
         self.server.newConnection.connect(self._handle_new_connection)
@@ -302,8 +423,8 @@ class AppController(QObject):
         self.single_instance = single_instance
 
         self.screenshot_snapshots: List[SnapshotItem] = []
-        self.actionbar = ActionBar()
-        self.capture_overlay = CaptureOverlay()
+        self.actionbar = ActionBar(self)
+        self.capture_overlay = CaptureOverlay(self, self.actionbar)
         self.pinned_windows: List['PinnedOverlay'] = []
 
         self.border_pen = QPen(SELECTION_BORDER_COLOR, SELECTION_BORDER_WIDTH, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin)
@@ -372,15 +493,17 @@ class AppController(QObject):
 
     def _setup_hotkey(self):
         """Register global hotkey."""
+        self.hotkey_listener = None
         try:
             hotkeys = {
                 GLOBAL_HOTKEY_CAP: lambda: self.screenshot_triggered.emit(),
                 GLOBAL_HOTKEY_PIN: lambda: self.pin_clipboard_triggered.emit()
             }
-            keyboard.GlobalHotKeys(hotkeys).start()
+            self.hotkey_listener = keyboard.GlobalHotKeys(hotkeys)
+            self.hotkey_listener.start()
             logger.info(f"Registered global hotkeys: {', '.join(hotkeys.keys())}")
-        except Exception as e:
-            logger.error(f"Hotkey registration failed: {e}")
+        except Exception:
+            logger.exception("Hotkey registration failed")
             if sys.platform == "darwin":
                 QMessageBox.warning(
                     None,
@@ -473,8 +596,11 @@ class AppController(QObject):
         logger.debug(f"Virtual desktop bounds: {min_x}, {min_y}, {virtual_width}x{virtual_height}")
 
         max_dpr = max(screen.devicePixelRatio() for screen in screens)
+        virtual_rect = _logical_rect_to_device_pixels(
+            QRect(0, 0, virtual_width, virtual_height), max_dpr
+        )
 
-        combined_pixmap = QPixmap(int(virtual_width * max_dpr), int(virtual_height * max_dpr))
+        combined_pixmap = QPixmap(virtual_rect.size())
         combined_pixmap.fill(Qt.GlobalColor.transparent)
         combined_pixmap.setDevicePixelRatio(max_dpr)
 
@@ -486,16 +612,18 @@ class AppController(QObject):
 
                 if screen_pixmap.isNull():
                     continue
-                    
+
                 x_offset = screen_geometry.left() - min_x
                 y_offset = screen_geometry.top() - min_y
+                target_rect = _logical_rect_to_device_pixels(
+                    QRect(x_offset, y_offset, screen_geometry.width(), screen_geometry.height()), max_dpr
+                )
 
                 if screen.devicePixelRatio() == max_dpr:
                     painter.drawPixmap(x_offset, y_offset, screen_pixmap)
                 else:
                     scaled_pixmap = screen_pixmap.scaled(
-                        int(screen_geometry.width() * max_dpr),
-                        int(screen_geometry.height() * max_dpr),
+                        target_rect.size(),
                         Qt.AspectRatioMode.IgnoreAspectRatio,
                         Qt.TransformationMode.SmoothTransformation
                     )
@@ -515,7 +643,7 @@ class AppController(QObject):
                 logger.error("Clipboard image is null or invalid.")
                 return
 
-            pinned = PinnedOverlay(pixmap, position=QCursor.pos())
+            pinned = PinnedOverlay(self, self.actionbar, pixmap, position=QCursor.pos())
             pinned.show()
 
             self.pinned_windows.append(pinned)
@@ -547,6 +675,9 @@ class AppController(QObject):
         for pinned_window in self.pinned_windows[:]:
             pinned_window.close()
 
+        if self.hotkey_listener:
+            self.hotkey_listener.stop()
+
         if self.single_instance:
             self.single_instance.cleanup()
 
@@ -559,11 +690,11 @@ class AppController(QObject):
 
 class FocusPreservingEventFilter(QObject):
     """Event filter to preserve focus on linked widgets when actionbar widgets gain focus."""
-    
+
     def __init__(self, actionbar: "ActionBar"):
         super().__init__()
         self.actionbar = actionbar
-    
+
     def eventFilter(self, obj, event):
         if (event.type() in [
             event.Type.MouseButtonRelease,
@@ -571,9 +702,9 @@ class FocusPreservingEventFilter(QObject):
         ]):
             # Use QTimer to ensure the event has been processed first
             QTimer.singleShot(0, self._restore_focus)
-        
+
         return False
-    
+
     def _restore_focus(self):
         active_widget = self.actionbar.linked_widget
         if not active_widget:
@@ -586,11 +717,240 @@ class FocusPreservingEventFilter(QObject):
         if not active_widget.hasFocus():
             active_widget.setFocus()
 
-class ActionBar(QWidget):
-    """Floating toolbar providing annotation controls and actions."""
+class _AnnotationTextEdit(QLineEdit):
+    """QLineEdit that allows cancelling text annotation input with Escape."""
 
-    def __init__(self):
+    escapePressed = pyqtSignal()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.escapePressed.emit()
+            return
+        super().keyPressEvent(event)
+
+
+class AnnotationSession:
+    """Owns annotation gesture and text-input state for one overlay."""
+
+    def __init__(self, overlay: "OverlayBase"):
+        self.overlay = overlay
+        self.drawing = False
+        self.mode: Optional[str] = None
+        self.last_point = QPoint()
+        self.last_point_clamped = False
+        self.draw_start_point = QPoint()
+        self.preview_rect: Optional[QRect] = None
+        self.preview_line: Optional[Tuple[QPoint, QPoint]] = None
+        self._stroke_dirty_rect: Optional[QRect] = None
+        self.text_input: Optional[QLineEdit] = None
+        self.text_input_pos: Optional[QPoint] = None
+        self.text_pen = QPen()
+        self.font_size = DEFAULT_FONT_SIZE
+
+    def start(self, pos: QPoint, mode: str, pen: QPen, pen_width: int, font_size: int):
+        """Begin a drawing gesture or show an in-place text input."""
+        self.mode = None
+        if mode == "text":
+            self.font_size = font_size
+            self._start_text(pos, pen)
+            return
+        self.drawing = True
+        self.mode = mode
+        self.last_point = pos
+        self.last_point_clamped = False
+        self.draw_start_point = pos
+        self._stroke_dirty_rect = None
+
+    def handle_mouse_move(self, pos: QPoint, mode: str, pen: QPen, pen_width: int):
+        """Handle mouse move for drawing preview."""
+        if not self.drawing:
+            return
+
+        if mode == "pen":
+            if self.last_point_clamped:
+                return
+
+            content_rect = self.overlay.content_rect
+            pen_half_width = pen_width // 2
+            draw_rect = content_rect.adjusted(pen_half_width, pen_half_width, -pen_half_width, -pen_half_width)
+
+            if content_rect and not draw_rect.contains(pos):
+                pos = self.overlay._clamp_pos_to_content(pos, pen_width)
+                self.last_point_clamped = True
+
+            pixmap_last_point = self.overlay._window_to_pixmap_pos(self.last_point)
+            pixmap_pos = self.overlay._window_to_pixmap_pos(pos)
+
+            with QPainter(self.overlay.base_pixmap) as painter:
+                painter.setPen(pen)
+                painter.drawLine(pixmap_last_point, pixmap_pos)
+
+            segment_rect = QRect(pixmap_last_point, pixmap_pos).normalized().adjusted(
+                -pen_half_width - 1, -pen_half_width - 1, pen_half_width + 1, pen_half_width + 1
+            )
+            self._stroke_dirty_rect = (
+                segment_rect if self._stroke_dirty_rect is None else self._stroke_dirty_rect.united(segment_rect)
+            )
+
+            self.last_point = pos
+        elif mode == "rectangle":
+            clamped_pos = self.overlay._clamp_pos_to_content(pos, pen_width)
+            self.preview_rect = QRect(self.draw_start_point, clamped_pos).normalized()
+        elif mode == "line":
+            clamped_pos = self.overlay._clamp_pos_to_content(pos, pen_width)
+            self.preview_line = (self.draw_start_point, clamped_pos)
+
+        self.overlay.update()
+
+    def finalize(self, end_point: QPoint, mode: str, pen: QPen, pen_width: int):
+        """Draw the shape to the pixmap based on current draw mode."""
+        pen_margin = pen.width() + 1
+        dirty_rect: Optional[QRect] = None
+
+        with QPainter(self.overlay.base_pixmap) as painter:
+            painter.setPen(pen)
+
+            if mode == "rectangle":
+                pen_color = pen.color()
+                painter.setBrush(QColor(pen_color.red(), pen_color.green(), pen_color.blue(), 50))
+                pixmap_start_point = self.overlay._clamp_pos_to_content(self.draw_start_point, pen_width, False)
+                clamped_end_point = self.overlay._clamp_pos_to_content(end_point, pen_width, False)
+                rect = QRect(pixmap_start_point, clamped_end_point).normalized()
+                painter.drawRect(rect)
+                self.preview_rect = None
+                dirty_rect = rect.adjusted(-pen_margin, -pen_margin, pen_margin, pen_margin)
+            elif mode == "line":
+                pixmap_start_point = self.overlay._clamp_pos_to_content(self.draw_start_point, pen_width, False)
+                clamped_end_point = self.overlay._clamp_pos_to_content(end_point, pen_width, False)
+                painter.drawLine(pixmap_start_point, clamped_end_point)
+                self.preview_line = None
+                dirty_rect = QRect(pixmap_start_point, clamped_end_point).normalized().adjusted(
+                    -pen_margin, -pen_margin, pen_margin, pen_margin
+                )
+            elif mode == "pen":
+                dirty_rect = self._stroke_dirty_rect
+
+        self._stroke_dirty_rect = None
+        self.overlay._save_annotation_state(dirty_rect)
+        self.overlay.update()
+
+    def paint_preview(self, painter: QPainter, mode: Optional[str], pen: QPen):
+        """Paint preview for rectangle/line drawing modes."""
+        painter.setPen(pen)
+        if self.preview_rect and mode == "rectangle":
+            pen_color = pen.color()
+            painter.setBrush(QColor(pen_color.red(), pen_color.green(), pen_color.blue(), 50))
+            painter.drawRect(self.preview_rect)
+
+        if self.preview_line and mode == "line":
+            painter.drawLine(self.preview_line[0], self.preview_line[1])
+
+    def _text_font(self) -> QFont:
+        """Get the font used for text annotations."""
+        font = QFont()
+        font.setPointSize(self.font_size)
+        font.setBold(True)
+        return font
+
+    def _start_text(self, pos: QPoint, pen: QPen):
+        """Add text annotation at the given position."""
+        if self.text_input:
+            self.finalize_text()
+
+        self.text_input_pos = pos
+        self.text_pen = QPen(pen)
+        self.text_input = _AnnotationTextEdit(self.overlay)
+        self.text_input.setFrame(False)
+
+        font = self._text_font()
+        self.text_input.setFont(font)
+
+        brightness = pen.color().lightness()
+        bg_color = "rgba(255, 255, 255, 180)" if brightness < 128 else "rgba(0, 0, 0, 180)"
+        text_color = pen.color().name()
+
+        self.text_input.setStyleSheet(_text_annotation_stylesheet(bg_color, text_color))
+
+        self.text_input.setTextMargins(0, 0, 0, 0)
+        self.text_input.setContentsMargins(0, 0, 0, 0)
+        self.text_input.setMinimumWidth(100)
+        # Fix the height to the font's metrics so the final QPainter.drawText
+        # render can reproduce the exact vertical centering the user saw while typing.
+        self.text_input.setFixedHeight(QFontMetrics(font).height())
+        self.text_input.adjustSize()
+        self.text_input.move(pos.x(), pos.y())
+        self.text_input.show()
+        self.text_input.setFocus()
+
+        self.text_input.returnPressed.connect(self.finalize_text)
+        self.text_input.editingFinished.connect(self.finalize_text)
+        self.text_input.escapePressed.connect(self.cancel_text)
+
+    def finalize_text(self):
+        """Finalize the text input and draw it on the screenshot."""
+        if not self.text_input or not self.text_input_pos:
+            return
+
+        text = self.text_input.text()
+        if text:
+            input_height = self.text_input.height()
+            font = self._text_font()
+            text_width = QFontMetrics(font).horizontalAdvance(text) + 4
+
+            with QPainter(self.overlay.base_pixmap) as painter:
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+                painter.setFont(font)
+                painter.setPen(self.text_pen)
+
+                pos = self.overlay._window_to_pixmap_pos(self.text_input_pos)
+
+                # Use the same height the QLineEdit occupied and vertically center,
+                # matching how QLineEdit renders its text, instead of guessed offsets.
+                text_rect = QRect(pos.x(), pos.y(), text_width, input_height)
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+
+            self.overlay._save_annotation_state(text_rect)
+            self.overlay.update()
+
+        self.remove()
+
+    def cancel_text(self):
+        """Discard the in-progress text annotation without drawing it."""
+        self.remove()
+
+    def remove(self) -> bool:
+        if self.text_input:
+            self.text_input.deleteLater()
+            self.text_input = None
+            self.text_input_pos = None
+            return True
+        return False
+
+    def adjust_font_size_from_wheel(self, event) -> Optional[int]:
+        """Adjust font size when scrolling with text input active."""
+        if not self.text_input or not self.text_input.isVisible():
+            return None
+
+        delta = event.angleDelta().y()
+        if delta > 0:
+            self.font_size = min(72, self.font_size + 2)
+        else:
+            self.font_size = max(8, self.font_size - 2)
+
+        font = self.text_input.font()
+        font.setPointSize(self.font_size)
+        self.text_input.setFont(font)
+        self.text_input.adjustSize()
+        return self.font_size
+
+
+
+class ActionBar(QWidget):
+    """Floating toolbar providing annotation mode, controls, and actions."""
+
+    def __init__(self, controller: "AppController"):
         super().__init__()
+        self.controller = controller
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -600,23 +960,11 @@ class ActionBar(QWidget):
 
         self.linked_widget: Optional["OverlayBase"] = None
         self.button_actions = []
+        self.tool_buttons: List[QPushButton] = []
+        self.font_size = DEFAULT_FONT_SIZE
 
         # Create event filter for focus preservation
         self.focus_filter = FocusPreservingEventFilter(self)
-
-        self.font_size = DEFAULT_FONT_SIZE
-
-        # Text input state
-        self.text_input: Optional[QLineEdit] = None
-        self.text_input_pos: Optional[QPoint] = None
-
-        # Drawing state
-        self.drawing = False
-        self.last_point = QPoint()
-        self.last_point_clamped = False
-        self.draw_start_point = QPoint()
-        self.preview_rect: Optional[QRect] = None
-        self.preview_line: Optional[Tuple[QPoint, QPoint]] = None
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(TOOLBAR_MARGIN, TOOLBAR_MARGIN, TOOLBAR_MARGIN, TOOLBAR_MARGIN)
@@ -633,46 +981,7 @@ class ActionBar(QWidget):
     # Initialization Methods
     def _setup_styles(self):
         """Apply stylesheet to actionbar and its widgets."""
-        self.setStyleSheet(f"""
-            QWidget {{
-                background-color: {TOOLBAR_BG_COLOR};
-                border-radius: 5px;
-                border: 1px solid {BORDER_COLOR};
-            }}
-            QPushButton {{
-                background-color: {BUTTON_BG_COLOR};
-                color: white;
-                border: 1px solid {BORDER_COLOR};
-                border-radius: 3px;
-                padding: 5px;
-            }}
-            QPushButton:hover {{
-                background-color: {BUTTON_HOVER_COLOR};
-            }}
-            QPushButton:pressed, QPushButton:checked {{
-                background-color: {BUTTON_ACTIVE_COLOR};
-            }}
-            QSlider::groove:horizontal {{
-                border: 1px solid {BORDER_COLOR};
-                height: 6px;
-                background: {BUTTON_BG_COLOR};
-                border-radius: 3px;
-            }}
-            QSlider::handle:horizontal {{
-                background: {BUTTON_ACTIVE_COLOR};
-                border: 1px solid {BORDER_COLOR};
-                width: 12px;
-                margin: -4px 0;
-                border-radius: 6px;
-            }}
-            QSlider {{
-                min-width: 60px;
-                max-width: 60px;
-            }}
-            QLabel {{
-                color: white;
-            }}
-        """)
+        self.setStyleSheet(ACTIONBAR_STYLESHEET)
 
     def _init_buttons(self, layout: QHBoxLayout):
         """Create and add all actionbar buttons to the layout."""
@@ -684,7 +993,6 @@ class ActionBar(QWidget):
             ("text", "Text Tool"),
         ]
 
-        self.tool_buttons = []
         for idx, (mode, label) in enumerate(tool_configs, start=1):
             btn = self._create_button(
                 icon_name=mode,
@@ -716,7 +1024,7 @@ class ActionBar(QWidget):
         def on_pen_width_changed(value):
             self.pen_width_label.setNum(value)
             if self.linked_widget is not None:
-                get_app_controller().draw_pen.setWidth(value)
+                self.controller.draw_pen.setWidth(value)
         self.pen_width_slider.valueChanged.connect(on_pen_width_changed)
         self.pen_width_slider.setValue(DEFAULT_PEN_WIDTH)
         layout.addWidget(self.pen_width_slider)
@@ -761,31 +1069,30 @@ class ActionBar(QWidget):
             btn.setChecked(False)
         return btn
 
-    # Tool Management
     def _tool_button_handler(self):
-        """Handler for drawing tool buttons to ensure mutual exclusion."""
+        """Ensure tool mode buttons are mutually exclusive."""
         sender = self.sender()
         if sender.isChecked():
             self.deactivate_draw_tools(exclude_btn=sender)
         else:
             sender.setChecked(False)
 
-    def _get_active_draw_mode(self) -> Optional[str]:
-        """Get the currently active drawing mode."""
-        for btn in self.tool_buttons:
-            if btn.isChecked():
-                return btn.property("mode")
+    def active_tool_mode(self) -> Optional[str]:
+        """Return the selected annotation mode."""
+        for button in self.tool_buttons:
+            if button.isChecked():
+                return button.property("mode")
         return None
 
     def is_any_draw_tool_active(self) -> bool:
         """Check if any of the drawing tool buttons are pressed."""
-        return any(btn.isChecked() for btn in self.tool_buttons)
+        return self.active_tool_mode() is not None
 
     def deactivate_draw_tools(self, exclude_btn: Optional[QPushButton] = None):
         """Deactivate all drawing tool buttons except the excluded one."""
-        for btn in self.tool_buttons:
-            if btn is not exclude_btn:
-                btn.setChecked(False)
+        for button in self.tool_buttons:
+            if button is not exclude_btn:
+                button.setChecked(False)
 
     # UI Management
     def popup_for(self, linked: "OverlayBase"):
@@ -793,23 +1100,18 @@ class ActionBar(QWidget):
         logger.info(f"[ActionBar] Showing -> {linked.display_name}")
         self.linked_widget = linked
 
-        if isinstance(linked, PinnedOverlay):
-            self.pin_btn.setVisible(False)
-            self.pin_btn.setEnabled(False)
-            self.setParent(None)
-        else:
-            self.pin_btn.setVisible(True)
-            self.pin_btn.setEnabled(True)
-            self.setParent(linked)
+        self.pin_btn.setVisible(linked.can_pin)
+        self.pin_btn.setEnabled(linked.can_pin)
+        self.setParent(None if linked.actionbar_is_floating else linked)
 
         self._position()
         self.show()
 
     def dismiss(self):
         """Hide the actionbar."""
-        if self.text_input:
-            self._finalize_text_input()
-            
+        if self.linked_widget:
+            self.linked_widget.annotation_session.finalize_text()
+
         self.deactivate_draw_tools()
         self.hide()
 
@@ -818,22 +1120,12 @@ class ActionBar(QWidget):
         if not self.linked_widget:
             return
 
-        if isinstance(self.linked_widget, PinnedOverlay):
-            x = self.linked_widget.width() - self.width()
-            y = self.linked_widget.height() + TOOLBAR_MARGIN
-            self.move(self.linked_widget.mapToGlobal(QPoint(x, y)))
-        else:
-            selection_rect = self.linked_widget.content_rect
-            x = selection_rect.right() - self.width() + SELECTION_BORDER_WIDTH
-            y = selection_rect.bottom() + TOOLBAR_MARGIN + SELECTION_BORDER_WIDTH
-            x = max(0, min(x, self.linked_widget.width() - self.width()))
-            y = min(y, self.linked_widget.height() - self.height())
-            self.move(x, y)
+        self.linked_widget.position_actionbar(self)
 
     # Color and Style Methods
     def _choose_color(self):
         """Open color picker dialog."""
-        pen = get_app_controller().draw_pen
+        pen = self.controller.draw_pen
         color = QColorDialog.getColor(pen.color(), self.linked_widget, "Choose Pen Color")
         if color.isValid():
             pen.setColor(color)
@@ -841,134 +1133,7 @@ class ActionBar(QWidget):
 
     def _update_color_button(self, color: QColor):
         """Update color button appearance based on selected color."""
-        text_color = 'white' if color.lightness() < 128 else 'black'
-        self.color_btn.setStyleSheet(
-            f"background-color: {color.name()}; "
-            f"color: {text_color}; "
-            f"border: 1px solid #555; "
-            f"border-radius: 3px;"
-        )
-
-    def _text_font(self) -> QFont:
-        """Get the font used for text annotations."""
-        font = QFont()
-        font.setPointSize(self.font_size)
-        font.setBold(True)
-        return font
-
-    # Text Annotation Methods
-    def _add_text_annotation(self, pos: QPoint):
-        """Add text annotation at the given position."""
-        if self.text_input:
-            self._finalize_text_input()
-
-        self.text_input_pos = pos
-        self.text_input = QLineEdit(self.linked_widget)
-
-        self.text_input.setFont(self._text_font())
-
-        pen = get_app_controller().draw_pen
-        brightness = pen.color().lightness()
-        bg_color = "rgba(255, 255, 255, 180)" if brightness < 128 else "rgba(0, 0, 0, 180)"
-        text_color = pen.color().name()
-
-        self.text_input.setStyleSheet(f"""
-            QLineEdit {{
-                background-color: {bg_color};
-                color: {text_color};
-                border: none;
-                padding: 0px;
-                margin: 0px;
-                font-weight: bold;
-            }}
-        """)
-
-        self.text_input.setTextMargins(0, 0, 0, 0)
-        self.text_input.setContentsMargins(0, 0, 0, 0)
-        self.text_input.setMinimumWidth(100)
-        self.text_input.adjustSize()
-        self.text_input.move(pos.x(), pos.y())
-        self.text_input.show()
-        self.text_input.setFocus()
-
-        self.text_input.returnPressed.connect(self._finalize_text_input)
-        self.text_input.editingFinished.connect(self._finalize_text_input)
-
-    def _finalize_text_input(self):
-        """Finalize the text input and draw it on the screenshot."""
-        if not self.text_input or not self.text_input_pos:
-            return
-
-        text = self.text_input.text()
-        if text:
-            with QPainter(self.linked_widget.base_pixmap) as painter:
-                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-                painter.setFont(self._text_font())
-                painter.setPen(get_app_controller().draw_pen)
-
-                content_margins = self.text_input.contentsMargins()
-                x_offset = content_margins.left() if content_margins.left() > 0 else 2
-                y_offset = content_margins.top() if content_margins.top() > 0 else 1
-
-                pos = self._window_to_pixmap_pos(self.text_input_pos)
-
-                text_rect = QRect(pos.x() + x_offset, pos.y() + y_offset, 1000, 100)
-                painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, text)
-
-            self.linked_widget._save_annotation_state()
-            self.linked_widget.update()
-        
-        self._remove_text_input()
-
-    def _remove_text_input(self):
-        if self.text_input:
-            self.text_input.deleteLater()
-            self.text_input = None
-            self.text_input_pos = None
-            return True
-        return False
-
-    # Drawing and Preview Methods
-    def _paint_shape_preview(self, painter: QPainter):
-        """Paint preview for rectangle/line drawing modes."""
-        if not self.linked_widget:
-            return
-
-        pen = get_app_controller().draw_pen
-        painter.setPen(pen)
-        if self.preview_rect and self._get_active_draw_mode() == "rectangle":
-            pen_color = pen.color()
-            painter.setBrush(QColor(pen_color.red(), pen_color.green(), pen_color.blue(), 50))
-            painter.drawRect(self.preview_rect)
-
-        if self.preview_line and self._get_active_draw_mode() == "line":
-            painter.drawLine(self.preview_line[0], self.preview_line[1])
-
-    # Coordinate Conversion Methods
-    def _window_to_pixmap_pos(self, pos: QPoint) -> QPoint:
-        """Convert window coordinates to pixmap coordinates."""
-        if hasattr(self.linked_widget, 'glow_size'):
-            return QPoint(pos.x() - self.linked_widget.glow_size, pos.y() - self.linked_widget.glow_size)
-        return pos
-
-    def _clamp_pos_to_only_pixmap(self, pos: QPoint, for_container_window: bool = True) -> QPoint:
-        """Clamp position to be within the pixmap bounds."""
-        if not self.linked_widget:
-            return pos
-
-        content_rect = self.linked_widget.content_rect
-
-        pen_half_width = self.pen_width_slider.value() // 2
-
-        clamped_pos = QPoint(
-            int(max(content_rect.left() + 1 + pen_half_width, min(pos.x(), content_rect.right() - 1 - pen_half_width))),
-            int(max(content_rect.top() + 1 + pen_half_width, min(pos.y(), content_rect.bottom() - 1 - pen_half_width)))
-        )
-
-        if for_container_window:
-            return clamped_pos
-        else:
-            return self._window_to_pixmap_pos(clamped_pos)
+        self.color_btn.setStyleSheet(_color_button_stylesheet(color))
 
     def handle_key_press(self, event):
         """Handle key press events for shortcuts."""
@@ -995,113 +1160,13 @@ class ActionBar(QWidget):
                 self.button_actions[button_index]()
             return True
 
-    def handle_mouse_press(self, event):
-        """Start drawing or place text annotation based on draw mode."""
-        if not self.linked_widget or not self.is_any_draw_tool_active():
-            return False
-
-        pos = event.pos()
-        if self._get_active_draw_mode() == "text":
-            self._add_text_annotation(pos)
-        else:
-            self.drawing = True
-            self.last_point = pos
-            self.last_point_clamped = False
-            self.draw_start_point = pos
-        return True
-
-    def handle_mouse_move(self, event):
-        """Handle mouse move for drawing preview."""
-        if not self.linked_widget or not self.is_any_draw_tool_active():
-            return
-        
-        if not self.drawing:
-            return
-
-        pos = event.pos()
-        draw_mode = self._get_active_draw_mode()
-        if draw_mode == "pen":
-            if self.last_point_clamped:
-                return
-
-            content_rect = self.linked_widget.content_rect
-            pen_half_width = self.pen_width_slider.value() // 2
-            draw_rect = content_rect.adjusted(pen_half_width, pen_half_width, -pen_half_width, -pen_half_width)
-            
-            if content_rect and not draw_rect.contains(event.pos()):
-                pos = self._clamp_pos_to_only_pixmap(pos)
-                self.last_point_clamped = True
-
-            pixmap_last_point = self._window_to_pixmap_pos(self.last_point)
-            pixmap_pos = self._window_to_pixmap_pos(pos)
-
-            with QPainter(self.linked_widget.base_pixmap) as painter:
-                painter.setPen(get_app_controller().draw_pen)
-                painter.drawLine(pixmap_last_point, pixmap_pos)
-
-            self.last_point = pos
-        elif draw_mode == "rectangle":
-            clamped_pos = self._clamp_pos_to_only_pixmap(pos)
-            self.preview_rect = QRect(self.draw_start_point, clamped_pos).normalized()
-        elif draw_mode == "line":
-            clamped_pos = self._clamp_pos_to_only_pixmap(pos)
-            self.preview_line = (self.draw_start_point, clamped_pos)
-
-        self.linked_widget.update()
-
-    def handle_wheel_event(self, event):
-        """Adjust font size when scrolling with text input active."""
-        if not self.linked_widget or not self.is_any_draw_tool_active():
-            return
-
-        if self.text_input and self.text_input.isVisible():
-            delta = event.angleDelta().y()
-            if delta > 0:
-                self.font_size = min(72, self.font_size + 2)
-            else:
-                self.font_size = max(8, self.font_size - 2)
-
-            font = self.text_input.font()
-            font.setPointSize(self.font_size)
-            self.text_input.setFont(font)
-            self.text_input.adjustSize()
-
-    # Drawing Finalization
-    def _finalize_sharp(self, end_point: QPoint):
-        """Draw the shape to the pixmap based on current draw mode."""
-        pen = get_app_controller().draw_pen
-        with QPainter(self.linked_widget.base_pixmap) as painter:
-            painter.setPen(pen)
-            draw_mode = self._get_active_draw_mode()
-
-            if draw_mode == "rectangle":
-                pen_color = pen.color()
-                painter.setBrush(QColor(pen_color.red(), pen_color.green(), pen_color.blue(), 50))
-                pixmap_start_point = self._clamp_pos_to_only_pixmap(self.draw_start_point, False)
-                clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
-                rect = QRect(pixmap_start_point, clamped_end_point).normalized()
-                painter.drawRect(rect)
-                self.preview_rect = None
-            elif draw_mode == "line":
-                pixmap_start_point = self._clamp_pos_to_only_pixmap(self.draw_start_point, False)
-                clamped_end_point = self._clamp_pos_to_only_pixmap(end_point, False)
-                painter.drawLine(pixmap_start_point, clamped_end_point)
-                self.preview_line = None
-
-        self.linked_widget._save_annotation_state()
-        self.linked_widget.update()
-
-    # Export Methods
     def _save_to_file(self):
-        """Save the current selection to a file."""
+        """Save the linked overlay's export content to a file."""
         content, _ = self.linked_widget._get_content_for_export()
         self.linked_widget.close()
         if content:
             file_path, _ = QFileDialog.getSaveFileName(
-                None,
-                "Save Screenshot",
-                "",
-                "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;All Files (*)"
+                None, "Save Screenshot", "", "PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;All Files (*)"
             )
             if file_path:
                 if content.save(file_path):
@@ -1110,7 +1175,7 @@ class ActionBar(QWidget):
                     logger.error(f"Failed to save screenshot to {file_path}")
 
     def _copy_to_clipboard(self):
-        """Copy the current selection to clipboard."""
+        """Copy the linked overlay's export content to the clipboard."""
         content, _ = self.linked_widget._get_content_for_export()
         self.linked_widget.close()
         if content:
@@ -1124,8 +1189,10 @@ class ActionBar(QWidget):
 class OverlayBase(QWidget):
     """Base class for overlay widgets with annotation."""
 
-    def __init__(self):
+    def __init__(self, controller: "AppController", actionbar: "ActionBar"):
         super().__init__()
+        self.controller = controller
+        self.actionbar = actionbar
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocus()
@@ -1135,6 +1202,7 @@ class OverlayBase(QWidget):
         self.base_pixmap: Optional[QPixmap] = None
         self.hint_label = None
         self.annotation_states: List[AnnotationState] = []
+        self.annotation_session = AnnotationSession(self)
 
         # Dragging state
         self.dragging = False
@@ -1158,9 +1226,68 @@ class OverlayBase(QWidget):
         return None
 
     @property
+    def content_origin_offset(self) -> int:
+        """Pixel offset between the widget's top-left and its content's top-left.
+
+        Zero by default; overridden by subclasses that draw a border/glow
+        effect around their content (e.g. `PinnedOverlay`).
+        """
+        return 0
+
+    @property
     def display_name(self):
         """Get display name for logging."""
         return f"{type(self).__name__[:-7]} #{self.display_id}"
+
+    @property
+    def can_pin(self) -> bool:
+        """Whether the action bar should offer the pin action."""
+        return True
+
+    @property
+    def actionbar_is_floating(self) -> bool:
+        """Whether the action bar is an independent top-level window."""
+        return False
+
+    def position_actionbar(self, actionbar: ActionBar):
+        """Position an action bar attached to this overlay."""
+        selection_rect = self.content_rect
+        x = selection_rect.right() - actionbar.width() + SELECTION_BORDER_WIDTH
+        y = selection_rect.bottom() + TOOLBAR_MARGIN + SELECTION_BORDER_WIDTH
+        x = max(0, min(x, self.width() - actionbar.width()))
+        y = min(y, self.height() - actionbar.height())
+        actionbar.move(x, y)
+
+    def _drag_offset_for(self, pos: QPoint) -> QPoint:
+        """Return the mouse offset used while dragging this overlay."""
+        return pos - self.content_rect.topLeft()
+
+    def _drag_to(self, new_top_left: QPoint):
+        """Apply a drag using the top-left derived from the mouse offset."""
+        self._move_selection(new_top_left)
+
+    def _window_to_pixmap_pos(self, pos: QPoint) -> QPoint:
+        """Convert overlay-window coordinates to base-pixmap coordinates."""
+        offset = self.content_origin_offset
+        return QPoint(pos.x() - offset, pos.y() - offset)
+
+    def _clamp_pos_to_content(self, pos: QPoint, pen_width: int, for_window: bool = True) -> QPoint:
+        """Clamp a point to the content bounds, accounting for pen width."""
+        content_rect = self.content_rect
+        pen_half_width = pen_width // 2
+        clamped_pos = QPoint(
+            int(max(content_rect.left() + 1 + pen_half_width, min(pos.x(), content_rect.right() - 1 - pen_half_width))),
+            int(max(content_rect.top() + 1 + pen_half_width, min(pos.y(), content_rect.bottom() - 1 - pen_half_width)))
+        )
+        return clamped_pos if for_window else self._window_to_pixmap_pos(clamped_pos)
+
+    def _paint_annotation_preview(self, painter: QPainter):
+        """Paint the current annotation gesture preview using toolbar settings."""
+        actionbar = self.actionbar
+        if actionbar:
+            self.annotation_session.paint_preview(
+                painter, actionbar.active_tool_mode(), actionbar.controller.draw_pen
+            )
 
     # Cursor Management
     def _update_cursor(self, pos: QPoint):
@@ -1172,7 +1299,7 @@ class OverlayBase(QWidget):
             self.setCursor(self._get_resize_cursor(resize_edge))
         elif pressed and (self.dragging or self.resizing):
             self.setCursor(Qt.CursorShape.SizeAllCursor)
-        elif (actionbar := get_actionbar()) and actionbar.is_any_draw_tool_active():
+        elif (actionbar := self.actionbar) and actionbar.is_any_draw_tool_active():
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -1234,9 +1361,24 @@ class OverlayBase(QWidget):
         """Apply resize transformation. Must be implemented by subclasses."""
         raise NotImplementedError
 
+    def _on_resize_start(self):
+        """Hook called when a resize drag begins. No-op by default; overridden
+        by subclasses that need to snapshot state before resizing (e.g.
+        `PinnedOverlay` refreshing its high-quality scale source so annotations
+        added since the last resize aren't lost)."""
+        pass
+
     def _get_content_for_export(self):
         """Get pixmap for export (save/copy). Must be implemented by subclasses."""
         raise NotImplementedError
+
+    def _to_content_space(self, rect: QRect, selection_rect: Optional[QRect]) -> QRect:
+        """Translate a rect from widget/base_pixmap coordinates into the
+        export content's local coordinate space. Identity by default;
+        overridden where the export content is cropped from a larger
+        base_pixmap (e.g. `CaptureOverlay`).
+        """
+        return rect
 
     def pin_to_screen(self):
         """Pin content to screen. Must be implemented by subclasses."""
@@ -1245,7 +1387,7 @@ class OverlayBase(QWidget):
     # Event Handlers
     def keyPressEvent(self, event):
         """Handle key press events."""
-        if (actionbar := get_actionbar()):
+        if (actionbar := self.actionbar):
             actionbar.handle_key_press(event)
 
     def mousePressEvent(self, event):
@@ -1257,13 +1399,19 @@ class OverlayBase(QWidget):
         if resize_edge:
             self.resizing = True
             self.resize_edge = resize_edge
+            self._on_resize_start()
             return
 
-        if (actionbar := get_actionbar()) and actionbar.handle_mouse_press(event):
+        actionbar = self.actionbar
+        mode = actionbar.active_tool_mode() if actionbar else None
+        if mode:
+            self.annotation_session.start(
+                pos, mode, actionbar.controller.draw_pen, actionbar.pen_width_slider.value(), actionbar.font_size
+            )
             return
 
         self.dragging = True
-        self.drag_offset = pos if isinstance(self, PinnedOverlay) else pos - self.content_rect.topLeft()
+        self.drag_offset = self._drag_offset_for(pos)
 
     def mouseMoveEvent(self, event):
         """Handle mouse move events."""
@@ -1273,14 +1421,11 @@ class OverlayBase(QWidget):
         if not pressed:
             return
 
-        actionbar = get_actionbar()
+        actionbar = self.actionbar
 
         if self.dragging:
             new_top_left = event.pos() - self.drag_offset
-            if isinstance(self, PinnedOverlay):
-                self.move(self.mapToGlobal(new_top_left))
-            else:
-                self._move_selection(new_top_left)
+            self._drag_to(new_top_left)
             actionbar._position()
             return
         elif self.resizing:
@@ -1288,16 +1433,25 @@ class OverlayBase(QWidget):
             self._apply_resize(event.pos().x(), event.pos().y(), keep_aspect)
             actionbar._position()
 
-        actionbar.handle_mouse_move(event)
+        mode = self.annotation_session.mode
+        if mode:
+            self.annotation_session.handle_mouse_move(
+                event.pos(), mode, actionbar.controller.draw_pen, actionbar.pen_width_slider.value()
+            )
 
     def mouseReleaseEvent(self, event):
         """Handle mouse release events."""
         self._update_cursor(event.pos())
-        actionbar = get_actionbar()
+        actionbar = self.actionbar
 
-        if actionbar.drawing:
-            actionbar._finalize_sharp(event.pos())
-            actionbar.drawing = False
+        if self.annotation_session.drawing:
+            mode = self.annotation_session.mode
+            if mode:
+                self.annotation_session.finalize(
+                    event.pos(), mode, actionbar.controller.draw_pen, actionbar.pen_width_slider.value()
+                )
+            self.annotation_session.drawing = False
+            self.annotation_session.mode = None
         elif self.dragging:
             self.dragging = False
         elif self.resizing:
@@ -1307,10 +1461,10 @@ class OverlayBase(QWidget):
 
     def _handle_esc_shortcut(self):
         """Handle Escape key shortcut."""
-        actionbar = get_actionbar()
+        actionbar = self.actionbar
         if not actionbar or not actionbar.is_any_draw_tool_active():
             self.close()
-        elif not actionbar._remove_text_input():
+        elif not self.annotation_session.remove():
             actionbar.deactivate_draw_tools()
 
     # Undo/Redo System
@@ -1319,25 +1473,68 @@ class OverlayBase(QWidget):
         self.annotation_states = []
         self.undo_redo_index = -1
 
-    def _save_annotation_state(self):
-        """Save current annotation state to states list for undo/redo."""
+    def _save_annotation_state(self, dirty_rect: Optional[QRect] = None):
+        """Save current annotation state to states list for undo/redo.
+
+        When `dirty_rect` is given and the selection/content geometry hasn't
+        changed since the previous state, only the pixels inside that rect
+        are stored (a diff), instead of a full copy of the content. This
+        keeps undo/redo purely raster-based (no vector re-rendering, so
+        results are identical across machines/DPI/fonts) while avoiding a
+        full-image copy for every small edit.
+        """
         # Remove any states after current index (for redo)
         self.annotation_states = self.annotation_states[:self.undo_redo_index + 1]
 
-        # Add new state
         content, selection_rect = self._get_content_for_export()
-        state = AnnotationState(
-            screenshot=content.copy(),
-            selection_rect=selection_rect
+        prev = self.annotation_states[-1] if self.annotation_states else None
+
+        can_diff = (
+            dirty_rect is not None
+            and prev is not None
+            and prev.selection_rect == selection_rect
         )
+
+        if can_diff:
+            content_space_rect = self._to_content_space(dirty_rect, selection_rect)
+            logical_content_rect = QRect(QPoint(), content.deviceIndependentSize().toSize())
+            clamped_rect = content_space_rect.intersected(logical_content_rect)
+            patch_rect = _logical_rect_to_device_pixels(clamped_rect, content.devicePixelRatio())
+            patch = content.copy(patch_rect)
+            patch.setDevicePixelRatio(content.devicePixelRatio())
+            state = AnnotationState(
+                selection_rect=selection_rect,
+                dirty_rect=clamped_rect,
+                patch=patch
+            )
+        else:
+            state = AnnotationState(
+                screenshot=content.copy(),
+                selection_rect=selection_rect
+            )
+
         self.annotation_states.append(state)
         self.undo_redo_index += 1
 
-        if len(self.annotation_states) > MAX_HISTORY:
-            self.annotation_states.pop(0)
+        # Index 0 is a permanent anchor (the pristine pre-edit state) and is
+        # never evicted, so the user can always undo all the way back to it.
+        # Only the sliding window of edits *after* the anchor is capped at
+        # MAX_HISTORY; when it overflows we drop the oldest edit (index 1),
+        # promoting index 2 to a keyframe first if needed so later diffs
+        # remain replayable.
+        if len(self.annotation_states) > MAX_HISTORY + 1:
+            if not self.annotation_states[2].is_keyframe:
+                self.annotation_states[2] = AnnotationState(
+                    screenshot=self._reconstruct_state_content(2),
+                    selection_rect=self.annotation_states[2].selection_rect
+                )
+            self.annotation_states.pop(1)
             self.undo_redo_index -= 1
 
-        logger.debug(f"[{self.display_name}] Saved annotation state: {self.undo_redo_index + 1}")
+        logger.debug(
+            f"[{self.display_name}] Saved annotation state: {self.undo_redo_index + 1} "
+            f"({'diff' if can_diff else 'keyframe'})"
+        )
 
     def undo_action(self):
         """Undo last annotation."""
@@ -1353,36 +1550,40 @@ class OverlayBase(QWidget):
             self._restore_annotation_state(self.undo_redo_index)
             self.update()
 
+    def _reconstruct_state_content(self, index: int) -> QPixmap:
+        """Rebuild the full content pixmap at `index` by replaying diffs from the nearest earlier keyframe."""
+        base_index = index
+        while not self.annotation_states[base_index].is_keyframe:
+            base_index -= 1
+
+        result = self.annotation_states[base_index].screenshot.copy()
+        for i in range(base_index + 1, index + 1):
+            diff_state = self.annotation_states[i]
+            with QPainter(result) as painter:
+                painter.drawPixmap(diff_state.dirty_rect.topLeft(), diff_state.patch)
+
+        return result
+
     def _restore_annotation_state(self, index: int):
         """Restore annotation state from index."""
         logger.debug(f"[{self.display_name}] Restoring state {index + 1} of {len(self.annotation_states)}")
         state = self.annotation_states[index]
-        state_pixmap = state.screenshot
         selection_rect = state.selection_rect
+        state_pixmap = state.screenshot if state.is_keyframe else self._reconstruct_state_content(index)
 
-        if isinstance(self, PinnedOverlay):
-            self.base_pixmap = state_pixmap.copy()
-            self._update_window_size_from_pixmap()
+        self._restore_history_content(state_pixmap, selection_rect)
 
-            actionbar = get_actionbar()
-            if actionbar and actionbar.isVisible() and actionbar.linked_widget == self:
-                actionbar._position()
-        else:
-            with QPainter(self.base_pixmap) as painter:
-                painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
+    def _restore_history_content(self, state_pixmap: QPixmap, selection_rect: Optional[QRect]):
+        """Restore a history state into this overlay's backing pixmap."""
+        with QPainter(self.base_pixmap) as painter:
+            painter.drawPixmap(selection_rect, state_pixmap, state_pixmap.rect())
 
     # Hint and UI Methods
     def _show_hint(self, message: str, duration: int = 1000):
         """Show a temporary hint message overlay on the screen."""
         if self.hint_label is None:
             self.hint_label = QLabel(message, self)
-            self.hint_label.setStyleSheet(
-                "background-color: rgba(0, 0, 0, 180); "
-                "color: white; "
-                "padding: 10px 20px; "
-                "border-radius: 5px; "
-                "font-size: 14px;"
-            )
+            self.hint_label.setStyleSheet(HINT_LABEL_STYLESHEET)
             self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         else:
             self.hint_label.setText(message)
@@ -1397,7 +1598,7 @@ class OverlayBase(QWidget):
 
     def closeEvent(self, event):
         """Clean up actionbar and release resources when closing."""
-        if (actionbar := get_actionbar()):
+        if (actionbar := self.actionbar):
             if actionbar.linked_widget is self:
                 # Properly dismiss and unlink to avoid stale references.
                 actionbar.dismiss()
@@ -1411,8 +1612,8 @@ class OverlayBase(QWidget):
 class CaptureOverlay(OverlayBase):
     """Fullscreen overlay for selecting and annotating screenshot areas."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, controller: "AppController", actionbar: "ActionBar"):
+        super().__init__(controller, actionbar)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
     # Initialization Methods
@@ -1464,8 +1665,7 @@ class CaptureOverlay(OverlayBase):
             else:
                 painter.fillRect(self.rect(), OVERLAY_COLOR)
 
-            if (actionbar := get_actionbar()):
-                actionbar._paint_shape_preview(painter)
+            self._paint_annotation_preview(painter)
 
     def _paint_overlay_around_selection(self, painter: QPainter, selection_rect: QRect):
         """Paint dark overlay around the selection area."""
@@ -1494,8 +1694,8 @@ class CaptureOverlay(OverlayBase):
     def _paint_selection_border(self, painter: QPainter, selection_rect: QRect):
         """Paint the selection rectangle border."""
         border_width = SELECTION_BORDER_WIDTH if self.selecting else SELECTION_BORDER_WIDTH + 1
-        
-        pen = get_app_controller().border_pen
+
+        pen = self.controller.border_pen
         pen.setWidth(border_width)
         painter.setPen(pen)
 
@@ -1551,11 +1751,13 @@ class CaptureOverlay(OverlayBase):
 
     def wheelEvent(self, event):
         """Only while cursor is not over the actionbar."""
-        actionbar = get_actionbar()
+        actionbar = self.actionbar
         if not actionbar or actionbar.geometry().contains(event.position().toPoint()):
             super().wheelEvent(event)
         else:
-            actionbar.handle_wheel_event(event)
+            font_size = self.annotation_session.adjust_font_size_from_wheel(event)
+            if font_size is not None:
+                actionbar.font_size = font_size
 
     # Selection Management
     def _apply_resize(self, mouse_x, mouse_y, keep_aspect=False):
@@ -1614,13 +1816,13 @@ class CaptureOverlay(OverlayBase):
         self.end_pos = selection_rect.bottomRight()
         self.update()
 
-        if (actionbar := get_actionbar()):
+        if (actionbar := self.actionbar):
             actionbar.popup_for(self)
 
         self._init_annotation_states()
         self._save_annotation_state()
 
-        get_app_controller()._add_to_screenshot_snapshots(
+        self.controller._add_to_screenshot_snapshots(
             self.base_pixmap,
             self.start_pos,
             self.end_pos
@@ -1643,7 +1845,7 @@ class CaptureOverlay(OverlayBase):
         new_pos = self.start_pos + QPoint(delta_x, delta_y)
 
         self._move_selection(new_pos)
-        if (actionbar := get_actionbar()):
+        if (actionbar := self.actionbar):
             actionbar._position()
         self.update()
 
@@ -1662,7 +1864,7 @@ class CaptureOverlay(OverlayBase):
 
     def _navigate_snapshots(self, direction: int):
         """Navigate through screenshot snapshots."""
-        screenshot_snapshots = get_app_controller().screenshot_snapshots
+        screenshot_snapshots = self.controller.screenshot_snapshots
 
         if len(screenshot_snapshots) == 0:
             logger.debug("Cannot navigate: screenshot snapshots is empty")
@@ -1699,20 +1901,13 @@ class CaptureOverlay(OverlayBase):
             self._init_annotation_states()
             self._save_annotation_state()
 
-        if self.content_rect is not None and (actionbar := get_actionbar()):
+        if self.content_rect is not None and (actionbar := self.actionbar):
             actionbar.popup_for(self)
 
     # Utility Methods
     def _scale_rect(self, rect: QRect) -> QRect:
         """Scale a rectangle by device pixel ratio for high DPI displays."""
-        if self.base_pixmap.devicePixelRatio() <= 1.0:
-            return rect
-        return QRect(
-            int(rect.x() * self.base_pixmap.devicePixelRatio()),
-            int(rect.y() * self.base_pixmap.devicePixelRatio()),
-            int(rect.width() * self.base_pixmap.devicePixelRatio()),
-            int(rect.height() * self.base_pixmap.devicePixelRatio())
-        )
+        return _logical_rect_to_device_pixels(rect, self.base_pixmap.devicePixelRatio())
 
     def _get_content_for_export(self) -> Tuple[Optional[QPixmap], Optional[QRect]]:
         """Get the annotated screenshot from current selection."""
@@ -1725,13 +1920,21 @@ class CaptureOverlay(OverlayBase):
             result = (content, selection_rect)
         return result
 
+    def _to_content_space(self, rect: QRect, selection_rect: Optional[QRect]) -> QRect:
+        """Translate a base_pixmap-space rect into the cropped selection's local coordinates."""
+        if selection_rect is None:
+            return rect
+        return rect.translated(-selection_rect.topLeft())
+
     def pin_to_screen(self):
         """Pin the current selection."""
-        if (actionbar := get_actionbar()):
+        if (actionbar := self.actionbar):
             actionbar.dismiss()
         content, selection_rect = self._get_content_for_export()
         if content:
             pinned_window = PinnedOverlay(
+                self.controller,
+                self.actionbar,
                 content,
                 position=selection_rect.topLeft(),
                 annotation_states=self.annotation_states,
@@ -1741,8 +1944,8 @@ class CaptureOverlay(OverlayBase):
             self.annotation_states = []
             pinned_window.show()
 
-            get_app_controller().pinned_windows.append(pinned_window)
-            logger.info(f"Screenshot pinned to screen: {len(get_app_controller().pinned_windows)}")
+            self.controller.pinned_windows.append(pinned_window)
+            logger.info(f"Screenshot pinned to screen: {len(self.controller.pinned_windows)}")
         self.close()
 
 class PinnedOverlay(OverlayBase):
@@ -1750,10 +1953,11 @@ class PinnedOverlay(OverlayBase):
 
     _instance_counter = 0
 
-    def __init__(self, pixmap: QPixmap, position: Optional[QPoint] = None,
+    def __init__(self, controller: "AppController", actionbar: "ActionBar", pixmap: QPixmap,
+                 position: Optional[QPoint] = None,
                  annotation_states: Optional[List[AnnotationState]] = None,
                  undo_redo_index: int = -1):
-        super().__init__()
+        super().__init__(controller, actionbar)
 
         PinnedOverlay._instance_counter += 1
         self.display_id = PinnedOverlay._instance_counter
@@ -1776,17 +1980,7 @@ class PinnedOverlay(OverlayBase):
 
         # Opacity label
         self.opacity_label = QLabel(self)
-        self.opacity_label.setStyleSheet("""
-            QLabel {
-                background-color: rgba(0, 0, 0, 180);
-                color: white;
-                border: 1px solid #0078d4;
-                border-radius: 3px;
-                padding: 4px 8px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-        """)
+        self.opacity_label.setStyleSheet(OPACITY_LABEL_STYLESHEET)
         self.opacity_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.opacity_label.hide()
 
@@ -1824,6 +2018,38 @@ class PinnedOverlay(OverlayBase):
         logical_height = int(self.base_pixmap.height() / self.base_pixmap.devicePixelRatio())
         return QRect(self.glow_size, self.glow_size, logical_width, logical_height)
 
+    @property
+    def content_origin_offset(self) -> int:
+        """Offset of the pixmap's top-left corner from the window's, due to the glow border."""
+        return self.glow_size
+
+    @property
+    def can_pin(self) -> bool:
+        return False
+
+    @property
+    def actionbar_is_floating(self) -> bool:
+        return True
+
+    def position_actionbar(self, actionbar: ActionBar):
+        x = self.width() - actionbar.width()
+        y = self.height() + TOOLBAR_MARGIN
+        actionbar.move(self.mapToGlobal(QPoint(x, y)))
+
+    def _drag_offset_for(self, pos: QPoint) -> QPoint:
+        return pos
+
+    def _drag_to(self, new_top_left: QPoint):
+        self.move(self.mapToGlobal(new_top_left))
+
+    def _restore_history_content(self, state_pixmap: QPixmap, selection_rect: Optional[QRect]):
+        """Restore content and geometry for a pinned overlay history state."""
+        self.base_pixmap = state_pixmap.copy()
+        self._update_window_size_from_pixmap()
+        actionbar = self.actionbar
+        if actionbar and actionbar.isVisible() and actionbar.linked_widget == self:
+            actionbar._position()
+
     # Window Management
     def _update_window_size_from_pixmap(self):
         """Update window size based on current base_pixmap dimensions plus glow."""
@@ -1833,7 +2059,7 @@ class PinnedOverlay(OverlayBase):
 
     def _handle_space_shortcut(self):
         """Handle space key to show/hide actionbar."""
-        actionbar = get_actionbar()
+        actionbar = self.actionbar
         if not actionbar:
             return
         if actionbar.isVisible():
@@ -1857,8 +2083,7 @@ class PinnedOverlay(OverlayBase):
             # Draw the pixmap at the center
             painter.drawPixmap(self.glow_size, self.glow_size, self.base_pixmap)
 
-            if (actionbar := get_actionbar()):
-                actionbar._paint_shape_preview(painter)
+            self._paint_annotation_preview(painter)
 
     # Event Handlers
     def mouseDoubleClickEvent(self, event):
@@ -1890,6 +2115,19 @@ class PinnedOverlay(OverlayBase):
         self.opacity_timer.start(1000)
 
     # Resize Methods
+    def _on_resize_start(self):
+        """Refresh the high-quality resize source from the current (annotated)
+        base_pixmap before a resize drag begins.
+
+        `original_pixmap` is scaled from on every `_apply_resize` call during
+        a drag (never from an already-resized `base_pixmap`) to avoid
+        compounding quality loss across repeated resamples within one drag.
+        Refreshing it here — once, when the drag starts — makes sure any
+        annotations drawn since the last resize (or since pinning) are
+        included in what gets scaled, instead of being silently dropped.
+        """
+        self.original_pixmap = self.base_pixmap.copy()
+
     def _calculate_new_size(self, mouse_x: int, mouse_y: int, keep_aspect: bool) -> Tuple[int, int, int, int]:
         """Calculate new size for resize operation."""
         content_x = mouse_x - self.glow_size
@@ -1928,7 +2166,9 @@ class PinnedOverlay(OverlayBase):
         if new_width == current_width and new_height == current_height:
             return
 
-        # IMPORTANT: Always scale from original_pixmap to avoid quality degradation
+        # IMPORTANT: Always scale from original_pixmap (refreshed in
+        # _on_resize_start at the beginning of this drag) to avoid quality
+        # degradation from repeatedly resampling an already-resized image.
         dpr = self.original_pixmap.devicePixelRatio()
         self.base_pixmap = self.original_pixmap.scaled(
             int(new_width * dpr),
@@ -1970,7 +2210,7 @@ class PinnedOverlay(OverlayBase):
         if opacity_timer:
             opacity_timer.stop()
 
-        pinned_list = get_app_controller().pinned_windows
+        pinned_list = self.controller.pinned_windows
         if self in pinned_list:
             pinned_list.remove(self)
         logger.info(f"Remaining pinned: {len(pinned_list)}")
