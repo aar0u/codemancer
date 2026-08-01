@@ -1,10 +1,10 @@
 ## Project Overview
 
-TailViewer is a cross-platform log file viewer (similar to `tail -f`) with both GUI and CLI modes. It monitors log files in real-time with keyword highlighting and drag-and-drop support.
+TailViewer is a cross-platform log file viewer (similar to `tail -f`) with both GUI and CLI modes. It monitors log files in real-time with keyword highlighting.
 
 **Two implementations:**
 - `TailViewer.java` - Java Swing GUI (production version, supports CLI mode)
-- `simple_tail_gui.py` - PyQt6 GUI (alternative implementation)
+- `simple_tail_gui.py` - Python standard-library `tkinter` GUI (alternative implementation)
 
 ## Build & Run
 
@@ -37,7 +37,7 @@ build-graal.bat
 ### Python Version
 
 ```bash
-uv run --script simple_tail_gui.py [logfile]
+python simple_tail_gui.py [logfile]
 ```
 
 ### Generate Test Logs
@@ -61,7 +61,7 @@ gen-log.bat [logfile]  # Appends random log entries every 1 second
 
 ### UI Features
 - Auto-pause when text is selected (title shows "[PAUSED]")
-- Drag-and-drop file loading
+- File loading through the "Open file" button
 - Real-time keyword highlighting (comma-separated, case-insensitive)
 - Auto-scroll to bottom
 - Update interval: 1000ms (Java), 500ms (Python)
@@ -75,11 +75,11 @@ gen-log.bat [logfile]  # Appends random log entries every 1 second
 
 **UTF-16/UTF-8 Handling:**
 - Java: TailViewer.java:97, 132
-- Python: simple_tail_gui.py:122, 135, 206
+- Python: `simple_tail_gui.py` decodes UTF-8 with replacement and removes NUL characters
 
 **Line Merging Logic:**
 - Java: TailViewer.java:287-299
-- Python: simple_tail_gui.py:212-218
+- Python: `simple_tail_gui.py` merges the first segment of each incremental read into the current final line
 
 **GraalVM Native Image:**
 - Metadata: `ni-config/reachability-metadata.json`

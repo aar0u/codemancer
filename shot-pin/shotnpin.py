@@ -2,6 +2,8 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
+#     "paddleocr==3.7.0",
+#     "paddlepaddle==3.3.1",
 #     "pynput==1.8.2",
 #     "pyqt6==6.9.1",
 #     "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
@@ -19,6 +21,8 @@ A lightweight application for capturing, annotating, and pinning screenshots.
 # ============================================================================
 import logging
 import sys
+import tempfile
+from contextlib import redirect_stdout
 from math import ceil, floor
 from pathlib import Path
 from typing import Optional, Tuple, List, Callable
@@ -28,7 +32,7 @@ from typing import Optional, Tuple, List, Callable
 # ============================================================================
 from dataclasses import dataclass
 from pynput import keyboard
-from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject, QThread
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtGui import (
     QPixmap, QPainter, QPen, QBrush, QColor, QShortcut, QKeySequence,
@@ -161,6 +165,17 @@ OPACITY_LABEL_STYLESHEET = f"""
         font-size: 12px;
         font-weight: bold;
     }}
+"""
+
+OCR_TOAST_STYLESHEET = """
+    QLabel {
+        background-color: rgba(0, 0, 0, 220);
+        color: white;
+        border: 1px solid #555;
+        border-radius: 5px;
+        padding: 10px 14px;
+        font-size: 13px;
+    }
 """
 
 
@@ -345,6 +360,23 @@ def _logical_rect_to_device_pixels(rect: QRect, device_pixel_ratio: float) -> QR
     bottom = ceil((rect.y() + rect.height()) * device_pixel_ratio)
     return QRect(left, top, right - left, bottom - top)
 
+
+def extract_image_text(input_path: Path) -> str:
+    """Extract text from a local image using PaddleOCR."""
+    from paddleocr import PaddleOCR
+
+    with redirect_stdout(sys.stderr):
+        ocr = PaddleOCR(
+            text_detection_model_name="PP-OCRv6_small_det",
+            text_recognition_model_name="PP-OCRv6_small_rec",
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+            enable_mkldnn=sys.platform != "win32",
+        )
+        result = next(iter(ocr.predict(str(input_path))))
+    return "\n".join(result["rec_texts"])
+
 # ============================================================================
 # Single Instance Management
 # ============================================================================
@@ -405,6 +437,40 @@ class SingleInstance(QObject):
             QLocalServer.removeServer(self.key)
             logger.info("Single instance server cleaned up")
 
+
+class StatusToast(QLabel):
+    """Show transient status without taking keyboard focus."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setStyleSheet(OCR_TOAST_STYLESHEET)
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.hide)
+
+    def show_message(self, message: str, duration: int = 0):
+        """Display a message at the bottom right of the active screen."""
+        self.timer.stop()
+        self.setText(message)
+        self.adjustSize()
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        if screen:
+            geometry = screen.availableGeometry()
+            self.move(
+                geometry.right() - self.width() - 20,
+                geometry.bottom() - self.height() - 20,
+            )
+        self.show()
+        self.raise_()
+        if duration:
+            self.timer.start(duration)
+
 # ============================================================================
 # Application Controller
 # ============================================================================
@@ -420,6 +486,7 @@ class AppController(QObject):
         super().__init__()
         self.about_window = None
         self.tray_icon = None
+        self.status_toast = StatusToast()
         self.single_instance = single_instance
 
         self.screenshot_snapshots: List[SnapshotItem] = []
@@ -651,6 +718,10 @@ class AppController(QObject):
         else:
             logger.warning("No image found in clipboard to pin.")
 
+    def show_status(self, message: str, duration: int = 0):
+        """Show a transient status above other windows."""
+        self.status_toast.show_message(message, duration)
+
     # Utility Methods
     def _add_to_screenshot_snapshots(self, screenshot: QPixmap, start_pos: Optional[QPoint] = None, end_pos: Optional[QPoint] = None):
         """Add screenshot to snapshots with size limit."""
@@ -677,6 +748,8 @@ class AppController(QObject):
 
         if self.hotkey_listener:
             self.hotkey_listener.stop()
+
+        self.actionbar.wait_for_ocr()
 
         if self.single_instance:
             self.single_instance.cleanup()
@@ -716,6 +789,24 @@ class FocusPreservingEventFilter(QObject):
             active_widget.activateWindow()
         if not active_widget.hasFocus():
             active_widget.setFocus()
+
+
+class OcrThread(QThread):
+    """Recognize a saved screenshot without blocking the Qt event loop."""
+
+    text_ready = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, image_path: Path):
+        super().__init__()
+        self.image_path = image_path
+
+    def run(self):
+        try:
+            self.text_ready.emit(extract_image_text(self.image_path))
+        except Exception as error:
+            logger.exception("OCR failed")
+            self.failed.emit(str(error))
 
 class _AnnotationTextEdit(QLineEdit):
     """QLineEdit that allows cancelling text annotation input with Escape."""
@@ -962,6 +1053,8 @@ class ActionBar(QWidget):
         self.button_actions = []
         self.tool_buttons: List[QPushButton] = []
         self.font_size = DEFAULT_FONT_SIZE
+        self.ocr_thread: Optional[OcrThread] = None
+        self.ocr_image_path: Optional[Path] = None
 
         # Create event filter for focus preservation
         self.focus_filter = FocusPreservingEventFilter(self)
@@ -1141,6 +1234,13 @@ class ActionBar(QWidget):
             return False
 
         key = event.key()
+        if (
+            event.modifiers() == Qt.KeyboardModifier.ShiftModifier
+            and key == Qt.Key.Key_C
+        ):
+            self._copy_ocr_text()
+            return True
+
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             shortcuts = {
                 Qt.Key.Key_Z: self.linked_widget.undo_action,
@@ -1185,6 +1285,78 @@ class ActionBar(QWidget):
                 logger.info("Screenshot copied to clipboard")
             else:
                 logger.error("Clipboard not available")
+
+    def _copy_ocr_text(self):
+        """OCR the selected image and copy its text to the clipboard."""
+        if self.ocr_thread:
+            return
+
+        content, _ = self.linked_widget._get_content_for_export()
+        self.linked_widget.close()
+        if not content:
+            return
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as image:
+            image_path = Path(image.name)
+        if not content.save(str(image_path), "PNG"):
+            image_path.unlink(missing_ok=True)
+            logger.error("Failed to prepare image for OCR")
+            self.controller.show_status("OCR failed", 2500)
+            return
+
+        self.ocr_thread = OcrThread(image_path)
+        self.ocr_image_path = image_path
+        self.ocr_thread.text_ready.connect(self._finish_ocr_text)
+        self.ocr_thread.failed.connect(self._finish_ocr_error)
+        self.ocr_thread.finished.connect(self._finish_ocr_thread)
+        self.ocr_thread.start()
+        self.controller.show_status("OCR recognizing...")
+
+    def wait_for_ocr(self):
+        """Finish any active OCR worker before application shutdown."""
+        if self.ocr_thread:
+            self.ocr_thread.wait()
+            self.ocr_thread.deleteLater()
+            self.ocr_thread = None
+        if self.ocr_image_path:
+            self.ocr_image_path.unlink(missing_ok=True)
+            self.ocr_image_path = None
+
+    def _finish_ocr_thread(self):
+        """Release an OCR thread only after it has stopped."""
+        thread = self.sender()
+        if thread is self.ocr_thread:
+            self.ocr_thread = None
+        thread.deleteLater()
+
+    def _finish_ocr_text(self, text: str):
+        """Handle successful OCR on the main Qt thread."""
+        self._finish_ocr(text)
+
+    def _finish_ocr_error(self, error: str):
+        """Handle a failed OCR job on the main Qt thread."""
+        self._finish_ocr(None, error)
+
+    def _finish_ocr(
+        self,
+        text: Optional[str],
+        error: Optional[str] = None,
+    ):
+        """Clean up an OCR job and copy its result to the clipboard."""
+        if self.ocr_image_path:
+            self.ocr_image_path.unlink(missing_ok=True)
+            self.ocr_image_path = None
+        if error:
+            logger.error("OCR failed: %s", error)
+            self.controller.show_status("OCR failed", 2500)
+        elif text:
+            QApplication.clipboard().setText(text)
+            self.controller.show_status(
+                f"OCR complete: copied {len(text)} characters", 2500
+            )
+        else:
+            logger.info("OCR found no text")
+            self.controller.show_status("No text recognized", 2500)
 
 class OverlayBase(QWidget):
     """Base class for overlay widgets with annotation."""
