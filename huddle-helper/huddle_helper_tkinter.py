@@ -22,8 +22,9 @@ names = load_names()
 class CheckboxListApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        self.withdraw()
         self.title("Huddle Helper")
-        self.geometry("220x400")
+        self.attributes("-topmost", True)
         self.resizable(False, False)
         self.x_states = {}  # Track X state for each checkbox
         self.checkboxes = {}
@@ -33,7 +34,6 @@ class CheckboxListApp(tk.Tk):
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         max_text_width = 0
-        row_height = 0
         font = ("Segoe UI", 11)
         for name in names:
             self.create_checkbox_row(main_frame, name)
@@ -41,23 +41,14 @@ class CheckboxListApp(tk.Tk):
             temp_label.update_idletasks()
             text_width = temp_label.winfo_reqwidth()
             max_text_width = max(max_text_width, text_width)
-            if row_height == 0:
-                row_height = temp_label.winfo_reqheight() + 4  # 4 for pady
             temp_label.destroy()
         self.update_idletasks()
-        min_width = 180
-        min_height = 400
+        desired_width = max(180, max_text_width + 60)  # checkbox and margins padding
+        desired_height = max(180, main_frame.winfo_reqheight())
+        self.center_window(desired_width, desired_height)
+        self.deiconify()
 
-        desired_width = max(min_width, max_text_width + 60) # checkbox and margins padding
-        desired_height = max(min_height, len(names) * row_height + 60)  # top/bottom padding
-        self.geometry(f"{desired_width}x{desired_height}")
-        self.minsize(min_width, min_height)
-        self.center_window()
-
-    def center_window(self):
-        self.update_idletasks()
-        w = self.winfo_width()
-        h = self.winfo_height()
+    def center_window(self, w, h):
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         x = (sw - w) // 2

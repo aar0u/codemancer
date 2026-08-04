@@ -2,6 +2,8 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
+#     "rapidocr==3.9.2",
+#     "onnxruntime==1.23.2",
 #     "paddleocr==3.7.0",
 #     "paddlepaddle==3.3.1",
 #     "pynput==1.8.2",
@@ -27,11 +29,19 @@ from math import ceil, floor
 from pathlib import Path
 from typing import Optional, Tuple, List, Callable
 
+OCR_ENGINE = "rapidocr"  # "rapidocr" or "paddleocr"
+
 # ============================================================================
 # Third-party Library Imports
 # ============================================================================
 from dataclasses import dataclass
 from pynput import keyboard
+
+# PyQt6 bundles older MSVC runtime DLLs on Windows. Load ONNX Runtime first so
+# it binds to the system runtime instead of those bundled Qt DLLs.
+if OCR_ENGINE == "rapidocr":
+    import onnxruntime
+
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QByteArray, pyqtSignal, QObject, QThread
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtGui import (
@@ -41,7 +51,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel,
-    QColorDialog, QSlider, QHBoxLayout, QFileDialog, QLineEdit,
+    QSlider, QHBoxLayout, QGridLayout, QFrame, QFileDialog, QLineEdit,
     QSystemTrayIcon, QMenu, QMessageBox
 )
 
@@ -73,7 +83,13 @@ SELECTION_BORDER_WIDTH = 2
 # Drawing Defaults
 DEFAULT_PEN_WIDTH = 2
 DEFAULT_PEN_COLOR = QColor(255, 0, 0)
+COLOR_SWATCHES = (
+    ("#FF4444", "Red"), ("#FF8800", "Orange"), ("#FFFF00", "Yellow"), ("#5FC98A", "Green"),
+    ("#00CCCC", "Cyan"), ("#4488FF", "Blue"), ("#8844FF", "Purple"), ("#FF44AA", "Pink"),
+    ("#FFFFFF", "White"), ("#AAAAAA", "Gray"), ("#555555", "Dark Gray"), ("#000000", "Black"),
+)
 DEFAULT_FONT_SIZE = 16
+MOSAIC_BLOCK_SIZE = 12
 MAX_HISTORY = 20
 
 # Keyboard Shortcuts
@@ -126,21 +142,35 @@ ACTIONBAR_STYLESHEET = f"""
         background-color: {BUTTON_ACTIVE_COLOR};
     }}
     QSlider::groove:horizontal {{
-        border: 1px solid {BORDER_COLOR};
+        border: none;
         height: 6px;
-        background: {BUTTON_BG_COLOR};
+        background: {BORDER_COLOR};
         border-radius: 3px;
     }}
     QSlider::handle:horizontal {{
-        background: {BUTTON_ACTIVE_COLOR};
-        border: 1px solid {BORDER_COLOR};
-        width: 12px;
-        margin: -4px 0;
-        border-radius: 6px;
+        background: #e0e0e0;
+        border: none;
+        width: 10px;
+        margin: -2px 0;
+        border-radius: 5px;
+    }}
+    QSlider::handle:horizontal:hover {{
+        background: white;
     }}
     QSlider {{
-        min-width: 60px;
-        max-width: 60px;
+        background: transparent;
+        border: none;
+        min-width: 90px;
+        max-width: 90px;
+    }}
+    QWidget#penWidthControl {{
+        background-color: {BUTTON_BG_COLOR};
+        border: 1px solid {BORDER_COLOR};
+        border-radius: 3px;
+    }}
+    QWidget#penWidthControl QLabel {{
+        background: transparent;
+        border: none;
     }}
     QLabel {{
         color: white;
@@ -204,6 +234,50 @@ def _color_button_stylesheet(color: QColor) -> str:
     )
 
 
+class ColorSwatchPopup(QFrame):
+    """A small preset-color popup for the annotation toolbar."""
+
+    color_selected = pyqtSignal(QColor)
+
+    def __init__(self, anchor: QWidget):
+        super().__init__(anchor, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setStyleSheet(
+            "ColorSwatchPopup { background: #333; border: 1px solid #555; border-radius: 6px; }"
+        )
+        layout = QGridLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(3)
+        for index, (hex_color, label) in enumerate(COLOR_SWATCHES):
+            button = QPushButton()
+            button.setFixedSize(26, 26)
+            button.setToolTip(label)
+            border = "1px solid #999" if hex_color == "#FFFFFF" else "none"
+            button.setStyleSheet(
+                f"QPushButton {{ background: {hex_color}; border: {border}; border-radius: 13px; }}"
+                "QPushButton:hover { border: 2px solid white; }"
+                "QPushButton:pressed { border: 2px solid #0078d4; }"
+            )
+            button.clicked.connect(lambda _checked=False, color=QColor(hex_color): self._select(color))
+            layout.addWidget(button, index // 4, index % 4)
+        self.adjustSize()
+
+    def show_near(self, anchor: QWidget):
+        position = anchor.mapToGlobal(QPoint(0, anchor.height() + 4))
+        screen = QApplication.screenAt(position) or QApplication.primaryScreen()
+        if screen:
+            bounds = screen.availableGeometry()
+            if position.x() + self.sizeHint().width() > bounds.right():
+                position.setX(bounds.right() - self.sizeHint().width())
+            if position.y() + self.sizeHint().height() > bounds.bottom():
+                position.setY(anchor.mapToGlobal(QPoint(0, -self.sizeHint().height() - 4)).y())
+        self.move(position)
+        self.show()
+
+    def _select(self, color: QColor):
+        self.color_selected.emit(color)
+        self.close()
+
+
 # ============================================================================
 # SVG Icons
 # ============================================================================
@@ -217,6 +291,7 @@ SVG_ICONS = {
     'rectangle': "M 5 7 A 2.25 2.25 0 0 1 7 5 h 10 a 2.25 2.25 0 0 1 2 2 v 10 a 2.25 2.25 0 0 1 -2 2 h -10 a 2.25 2.25 0 0 1 -2 -2 Z",
     'pen': "m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125",
     'line': "M4 20 L20 4",
+    'mosaic': "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
     'text': "M4 7V4h16v3M9 20h6M12 4v16",
 }
 
@@ -361,12 +436,22 @@ def _logical_rect_to_device_pixels(rect: QRect, device_pixel_ratio: float) -> QR
     return QRect(left, top, right - left, bottom - top)
 
 
-def extract_image_text(input_path: Path) -> str:
-    """Extract text from a local image using PaddleOCR."""
-    from paddleocr import PaddleOCR
+_ocr_engine = None
+_ocr_engine_name: Optional[str] = None
 
-    with redirect_stdout(sys.stderr):
-        ocr = PaddleOCR(
+
+def _get_ocr_engine():
+    """Create the selected OCR engine once per process."""
+    global _ocr_engine, _ocr_engine_name
+    if _ocr_engine_name == OCR_ENGINE:
+        return _ocr_engine
+
+    if OCR_ENGINE == "rapidocr":
+        from rapidocr import RapidOCR
+        _ocr_engine = RapidOCR()
+    elif OCR_ENGINE == "paddleocr":
+        from paddleocr import PaddleOCR
+        _ocr_engine = PaddleOCR(
             text_detection_model_name="PP-OCRv6_small_det",
             text_recognition_model_name="PP-OCRv6_small_rec",
             use_doc_orientation_classify=False,
@@ -374,6 +459,20 @@ def extract_image_text(input_path: Path) -> str:
             use_textline_orientation=False,
             enable_mkldnn=sys.platform != "win32",
         )
+    else:
+        raise ValueError(f"Unsupported OCR_ENGINE: {OCR_ENGINE}")
+
+    _ocr_engine_name = OCR_ENGINE
+    return _ocr_engine
+
+
+def extract_image_text(input_path: Path) -> str:
+    """Extract text from a local image with the selected PP-OCRv6 engine."""
+    with redirect_stdout(sys.stderr):
+        ocr = _get_ocr_engine()
+        if OCR_ENGINE == "rapidocr":
+            result = ocr(input_path, use_cls=False)
+            return "\n".join(result.txts)
         result = next(iter(ocr.predict(str(input_path))))
     return "\n".join(result["rec_texts"])
 
@@ -497,16 +596,16 @@ class AppController(QObject):
         self.border_pen = QPen(SELECTION_BORDER_COLOR, SELECTION_BORDER_WIDTH, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap, Qt.PenJoinStyle.MiterJoin)
         self.draw_pen = QPen(DEFAULT_PEN_COLOR, DEFAULT_PEN_WIDTH, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
 
+        # Use QueuedConnection to ensure slots always run in the main Qt thread,
+        # even when signals are emitted from pynput's background thread.
+        self.screenshot_triggered.connect(self._prepare_fullscreen_capture, Qt.ConnectionType.QueuedConnection)
+        self.pin_clipboard_triggered.connect(self._pin_clipboard_image, Qt.ConnectionType.QueuedConnection)
+
         self._setup_about_window()
         self._setup_tray()
         self._setup_hotkey()
         self._setup_single_instance_handler()
         self._setup_screen_change_handler()
-
-        # Use QueuedConnection to ensure slots always run in the main Qt thread,
-        # even when signals are emitted from pynput's background thread.
-        self.screenshot_triggered.connect(self._prepare_fullscreen_capture, Qt.ConnectionType.QueuedConnection)
-        self.pin_clipboard_triggered.connect(self._pin_clipboard_image, Qt.ConnectionType.QueuedConnection)
 
     # Initialization Methods
     def _setup_about_window(self):
@@ -621,12 +720,19 @@ class AppController(QObject):
     # Event Handlers
     def _tray_icon_activated(self, reason):
         """Handle tray icon activation (clicks)."""
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._show_about()
+        elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self._prepare_fullscreen_capture()
 
     def _show_about(self):
-        """Show the about window."""
+        """Show the about window centered on the active screen."""
         if self.about_window:
+            screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+            if screen:
+                geometry = self.about_window.frameGeometry()
+                geometry.moveCenter(screen.availableGeometry().center())
+                self.about_window.move(geometry.topLeft())
             self.about_window.show()
             self.about_window.activateWindow()
             self.about_window.raise_()
@@ -647,6 +753,7 @@ class AppController(QObject):
         if full_screen and not full_screen.isNull():
             self.capture_overlay.new_capture(full_screen)
             self.capture_overlay.show()
+            self.capture_overlay.take_input_focus()
             logger.info(f">>> [{self.capture_overlay.display_name}] OPENED")
         else:
             logger.error("Failed to capture full_screen")
@@ -863,16 +970,16 @@ class AnnotationSession:
 
             content_rect = self.overlay.content_rect
             pen_half_width = pen_width // 2
-            draw_rect = content_rect.adjusted(pen_half_width, pen_half_width, -pen_half_width, -pen_half_width)
 
-            if content_rect and not draw_rect.contains(pos):
-                pos = self.overlay._clamp_pos_to_content(pos, pen_width)
+            if content_rect and not content_rect.contains(pos):
+                pos = self.overlay._clamp_pos_to_content(pos)
                 self.last_point_clamped = True
 
             pixmap_last_point = self.overlay._window_to_pixmap_pos(self.last_point)
             pixmap_pos = self.overlay._window_to_pixmap_pos(pos)
 
             with QPainter(self.overlay.base_pixmap) as painter:
+                painter.setClipRect(self.overlay._content_rect_in_pixmap())
                 painter.setPen(pen)
                 painter.drawLine(pixmap_last_point, pixmap_pos)
 
@@ -885,11 +992,14 @@ class AnnotationSession:
 
             self.last_point = pos
         elif mode == "rectangle":
-            clamped_pos = self.overlay._clamp_pos_to_content(pos, pen_width)
+            clamped_pos = self.overlay._clamp_pos_to_content(pos)
             self.preview_rect = QRect(self.draw_start_point, clamped_pos).normalized()
         elif mode == "line":
-            clamped_pos = self.overlay._clamp_pos_to_content(pos, pen_width)
+            clamped_pos = self.overlay._clamp_pos_to_content(pos)
             self.preview_line = (self.draw_start_point, clamped_pos)
+        elif mode == "mosaic":
+            clamped_pos = self.overlay._clamp_pos_to_content(pos)
+            self.preview_rect = QRect(self.draw_start_point, clamped_pos).normalized()
 
         self.overlay.update()
 
@@ -898,28 +1008,36 @@ class AnnotationSession:
         pen_margin = pen.width() + 1
         dirty_rect: Optional[QRect] = None
 
-        with QPainter(self.overlay.base_pixmap) as painter:
-            painter.setPen(pen)
+        if mode == "mosaic":
+            start = self.overlay._clamp_pos_to_content(self.draw_start_point, False)
+            end = self.overlay._clamp_pos_to_content(end_point, False)
+            dirty_rect = QRect(start, end).normalized()
+            self._apply_mosaic(dirty_rect)
+            self.preview_rect = None
+        else:
+            with QPainter(self.overlay.base_pixmap) as painter:
+                painter.setClipRect(self.overlay._content_rect_in_pixmap())
+                painter.setPen(pen)
 
-            if mode == "rectangle":
-                pen_color = pen.color()
-                painter.setBrush(QColor(pen_color.red(), pen_color.green(), pen_color.blue(), 50))
-                pixmap_start_point = self.overlay._clamp_pos_to_content(self.draw_start_point, pen_width, False)
-                clamped_end_point = self.overlay._clamp_pos_to_content(end_point, pen_width, False)
-                rect = QRect(pixmap_start_point, clamped_end_point).normalized()
-                painter.drawRect(rect)
-                self.preview_rect = None
-                dirty_rect = rect.adjusted(-pen_margin, -pen_margin, pen_margin, pen_margin)
-            elif mode == "line":
-                pixmap_start_point = self.overlay._clamp_pos_to_content(self.draw_start_point, pen_width, False)
-                clamped_end_point = self.overlay._clamp_pos_to_content(end_point, pen_width, False)
-                painter.drawLine(pixmap_start_point, clamped_end_point)
-                self.preview_line = None
-                dirty_rect = QRect(pixmap_start_point, clamped_end_point).normalized().adjusted(
-                    -pen_margin, -pen_margin, pen_margin, pen_margin
-                )
-            elif mode == "pen":
-                dirty_rect = self._stroke_dirty_rect
+                if mode == "rectangle":
+                    pen_color = pen.color()
+                    painter.setBrush(QColor(pen_color.red(), pen_color.green(), pen_color.blue(), 50))
+                    pixmap_start_point = self.overlay._clamp_pos_to_content(self.draw_start_point, False)
+                    clamped_end_point = self.overlay._clamp_pos_to_content(end_point, False)
+                    rect = QRect(pixmap_start_point, clamped_end_point).normalized()
+                    painter.drawRect(rect)
+                    self.preview_rect = None
+                    dirty_rect = rect.adjusted(-pen_margin, -pen_margin, pen_margin, pen_margin)
+                elif mode == "line":
+                    pixmap_start_point = self.overlay._clamp_pos_to_content(self.draw_start_point, False)
+                    clamped_end_point = self.overlay._clamp_pos_to_content(end_point, False)
+                    painter.drawLine(pixmap_start_point, clamped_end_point)
+                    self.preview_line = None
+                    dirty_rect = QRect(pixmap_start_point, clamped_end_point).normalized().adjusted(
+                        -pen_margin, -pen_margin, pen_margin, pen_margin
+                    )
+                elif mode == "pen":
+                    dirty_rect = self._stroke_dirty_rect
 
         self._stroke_dirty_rect = None
         self.overlay._save_annotation_state(dirty_rect)
@@ -927,6 +1045,11 @@ class AnnotationSession:
 
     def paint_preview(self, painter: QPainter, mode: Optional[str], pen: QPen):
         """Paint preview for rectangle/line drawing modes."""
+        content_rect = self.overlay.content_rect
+        if content_rect is None:
+            return
+        painter.save()
+        painter.setClipRect(content_rect)
         painter.setPen(pen)
         if self.preview_rect and mode == "rectangle":
             pen_color = pen.color()
@@ -935,6 +1058,37 @@ class AnnotationSession:
 
         if self.preview_line and mode == "line":
             painter.drawLine(self.preview_line[0], self.preview_line[1])
+        if self.preview_rect and mode == "mosaic":
+            painter.setPen(QPen(QColor("#e0e0e0"), 1, Qt.PenStyle.DashLine))
+            painter.setBrush(QColor(0, 0, 0, 80))
+            painter.drawRect(self.preview_rect)
+        painter.restore()
+
+    def _apply_mosaic(self, rect: QRect):
+        """Pixelate a logical-pixel rectangle in the backing pixmap."""
+        if rect.width() < 2 or rect.height() < 2:
+            return
+
+        pixmap = self.overlay.base_pixmap
+        dpr = pixmap.devicePixelRatio()
+        device_rect = _logical_rect_to_device_pixels(rect, dpr)
+        source = pixmap.toImage().copy(device_rect)
+        block_size = max(1, round(MOSAIC_BLOCK_SIZE * dpr))
+        reduced = source.scaled(
+            max(1, source.width() // block_size),
+            max(1, source.height() // block_size),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        mosaic = reduced.scaled(
+            source.size(),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        mosaic.setDevicePixelRatio(dpr)
+        with QPainter(pixmap) as painter:
+            painter.setClipRect(self.overlay._content_rect_in_pixmap())
+            painter.drawImage(rect, mosaic)
 
     def _text_font(self) -> QFont:
         """Get the font used for text annotations."""
@@ -947,6 +1101,7 @@ class AnnotationSession:
         """Add text annotation at the given position."""
         if self.text_input:
             self.finalize_text()
+            return
 
         self.text_input_pos = pos
         self.text_pen = QPen(pen)
@@ -957,7 +1112,7 @@ class AnnotationSession:
         self.text_input.setFont(font)
 
         brightness = pen.color().lightness()
-        bg_color = "rgba(255, 255, 255, 180)" if brightness < 128 else "rgba(0, 0, 0, 180)"
+        bg_color = "rgba(255, 255, 255, 140)" if brightness < 128 else "rgba(0, 0, 0, 110)"
         text_color = pen.color().name()
 
         self.text_input.setStyleSheet(_text_annotation_stylesheet(bg_color, text_color))
@@ -989,6 +1144,7 @@ class AnnotationSession:
             text_width = QFontMetrics(font).horizontalAdvance(text) + 4
 
             with QPainter(self.overlay.base_pixmap) as painter:
+                painter.setClipRect(self.overlay._content_rect_in_pixmap())
                 painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
                 painter.setFont(font)
                 painter.setPen(self.text_pen)
@@ -1004,6 +1160,7 @@ class AnnotationSession:
             self.overlay.update()
 
         self.remove()
+        self.overlay.actionbar.deactivate_draw_tools()
 
     def cancel_text(self):
         """Discard the in-progress text annotation without drawing it."""
@@ -1039,6 +1196,15 @@ class AnnotationSession:
 class ActionBar(QWidget):
     """Floating toolbar providing annotation mode, controls, and actions."""
 
+    SHORTCUTS = {
+        "undo": QKeySequence("Ctrl+Z"),
+        "redo": QKeySequence("Ctrl+Y"),
+        "copy": QKeySequence("Ctrl+C"),
+        "save": QKeySequence("Ctrl+S"),
+        "pin": QKeySequence("Ctrl+T"),
+        "ocr": QKeySequence("Shift+C"),
+    }
+
     def __init__(self, controller: "AppController"):
         super().__init__()
         self.controller = controller
@@ -1055,6 +1221,7 @@ class ActionBar(QWidget):
         self.font_size = DEFAULT_FONT_SIZE
         self.ocr_thread: Optional[OcrThread] = None
         self.ocr_image_path: Optional[Path] = None
+        self.color_popup: Optional[ColorSwatchPopup] = None
 
         # Create event filter for focus preservation
         self.focus_filter = FocusPreservingEventFilter(self)
@@ -1083,6 +1250,7 @@ class ActionBar(QWidget):
             ("pen", "Pen Tool"),
             ("rectangle", "Rectangle Tool"),
             ("line", "Line Tool"),
+            ("mosaic", "Mosaic Redact Tool"),
             ("text", "Text Tool"),
         ]
 
@@ -1100,43 +1268,57 @@ class ActionBar(QWidget):
 
         # Color picker button
         self.color_btn = self._create_button(tooltip=f"Choose Color ({len(self.button_actions) + 1})", callback=self._choose_color)
+        self.color_btn.setFixedSize(self.tool_buttons[0].sizeHint())
         self._update_color_button(DEFAULT_PEN_COLOR)
         layout.addWidget(self.color_btn)
         self.button_actions.append(lambda: self.color_btn.click())
 
         # Pen width controls
-        self.pen_width_label = QLabel()
-        self.pen_width_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.pen_width_label.setFixedWidth(24)
-        layout.addWidget(self.pen_width_label)
+        self.pen_width_control = QWidget()
+        self.pen_width_control.setObjectName("penWidthControl")
+        pen_width_layout = QHBoxLayout(self.pen_width_control)
+        pen_width_layout.setContentsMargins(12, 0, 4, 0)
+        pen_width_layout.setSpacing(4)
 
         self.pen_width_slider = QSlider(Qt.Orientation.Horizontal)
         self.pen_width_slider.setRange(1, 20)
         self.pen_width_slider.setFixedWidth(60)
         self.pen_width_slider.setSingleStep(1)
+        self.pen_width_slider.setPageStep(1)
+        pen_width_layout.addWidget(self.pen_width_slider)
+
+        self.pen_width_label = QLabel()
+        self.pen_width_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pen_width_label.setFixedWidth(24)
+        pen_width_layout.addWidget(self.pen_width_label)
+
         def on_pen_width_changed(value):
             self.pen_width_label.setNum(value)
             if self.linked_widget is not None:
                 self.controller.draw_pen.setWidth(value)
         self.pen_width_slider.valueChanged.connect(on_pen_width_changed)
         self.pen_width_slider.setValue(DEFAULT_PEN_WIDTH)
-        layout.addWidget(self.pen_width_slider)
+        layout.addWidget(self.pen_width_control)
 
         # Action buttons
         buttons_config = [
-            ('undo', "Undo (Ctrl+Z)", lambda: self.linked_widget.undo_action()),
-            ('redo', "Redo (Ctrl+Y)", lambda: self.linked_widget.redo_action()),
-            ('copy', "Copy to Clipboard (Ctrl+C)", self._copy_to_clipboard),
-            ('save', "Save to File (Ctrl+S)", self._save_to_file),
-            ('pin', "Pin (Ctrl+T)", lambda: self.linked_widget.pin_to_screen()),
+            ('undo', f"Undo ({self.SHORTCUTS['undo'].toString()})", lambda: self.linked_widget.undo_action()),
+            ('redo', f"Redo ({self.SHORTCUTS['redo'].toString()})", lambda: self.linked_widget.redo_action()),
+            ('copy', f"Copy to Clipboard ({self.SHORTCUTS['copy'].toString()})", self._copy_to_clipboard),
+            ('save', f"Save to File ({self.SHORTCUTS['save'].toString()})", self._save_to_file),
+            ('pin', f"Pin ({self.SHORTCUTS['pin'].toString()})", lambda: self.linked_widget.pin_to_screen()),
             ('close', "Close (Esc)", lambda: self.linked_widget.close()),
         ]
 
         self.undo_btn, self.redo_btn, self.copy_btn, self.save_btn, self.pin_btn, self.close_btn = [
             self._create_button(icon, tooltip, callback) for icon, tooltip, callback in buttons_config
         ]
+        self.ocr_btn = self._create_button(
+            tooltip=f"OCR ({self.SHORTCUTS['ocr'].toString()})", callback=self._copy_ocr_text
+        )
+        self.ocr_btn.setText("OCR")
 
-        for btn in [self.undo_btn, self.redo_btn, self.copy_btn, self.save_btn, self.pin_btn, self.close_btn]:
+        for btn in [self.undo_btn, self.redo_btn, self.copy_btn, self.save_btn, self.pin_btn, self.ocr_btn, self.close_btn]:
             layout.addWidget(btn)
 
         # Install event filter on all child widgets to prevent focus stealing
@@ -1217,12 +1399,16 @@ class ActionBar(QWidget):
 
     # Color and Style Methods
     def _choose_color(self):
-        """Open color picker dialog."""
-        pen = self.controller.draw_pen
-        color = QColorDialog.getColor(pen.color(), self.linked_widget, "Choose Pen Color")
-        if color.isValid():
-            pen.setColor(color)
-            self._update_color_button(color)
+        """Show the preset-color popup beside the toolbar button."""
+        if self.color_popup:
+            self.color_popup.close()
+        self.color_popup = ColorSwatchPopup(self.color_btn)
+        self.color_popup.color_selected.connect(self._set_color)
+        self.color_popup.show_near(self.color_btn)
+
+    def _set_color(self, color: QColor):
+        self.controller.draw_pen.setColor(color)
+        self._update_color_button(color)
 
     def _update_color_button(self, color: QColor):
         """Update color button appearance based on selected color."""
@@ -1233,27 +1419,19 @@ class ActionBar(QWidget):
         if not self.isVisible():
             return False
 
-        key = event.key()
-        if (
-            event.modifiers() == Qt.KeyboardModifier.ShiftModifier
-            and key == Qt.Key.Key_C
-        ):
-            self._copy_ocr_text()
+        shortcuts = {
+            self.SHORTCUTS["undo"][0]: self.linked_widget.undo_action,
+            self.SHORTCUTS["redo"][0]: self.linked_widget.redo_action,
+            self.SHORTCUTS["copy"][0]: self._copy_to_clipboard,
+            self.SHORTCUTS["save"][0]: self._save_to_file,
+            self.SHORTCUTS["pin"][0]: self.pin_btn.click,
+            self.SHORTCUTS["ocr"][0]: self._copy_ocr_text,
+        }
+        if callback := shortcuts.get(event.keyCombination()):
+            callback()
             return True
 
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            shortcuts = {
-                Qt.Key.Key_Z: self.linked_widget.undo_action,
-                Qt.Key.Key_Y: self.linked_widget.redo_action,
-                Qt.Key.Key_S: self._save_to_file,
-                Qt.Key.Key_C: self._copy_to_clipboard,
-                Qt.Key.Key_T: self.pin_btn.click,
-            }
-            if key in shortcuts:
-                shortcuts[key]()
-                return True
-            return False
-
+        key = event.key()
         if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
             button_index = key - Qt.Key.Key_1
             if button_index < len(self.button_actions):
@@ -1443,13 +1621,17 @@ class OverlayBase(QWidget):
         offset = self.content_origin_offset
         return QPoint(pos.x() - offset, pos.y() - offset)
 
-    def _clamp_pos_to_content(self, pos: QPoint, pen_width: int, for_window: bool = True) -> QPoint:
-        """Clamp a point to the content bounds, accounting for pen width."""
+    def _content_rect_in_pixmap(self) -> QRect:
+        """Return the content bounds in the backing pixmap's coordinates."""
         content_rect = self.content_rect
-        pen_half_width = pen_width // 2
+        return QRect(self._window_to_pixmap_pos(content_rect.topLeft()), content_rect.size())
+
+    def _clamp_pos_to_content(self, pos: QPoint, for_window: bool = True) -> QPoint:
+        """Clamp an annotation point to the inclusive content bounds."""
+        content_rect = self.content_rect
         clamped_pos = QPoint(
-            int(max(content_rect.left() + 1 + pen_half_width, min(pos.x(), content_rect.right() - 1 - pen_half_width))),
-            int(max(content_rect.top() + 1 + pen_half_width, min(pos.y(), content_rect.bottom() - 1 - pen_half_width)))
+            max(content_rect.left(), min(pos.x(), content_rect.right())),
+            max(content_rect.top(), min(pos.y(), content_rect.bottom()))
         )
         return clamped_pos if for_window else self._window_to_pixmap_pos(clamped_pos)
 
@@ -1787,6 +1969,12 @@ class CaptureOverlay(OverlayBase):
     def __init__(self, controller: "AppController", actionbar: "ActionBar"):
         super().__init__(controller, actionbar)
         self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def take_input_focus(self):
+        """Make a newly shown capture overlay receive keyboard shortcuts."""
+        self.raise_()
+        self.activateWindow()
+        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
     # Initialization Methods
     def _refresh_geometry(self):
@@ -2411,7 +2599,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
 
         # Hotkey info
-        shortcut_label = QLabel("Shortcut: {}".format(GLOBAL_HOTKEY_CAP))
+        shortcut_label = QLabel("Shortcut: {}\nPin clipboard: {}".format(GLOBAL_HOTKEY_CAP, GLOBAL_HOTKEY_PIN))
         shortcut_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         shortcut_label.setStyleSheet("color: #0078d4; font-weight: bold;")
         layout.addWidget(shortcut_label)
