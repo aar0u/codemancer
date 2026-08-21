@@ -18,7 +18,6 @@ gen-jar.bat
 java -jar dist/TailViewer.jar [logfile]
 
 # Run CLI (via wrapper scripts)
-tail.bat [logfile] [--lines N] [--keywords word1,word2]
 tail.sh [logfile] [--lines N] [--keywords word1,word2]
 ```
 
