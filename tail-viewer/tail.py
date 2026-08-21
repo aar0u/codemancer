@@ -9,6 +9,7 @@ Usage:
 """
 import os
 import queue
+from collections import deque
 import re
 import sys
 import threading
@@ -278,18 +279,40 @@ def read_tail_lines(path: str, num_lines: int):
     return lines, file_size
 
 
+def read_marker(path: str, position: int) -> bytes:
+    with open(path, "rb") as f:
+        f.seek(max(0, position - 64))
+        return f.read(min(64, position))
+
+
 def follow(path: str, num_lines: int = 10):
-    lines, file_size = read_tail_lines(path, num_lines)
+    lines, position = read_tail_lines(path, num_lines)
     for line in lines:
         print(highlight(line))
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        f.seek(file_size)
-        while True:
-            line = f.readline()
-            if not line:
-                time.sleep(0.3)
-                continue
-            print(highlight(line))
+    stat = os.stat(path)
+    file_id = stat.st_dev, stat.st_ino
+    marker = read_marker(path, position)
+    while True:
+        try:
+            stat = os.stat(path)
+            rotated = ((stat.st_dev, stat.st_ino) != file_id or stat.st_size < position
+                       or stat.st_size >= position and read_marker(path, position) != marker)
+            if rotated:
+                lines, position = read_tail_lines(path, num_lines)
+                file_id = stat.st_dev, stat.st_ino
+                for line in lines:
+                    print(highlight(line))
+            elif stat.st_size > position:
+                with open(path, "rb") as f:
+                    f.seek(position)
+                    for raw_line in f:
+                        for line in raw_line.decode("utf-8", errors="replace").replace("\0", "").splitlines():
+                            print(highlight(line))
+                    position = f.tell()
+            marker = read_marker(path, position)
+        except OSError:
+            pass
+        time.sleep(0.3)
 
 
 def read_stdin():
@@ -322,7 +345,13 @@ def parse_args(argv):
         if arg.startswith("--lines="):
             num_lines = int(arg.split("=", 1)[1])
             continue
+        if arg.startswith("-"):
+            raise ValueError(f"Unknown option: {arg}")
         path = arg
+    if skip_next:
+        raise ValueError("-n/--lines requires a value")
+    if num_lines <= 0:
+        raise ValueError("lines must be positive")
     return path, num_lines, gui
 
 
@@ -333,6 +362,8 @@ class TailGUI:
         self.stdin_mode = stdin_mode
         self.max_lines = STDIN_GUI_MAX_LINES if stdin_mode else max_lines
         self.last_position = 0
+        self.last_file_id = None
+        self.last_marker = None
         self.timer_id = None
         self.search_matches = []
         self.search_match_idx = -1
@@ -393,7 +424,7 @@ class TailGUI:
         self.search_input.bind("<Shift-Return>", self.find_prev)
         self.search_input.bind("<KeyRelease>", self._on_search_text_changed)
         if stdin_mode:
-            self._stdin_queue = queue.Queue()
+            self._stdin_queue = queue.Queue(maxsize=STDIN_GUI_MAX_LINES)
             threading.Thread(target=self._read_stdin, daemon=True).start()
             self._poll_stdin_queue()
         else:
@@ -441,10 +472,9 @@ class TailGUI:
         if event is not None and event.keysym == "Return":
             return
         self._update_search_matches()
-        if self.search_matches:
-            self._goto_match(0)
 
-    def _update_search_matches(self):
+    def _update_search_matches(self, preserve_current=False):
+        previous_match_idx = self.search_match_idx if preserve_current else -1
         self.log_display.tag_remove("search_hit", "1.0", tk.END)
         self.log_display.tag_remove("search_current", "1.0", tk.END)
         self.search_matches = []
@@ -462,9 +492,12 @@ class TailGUI:
             self.search_matches.append((pos, end))
             self.log_display.tag_add("search_hit", pos, end)
             start = end
-        self.search_status.configure(
-            text=f"{len(self.search_matches)} matches" if self.search_matches else "no matches"
-        )
+        if previous_match_idx >= 0 and self.search_matches:
+            self._goto_match(min(previous_match_idx, len(self.search_matches) - 1))
+        else:
+            self.search_status.configure(
+                text=f"{len(self.search_matches)} matches" if self.search_matches else "no matches"
+            )
 
     def _goto_match(self, idx):
         if not self.search_matches:
@@ -495,6 +528,8 @@ class TailGUI:
             return
         self.log_file_path = file_path
         self.last_position = 0
+        self.last_file_id = None
+        self.last_marker = None
         self.refresh(force_reload=True)
 
     def apply_settings(self, _event=None):
@@ -528,12 +563,19 @@ class TailGUI:
         self.set_lines(lines)
 
     def _append_new_bytes(self):
-        with open(self.log_file_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(self.log_file_path, "rb") as f:
+            f.seek(self.last_position - 1)
+            continues_previous_line = f.read(1) != b"\n"
             f.seek(self.last_position)
-            new_text = f.read()
+            lines = deque(maxlen=self.max_lines)
+            dropped_lines = False
+            for raw_line in f:
+                for line in raw_line.decode("utf-8", errors="replace").replace("\0", "").splitlines():
+                    dropped_lines |= len(lines) == lines.maxlen
+                    lines.append(line)
             self.last_position = f.tell()
-        if new_text:
-            self.append_lines(new_text.splitlines())
+        if lines:
+            self.append_lines(list(lines), continues_previous_line and not dropped_lines)
 
     def update_log_content(self, force_reload=False):
         if self.log_display.tag_ranges("sel"):
@@ -542,12 +584,18 @@ class TailGUI:
             return
         self.root.title("Tail GUI")
         try:
-            file_size = os.path.getsize(self.log_file_path)
-            needs_reload = force_reload or self.last_position == 0 or self.last_position > file_size
+            stat = os.stat(self.log_file_path)
+            file_id = stat.st_dev, stat.st_ino
+            needs_reload = (force_reload or self.last_position == 0 or self.last_position > stat.st_size
+                            or self.last_file_id is not None and self.last_file_id != file_id
+                            or self.last_marker is not None and stat.st_size >= self.last_position
+                            and read_marker(self.log_file_path, self.last_position) != self.last_marker)
             if needs_reload:
                 self._reload_from_scratch()
-            elif self.last_position < file_size:
+            elif self.last_position < stat.st_size:
                 self._append_new_bytes()
+            self.last_file_id = file_id
+            self.last_marker = read_marker(self.log_file_path, self.last_position)
         except OSError as error:
             self.set_lines([f"Error reading file: {error}"])
         finally:
@@ -571,13 +619,27 @@ class TailGUI:
                 self.log_display.delete("1.0", f"{total_lines - self.max_lines + 1}.0")
         self.log_display.see(tk.END)
         self.log_display.configure(state=tk.DISABLED)
-        self._update_search_matches()
+        self._update_search_matches(preserve_current=True)
 
     def set_lines(self, lines):
         self._display_lines(lines, clear=True)
 
-    def append_lines(self, lines):
-        self._display_lines(lines, clear=False)
+    def append_lines(self, lines, continues_previous_line=False):
+        self.log_display.configure(state=tk.NORMAL)
+        if continues_previous_line and lines:
+            line_start = self.log_display.index(f"{tk.END}-2l linestart")
+            previous_line = self.log_display.get(line_start, f"{tk.END}-1c")
+            self.log_display.delete(line_start, tk.END)
+            self.render_line(previous_line + lines[0])
+            lines = lines[1:]
+        for line in lines:
+            self.render_line(line)
+        total_lines = int(self.log_display.index(f"{tk.END}-1c").split(".")[0]) - 1
+        if total_lines > self.max_lines:
+            self.log_display.delete("1.0", f"{total_lines - self.max_lines + 1}.0")
+        self.log_display.see(tk.END)
+        self.log_display.configure(state=tk.DISABLED)
+        self._update_search_matches(preserve_current=True)
 
 
 def run_gui(path, num_lines, stdin_mode=False):
@@ -605,8 +667,8 @@ Options:
 
 
 if __name__ == "__main__":
-    file_path, lines_to_show, gui_mode = parse_args(sys.argv[1:])
     try:
+        file_path, lines_to_show, gui_mode = parse_args(sys.argv[1:])
         if gui_mode:
             run_gui(file_path, lines_to_show, stdin_mode=not file_path and not sys.stdin.isatty())
         # If input is piped, process stdin stream first (e.g. grep ... | tail).
@@ -620,3 +682,6 @@ if __name__ == "__main__":
             print(USAGE)
     except KeyboardInterrupt:
         pass
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        raise SystemExit(2)

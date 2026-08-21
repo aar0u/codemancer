@@ -13,6 +13,9 @@ The dev server runs with Wrangler, usually at `http://127.0.0.1:8787`.
 
 ## Deploy
 
+Authenticate once with Wrangler: `pnpm wrangler login` 
+Or provide `CLOUDFLARE_API_TOKEN` without Wrangler login.
+
 ```bash
 pnpm run deploy
 ```
@@ -32,7 +35,6 @@ HomeTab stores user data in Cloudflare KV:
 Run this periodically to export production KV data:
 
 ```bash
-pnpm wrangler login
 node scripts/kv.mjs export --remote
 ```
 

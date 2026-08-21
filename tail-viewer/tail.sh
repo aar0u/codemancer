@@ -9,17 +9,5 @@ if [[ ! -f "$JAR" ]]; then
   exit 1
 fi
 
-has_cli=false
-for arg in "$@"; do
-  if [[ "$arg" == "--cli" ]]; then
-    has_cli=true
-    break
-  fi
-done
-
-if [[ "$has_cli" == false ]]; then
-  exec java -jar "$JAR" --cli "$@"
-else
-  exec java -jar "$JAR" "$@"
-fi
+exec java -jar "$JAR" "$@"
 
