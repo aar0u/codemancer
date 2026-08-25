@@ -5,7 +5,7 @@ export interface Shortcut {
   icon?: string
 }
 
-export interface Todo {
+export interface Note {
   id: string
   text: string
   completed: boolean
@@ -24,7 +24,7 @@ export interface AuthData {
 
 export interface UserData {
   shortcuts: Shortcut[]
-  todos: Todo[]
+  notes: Note[]
   searchEngines: SearchEngine[]
 }
 
@@ -39,10 +39,10 @@ export const DEFAULT_USER_ID = 'default'
 export const KV_KEYS = {
   auth: (userId: string) => `auth:${userId}`,
   shortcuts: (userId: string) => `shortcuts:${userId}`,
-  todos: (userId: string) => `todos:${userId}`,
+  notes: (userId: string) => `notes:${userId}`,
   searchEngines: (userId: string) => `searchEngines:${userId}`,
   tabs: (userId: string, machineId: string) => `tabs:${userId}:${machineId}`,
   session: (token: string) => `session:${token}`,
   rateLimit: (ip: string, window: number) => `ratelimit:${ip}:${window}`,
-  trash: (userId: string, type: 'shortcuts' | 'todos', id: string) => `trash:${userId}:${type}:${id}`,
+  trash: (userId: string, type: 'shortcuts' | 'notes', id: string) => `trash:${userId}:${type}:${id}`,
 }

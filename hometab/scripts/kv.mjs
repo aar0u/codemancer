@@ -11,7 +11,7 @@ const DEFAULT_USER_ID = "default"
 const KV_KEYS = {
   auth: (userId) => `auth:${userId}`,
   shortcuts: (userId) => `shortcuts:${userId}`,
-  todos: (userId) => `todos:${userId}`,
+  notes: (userId) => `notes:${userId}`,
   searchEngines: (userId) => `searchEngines:${userId}`,
 }
 
@@ -60,23 +60,23 @@ function runWrangler(args, options = {}) {
 
 function parseBookmarksHtml(htmlPath, targetFolder = "Speed Dial") {
   const content = readFileSync(htmlPath, "utf-8")
-  
+
   const folderPattern = new RegExp(
     `<DT><H3[^>]*>${escapeRegex(targetFolder)}</H3>\\s*<DL><p>(.*?)</DL><p>`,
     "s"
   )
   const folderMatch = content.match(folderPattern)
-  
+
   if (!folderMatch) {
     error(`Folder "${targetFolder}" not found in ${htmlPath}`)
   }
-  
+
   const folderContent = folderMatch[1]
   const linkPattern = /<DT><A HREF="([^"]+)"[^>]*>([^<]+)<\/A>/g
   const shortcuts = []
   let match
   let id = Date.now()
-  
+
   while ((match = linkPattern.exec(folderContent)) !== null) {
     shortcuts.push({
       id: String(id++),
@@ -84,7 +84,7 @@ function parseBookmarksHtml(htmlPath, targetFolder = "Speed Dial") {
       url: match[1],
     })
   }
-  
+
   return shortcuts
 }
 
@@ -94,21 +94,21 @@ function escapeRegex(str) {
 
 async function importDefaults(jsonPath, options) {
   const { local, remote } = options
-  
+
   if (!existsSync(jsonPath)) {
     error(`File not found: ${jsonPath}`)
   }
-  
+
   const data = JSON.parse(readFileSync(jsonPath, "utf-8"))
-  
+
   log(`Loading defaults from ${jsonPath}`)
   log(`  shortcuts: ${data.shortcuts?.length || 0}`)
-  log(`  todos: ${data.todos?.length || 0}`)
+  log(`  notes: ${data.notes?.length || 0}`)
   log(`  searchEngines: ${data.searchEngines?.length || 0}`)
-  
+
   const kvData = [
     { key: KV_KEYS.shortcuts(DEFAULT_USER_ID), value: JSON.stringify(data.shortcuts || []) },
-    { key: KV_KEYS.todos(DEFAULT_USER_ID), value: JSON.stringify(data.todos || []) },
+    { key: KV_KEYS.notes(DEFAULT_USER_ID), value: JSON.stringify(data.notes || []) },
     { key: KV_KEYS.searchEngines(DEFAULT_USER_ID), value: JSON.stringify(data.searchEngines || []) },
   ]
   if (data.passwordHash) {
@@ -117,37 +117,37 @@ async function importDefaults(jsonPath, options) {
       value: JSON.stringify({ passwordHash: data.passwordHash }),
     })
   }
-  
+
   const tempDir = getTempDir()
-  
+
   for (const { key, value } of kvData) {
     const tempFile = join(tempDir, `${key.replace(/:/g, "_")}.json`)
     writeFileSync(tempFile, value)
-    
+
     const args = ["kv", "key", "put", "--namespace-id", KV_NAMESPACE_ID, key, "--path", tempFile]
     if (local) args.push("--local")
-    
+
     log(`Writing ${key}...`)
     runWrangler(args)
   }
-  
+
   log(`${local ? "Local" : "Remote"} KV updated!`)
 }
 
 async function exportDefaults(outputPath, options) {
   const { local, remote } = options
-  
+
   if (local && remote) {
     error("Cannot export from both local and remote at the same time")
   }
-  
+
   const source = local ? "local" : "remote"
   log(`Exporting from ${source} KV...`)
-  
+
   const args = ["kv", "key", "get", "--namespace-id", KV_NAMESPACE_ID]
   if (local) args.push("--local")
   if (remote) args.push("--remote")
-  
+
   const getData = (key) => {
     try {
       const result = execFileSync("pnpm", ["wrangler", ...args, key], {
@@ -163,19 +163,19 @@ async function exportDefaults(outputPath, options) {
       return null
     }
   }
-  
+
   const data = {
     passwordHash: "",
     shortcuts: getData(KV_KEYS.shortcuts(DEFAULT_USER_ID)) || [],
-    todos: getData(KV_KEYS.todos(DEFAULT_USER_ID)) || [],
+    notes: getData(KV_KEYS.notes(DEFAULT_USER_ID)) || [],
     searchEngines: getData(KV_KEYS.searchEngines(DEFAULT_USER_ID)) || [],
   }
-  
+
   const authData = getData(KV_KEYS.auth(DEFAULT_USER_ID))
   if (authData?.passwordHash) {
     data.passwordHash = authData.passwordHash
   }
-  
+
   writeFileSync(outputPath, JSON.stringify(data, null, 2))
   log(`Exported to ${outputPath}`)
 }
@@ -183,18 +183,18 @@ async function exportDefaults(outputPath, options) {
 async function parseBookmarks(htmlPath, outputPath, targetFolder) {
   log(`Parsing bookmarks from ${htmlPath}`)
   log(`Target folder: ${targetFolder}`)
-  
+
   const shortcuts = parseBookmarksHtml(htmlPath, targetFolder)
-  
+
   log(`Found ${shortcuts.length} shortcuts`)
-  
+
   const data = {
     passwordHash: "",
-    todos: [],
+    notes: [],
     searchEngines: [],
     shortcuts,
   }
-  
+
   if (outputPath) {
     writeFileSync(outputPath, JSON.stringify(data, null, 2))
     log(`Written to ${outputPath}`)
@@ -233,16 +233,16 @@ Examples:
 
 async function main() {
   const args = process.argv.slice(2)
-  
+
   if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
     printHelp()
     process.exit(0)
   }
-  
+
   const command = args[0]
   const options = { local: false, remote: false }
   let targetFolder = "Speed Dial"
-  
+
   const positionalArgs = []
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--local") options.local = true
@@ -250,7 +250,7 @@ async function main() {
     else if (args[i] === "--folder") targetFolder = args[++i]
     else if (!args[i].startsWith("--")) positionalArgs.push(args[i])
   }
-  
+
   switch (command) {
     case "import": {
       const jsonPath = positionalArgs[0] || "defaults.json"
@@ -260,7 +260,7 @@ async function main() {
       await importDefaults(resolve(jsonPath), options)
       break
     }
-    
+
     case "export": {
       let outputPath = positionalArgs[0]
       if (!outputPath) {
@@ -273,7 +273,7 @@ async function main() {
       await exportDefaults(resolve(outputPath), options)
       break
     }
-    
+
     case "parse": {
       const htmlPath = positionalArgs[0]
       if (!htmlPath) {
@@ -283,7 +283,7 @@ async function main() {
       await parseBookmarks(resolve(htmlPath), resolve(outputPath), targetFolder)
       break
     }
-    
+
     default:
       error(`Unknown command: ${command}`)
   }

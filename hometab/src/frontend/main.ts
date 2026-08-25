@@ -1,4 +1,4 @@
-import { Shortcut, Todo, SearchEngine } from '../types'
+import { Shortcut, Note, SearchEngine } from '../types'
 
 const API_BASE = ''
 
@@ -15,7 +15,7 @@ const ICONS = {
 
 const state = {
   shortcuts: [] as Shortcut[],
-  todos: [] as Todo[],
+  notes: [] as Note[],
   searchEngines: [] as SearchEngine[],
   currentSearchEngine: null as SearchEngine | null,
   editingShortcutId: null as string | null,
@@ -27,7 +27,7 @@ const state = {
 const toastContainer = document.getElementById('toast-container')!
 const dropdownContainer = document.getElementById('dropdown-container')!
 
-type DropdownType = 'shortcut' | 'todo'
+type DropdownType = 'shortcut' | 'note'
 
 type ToastType = 'success' | 'error' | 'info'
 
@@ -65,9 +65,9 @@ function showDropdown(type: DropdownType, id: string, anchorEl: HTMLElement) {
   if (type === 'shortcut') {
     dropdown.appendChild(createDropdownButton('edit-shortcut', ICONS.edit, 'Edit'))
     dropdown.appendChild(createDropdownButton('delete-shortcut', ICONS.delete, 'Delete', true))
-  } else if (type === 'todo') {
-    dropdown.appendChild(createDropdownButton('copy-todo', ICONS.copy, 'Copy'))
-    dropdown.appendChild(createDropdownButton('delete-todo', ICONS.delete, 'Delete', true))
+  } else if (type === 'note') {
+    dropdown.appendChild(createDropdownButton('copy-note', ICONS.copy, 'Copy'))
+    dropdown.appendChild(createDropdownButton('delete-note', ICONS.delete, 'Delete', true))
   }
   
   dropdown.style.position = 'fixed'
@@ -194,6 +194,7 @@ async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Re
     handleUnauthorized()
     throw new Error('Unauthorized')
   }
+  if (!response.ok) throw new Error('Request failed')
   
   return response
 }
@@ -264,12 +265,13 @@ const background = document.getElementById('background') as HTMLElement
 const timeEl = document.getElementById('time')!
 const dateEl = document.getElementById('date')!
 const shortcutsEl = document.getElementById('shortcuts')!
-const todoItems = document.getElementById('todo-items')!
-const todoInput = document.getElementById('todo-input') as HTMLTextAreaElement
-const addTodoBtn = document.getElementById('add-todo-btn')!
-const todoCount = document.getElementById('todo-count')!
-const todoHeader = document.querySelector('.todo-header')!
-const todoContent = document.getElementById('todo-content') as HTMLElement
+const noteItems = document.getElementById('note-items')!
+const noteInput = document.getElementById('note-input') as HTMLTextAreaElement
+const addNoteBtn = document.getElementById('add-note-btn')!
+const noteBackdrop = document.getElementById('note-backdrop')!
+const noteToggle = document.getElementById('note-toggle')!
+const noteToggleCount = document.getElementById('note-toggle-count')!
+const notesPanel = document.querySelector('.notes-panel')!
 
 const shortcutModal = document.getElementById('shortcut-modal')!
 const shortcutForm = document.getElementById('shortcut-form') as HTMLFormElement
@@ -561,60 +563,63 @@ document.addEventListener('click', (e) => {
     return
   }
   
-  if (target.closest('.copy-todo')) {
-    const btn = target.closest('.copy-todo') as HTMLElement
+  if (target.closest('.copy-note')) {
+    const btn = target.closest('.copy-note') as HTMLElement
     const id = btn.dataset.id!
-    const todo = state.todos.find(t => t.id === id)
-    if (todo) {
-      navigator.clipboard.writeText(todo.text)
+    const note = state.notes.find(t => t.id === id)
+    if (note) {
+      navigator.clipboard.writeText(note.text)
       showToast('Copied to clipboard', 'success')
     }
     closeDropdown()
     return
   }
   
-  if (target.closest('.delete-todo')) {
-    const btn = target.closest('.delete-todo') as HTMLElement
+  if (target.closest('.delete-note')) {
+    const btn = target.closest('.delete-note') as HTMLElement
     const id = btn.dataset.id!
-    deleteTodo(id)
+    deleteNote(id)
     closeDropdown()
     return
   }
   
-  if (!target.closest('.shortcut-menu-btn') && !target.closest('.todo-menu-btn') &&
+  if (!target.closest('.shortcut-menu-btn') && !target.closest('.note-menu-btn') &&
       !target.closest('#dropdown-container') && !target.closest('.search-engine-btn') &&
       !target.closest('#search-engine-dropdown') && !target.closest('.shortcut-search-dropdown')) {
     closeDropdown()
   }
 })
 
-function renderTodos() {
-  todoItems.replaceChildren()
+function renderNotes() {
+  noteItems.replaceChildren()
   
-  if (state.todos.length === 0) {
+  if (state.notes.length === 0) {
     const empty = document.createElement('p')
     empty.style.textAlign = 'center'
     empty.style.color = 'rgba(255,255,255,0.5)'
     empty.style.fontSize = '0.875rem'
     empty.style.padding = '1rem'
-    empty.textContent = 'No tasks yet. Add one above!'
-    todoItems.appendChild(empty)
+    empty.textContent = 'No notes yet. Add one above!'
+    noteItems.appendChild(empty)
   } else {
-    state.todos.forEach(todo => {
+    state.notes.forEach(note => {
       const div = document.createElement('div')
-      div.className = 'todo-item'
+      div.className = 'note-item'
 
-      const checkbox = document.createElement('div')
-      checkbox.className = `checkbox ${todo.completed ? 'checked' : ''}`
-      checkbox.dataset.id = todo.id
+      const checkbox = document.createElement('button')
+      checkbox.type = 'button'
+      checkbox.className = `checkbox ${note.completed ? 'checked' : ''}`
+      checkbox.dataset.id = note.id
+      checkbox.setAttribute('aria-label', note.completed ? 'Mark note incomplete' : 'Mark note complete')
+      checkbox.setAttribute('aria-pressed', String(note.completed))
       checkbox.appendChild(createSvgElement(ICONS.checkbox))
 
       const text = document.createElement('span')
-      text.className = `text ${todo.completed ? 'completed' : ''}`
-      text.dataset.id = todo.id
-      text.textContent = todo.text
+      text.className = `text ${note.completed ? 'completed' : ''}`
+      text.dataset.id = note.id
+      text.textContent = note.text
 
-      const normalizedUrl = normalizeUrl(todo.text)
+      const normalizedUrl = normalizeUrl(note.text)
       let linkBtn: HTMLAnchorElement | null = null
       if (normalizedUrl) {
         linkBtn = document.createElement('a')
@@ -627,8 +632,8 @@ function renderTodos() {
       }
 
       const menuBtn = document.createElement('button')
-      menuBtn.className = 'todo-menu-btn'
-      menuBtn.dataset.id = todo.id
+      menuBtn.className = 'note-menu-btn'
+      menuBtn.dataset.id = note.id
       menuBtn.setAttribute('aria-label', 'Menu')
       menuBtn.appendChild(createSvgElement(ICONS.menu))
 
@@ -636,61 +641,63 @@ function renderTodos() {
       div.appendChild(text)
       if (linkBtn) div.appendChild(linkBtn)
       div.appendChild(menuBtn)
-      todoItems.appendChild(div)
+      noteItems.appendChild(div)
     })
   }
   
-  const completedCount = state.todos.filter(t => t.completed).length
-  todoCount.textContent = `${completedCount}/${state.todos.length}`
+  const remainingCount = state.notes.filter(t => !t.completed).length
+  noteToggleCount.textContent = String(remainingCount)
+  noteToggleCount.classList.toggle('hidden', remainingCount === 0)
+  noteToggle.classList.toggle('has-notes', remainingCount > 0)
   
-  setupTodosEventDelegation()
+  setupNotesEventDelegation()
 }
 
-let todosEventsInitialized = false
+let notesEventsInitialized = false
 
-function setupTodosEventDelegation() {
-  if (todosEventsInitialized) return
-  todosEventsInitialized = true
+function setupNotesEventDelegation() {
+  if (notesEventsInitialized) return
+  notesEventsInitialized = true
 
-  todoItems.addEventListener('click', async (e) => {
+  noteItems.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement
     
     const checkbox = target.closest('.checkbox')
     if (checkbox) {
       const id = (checkbox as HTMLElement).dataset.id!
-      const todo = state.todos.find(t => t.id === id)
-      if (todo) await toggleTodo(id, !todo.completed)
+      const note = state.notes.find(t => t.id === id)
+      if (note) await toggleNote(id, !note.completed)
       return
     }
     
-    const menuBtn = target.closest('.todo-menu-btn')
+    const menuBtn = target.closest('.note-menu-btn')
     if (menuBtn) {
       const btn = menuBtn as HTMLElement
       const id = btn.dataset.id!
-      showDropdown('todo', id, btn)
+      showDropdown('note', id, btn)
       return
     }
   })
   
-  todoItems.addEventListener('dblclick', (e) => {
+  noteItems.addEventListener('dblclick', (e) => {
     const target = e.target as HTMLElement
     const textEl = target.closest('.text')
     if (textEl && !textEl.classList.contains('editing')) {
-      startEditTodo((textEl as HTMLElement).dataset.id!)
+      startEditNote((textEl as HTMLElement).dataset.id!)
     }
   })
 }
 
-function startEditTodo(id: string) {
-  const todo = state.todos.find(t => t.id === id)
-  if (!todo) return
+function startEditNote(id: string) {
+  const note = state.notes.find(t => t.id === id)
+  if (!note) return
   
-  const textEl = todoItems.querySelector(`.text[data-id="${id}"]`)
+  const textEl = noteItems.querySelector(`.text[data-id="${id}"]`)
   if (!textEl) return
   
   const textarea = document.createElement('textarea')
-  textarea.className = 'todo-textarea'
-  textarea.value = todo.text
+  textarea.className = 'note-textarea'
+  textarea.value = note.text
   textarea.rows = 1
   
   textEl.classList.add('editing')
@@ -707,10 +714,12 @@ function startEditTodo(id: string) {
   
   const saveEdit = async () => {
     const newText = textarea.value.trim()
-    if (newText && newText !== todo.text) {
-      await updateTodoText(id, newText)
+    if (!newText) {
+      await deleteNote(id)
+    } else if (newText !== note.text) {
+      await updateNoteText(id, newText)
     } else {
-      renderTodos()
+      renderNotes()
     }
   }
   
@@ -722,26 +731,29 @@ function startEditTodo(id: string) {
       textarea.blur()
     }
     if (e.key === 'Escape') {
-      renderTodos()
+      renderNotes()
     }
   })
 }
 
-async function updateTodoText(id: string, text: string) {
+async function updateNoteText(id: string, text: string) {
+  const noteItem = document.querySelector(`.note-item:has(.checkbox[data-id="${id}"])`)
+  noteItem?.classList.add('loading')
+
   try {
-    await fetchWithAuth(`${API_BASE}/api/todos/${id}`, {
+    await fetchWithAuth(`${API_BASE}/api/notes/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ text })
     })
-    const todo = state.todos.find(t => t.id === id)
-    if (todo) {
-      todo.text = text
-      renderTodos()
+    const note = state.notes.find(t => t.id === id)
+    if (note) {
+      note.text = text
+      renderNotes()
     }
   } catch (error) {
-    console.error('Failed to update todo:', error)
-    showToast('Failed to update task', 'error')
-    renderTodos()
+    console.error('Failed to update note:', error)
+    showToast('Failed to update note', 'error')
+    renderNotes()
   }
 }
 
@@ -829,63 +841,65 @@ async function deleteShortcut(id: string) {
   }
 }
 
-async function addTodo() {
-  const text = todoInput.value.trim()
+async function addNote() {
+  const text = noteInput.value.trim()
   if (!text) return
   
-  const newTodo: Todo = { id: Date.now().toString(), text, completed: false }
+  const newNote: Note = { id: Date.now().toString(), text, completed: false }
   
-  const addBtn = document.getElementById('add-todo-btn') as HTMLButtonElement
+  const addBtn = document.getElementById('add-note-btn') as HTMLButtonElement
   addBtn.disabled = true
   
   try {
-    await fetchWithAuth(`${API_BASE}/api/todos`, {
+    await fetchWithAuth(`${API_BASE}/api/notes`, {
       method: 'POST',
-      body: JSON.stringify(newTodo)
+      body: JSON.stringify(newNote)
     })
-    state.todos.push(newTodo)
-    todoInput.value = ''
-    todoInput.style.height = 'auto'
-    renderTodos()
+    state.notes.push(newNote)
+    noteInput.value = ''
+    noteInput.style.height = 'auto'
+    renderNotes()
   } catch (error) {
-    console.error('Failed to add todo:', error)
-    showToast('Failed to add task', 'error')
+    console.error('Failed to add note:', error)
+    showToast('Failed to add note', 'error')
   } finally {
     addBtn.disabled = false
   }
 }
 
-async function toggleTodo(id: string, completed: boolean) {
+async function toggleNote(id: string, completed: boolean) {
   const checkbox = document.querySelector(`.checkbox[data-id="${id}"]`)
   checkbox?.classList.add('loading')
   
   try {
-    await fetchWithAuth(`${API_BASE}/api/todos/${id}`, {
+    await fetchWithAuth(`${API_BASE}/api/notes/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ completed })
     })
-    const todo = state.todos.find(t => t.id === id)
-    if (todo) {
-      todo.completed = completed
-      renderTodos()
+    const note = state.notes.find(t => t.id === id)
+    if (note) {
+      note.completed = completed
+      renderNotes()
     }
   } catch (error) {
-    console.error('Failed to toggle todo:', error)
-    showToast('Failed to update task', 'error')
+    console.error('Failed to toggle note:', error)
+    showToast('Failed to update note', 'error')
     checkbox?.classList.remove('loading')
   }
 }
 
-async function deleteTodo(id: string) {
-  const todoItem = document.querySelector(`.todo-item:has(.checkbox[data-id="${id}"])`)
+async function deleteNote(id: string) {
+  const noteItem = document.querySelector(`.note-item:has(.checkbox[data-id="${id}"])`)
+  noteItem?.classList.add('loading')
   
   try {
-    await fetchWithAuth(`${API_BASE}/api/todos/${id}`, { method: 'DELETE' })
-    state.todos = state.todos.filter(t => t.id !== id)
-    renderTodos()
+    await fetchWithAuth(`${API_BASE}/api/notes/${id}`, { method: 'DELETE' })
+    state.notes = state.notes.filter(t => t.id !== id)
+    renderNotes()
   } catch (error) {
-    console.error('Failed to delete todo:', error)
-    showToast('Failed to delete task', 'error')
+    console.error('Failed to delete note:', error)
+    showToast('Failed to delete note', 'error')
+    renderNotes()
   }
 }
 
@@ -988,16 +1002,16 @@ function loadCachedData(): boolean {
   }
 }
 
-function renderAll(data: { shortcuts?: Shortcut[]; todos?: Todo[]; searchEngines?: SearchEngine[] }) {
+function renderAll(data: { shortcuts?: Shortcut[]; notes?: Note[]; searchEngines?: SearchEngine[] }) {
   state.shortcuts = data.shortcuts || []
-  state.todos = data.todos || []
+  state.notes = data.notes || []
   state.searchEngines = data.searchEngines || []
   
   const savedEngineId = localStorage.getItem('hometab_search_engine')
   state.currentSearchEngine = state.searchEngines.find(e => e.id === savedEngineId) || state.searchEngines[0]
   
   renderShortcuts()
-  renderTodos()
+  renderNotes()
   renderSearchEngines()
 }
 
@@ -1025,9 +1039,7 @@ async function showMainContent() {
 async function loadData() {
   try {
     const res = await fetchWithAuth(`${API_BASE}/api/data`)
-    if (!res.ok) throw new Error('Failed to load data')
-    
-    const data = await res.json() as { shortcuts?: Shortcut[]; todos?: Todo[]; searchEngines?: SearchEngine[] }
+    const data = await res.json() as { shortcuts?: Shortcut[]; notes?: Note[]; searchEngines?: SearchEngine[] }
     localStorage.setItem('hometab_data', JSON.stringify(data))
     renderAll(data)
   } catch (error) {
@@ -1125,21 +1137,33 @@ shortcutForm.addEventListener('submit', (e) => {
 
 shortcutCancel.addEventListener('click', closeShortcutModal)
 
-addTodoBtn.addEventListener('click', addTodo)
-todoInput.addEventListener('keydown', (e) => {
+addNoteBtn.addEventListener('click', addNote)
+noteInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.shiftKey) {
     e.preventDefault()
-    addTodo()
+    addNote()
   }
 })
-todoInput.addEventListener('input', () => {
-  todoInput.style.height = 'auto'
-  todoInput.style.height = Math.min(todoInput.scrollHeight, 128) + 'px'
+noteInput.addEventListener('input', () => {
+  noteInput.style.height = 'auto'
+  noteInput.style.height = Math.min(noteInput.scrollHeight, 128) + 'px'
 })
 
-todoHeader.addEventListener('click', () => {
-  todoContent.classList.toggle('hidden')
+function setNoteOpen(isOpen: boolean) {
+  notesPanel.classList.toggle('hidden', !isOpen)
+  noteBackdrop.classList.toggle('hidden', !isOpen)
+  document.body.classList.toggle('note-open', isOpen)
+  document.querySelectorAll<HTMLElement>('.bg-controls, .clock-section, .search-section, .shortcuts-section')
+    .forEach(element => { element.inert = isOpen })
+  noteToggle.setAttribute('aria-expanded', String(isOpen))
+}
+
+noteToggle.addEventListener('click', () => {
+  setNoteOpen(notesPanel.classList.contains('hidden'))
 })
+
+noteBackdrop.addEventListener('click', () => setNoteOpen(false))
+
 
 const downloadBtn = document.getElementById('download-bg')!
 const fullscreenBtn = document.getElementById('fullscreen-btn')!
@@ -1342,6 +1366,9 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (!shortcutModal.classList.contains('hidden')) {
       closeShortcutModal()
+    } else if (!notesPanel.classList.contains('hidden') && !(e.target as HTMLElement).closest('.editing')) {
+      setNoteOpen(false)
+      noteToggle.focus()
     }
   }
 })

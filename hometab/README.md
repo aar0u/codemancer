@@ -1,6 +1,6 @@
 # HomeTab
 
-A minimal Cloudflare Workers new tab page with shortcuts, todos, password auth, and a tabs sync API.
+A minimal Cloudflare Workers new tab page with shortcuts, notes, password auth, and a tabs sync API.
 
 ## Quick Start
 
@@ -26,7 +26,7 @@ HomeTab stores user data in Cloudflare KV:
 
 - auth data: `auth:default`
 - shortcuts: `shortcuts:default`
-- todos: `todos:default`
+- notes: `notes:default`
 - search engines: `searchEngines:default`
 - tabs data: per-machine KV records
 
@@ -44,7 +44,7 @@ The export writes a timestamped file, for example:
 defaults-2026-04-24T12-30-45.json
 ```
 
-Keep backup files private. They may contain `passwordHash`, shortcuts, todos, and other personal data.
+Keep backup files private. They may contain `passwordHash`, shortcuts, notes, and other personal data.
 
 ### Local Backup
 

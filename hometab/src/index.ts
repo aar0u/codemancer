@@ -3,7 +3,7 @@ import { cors } from 'hono/cors'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import {
   Shortcut,
-  Todo,
+  Note,
   SearchEngine,
   AuthData,
   UserData,
@@ -144,21 +144,21 @@ async function setShortcuts(kv: KVNamespace, userId: string, shortcuts: Shortcut
   await kv.put(KV_KEYS.shortcuts(userId), JSON.stringify(shortcuts))
 }
 
-async function getTodos(kv: KVNamespace, userId: string): Promise<Todo[]> {
-  const data = await kv.get(KV_KEYS.todos(userId))
+async function getNotes(kv: KVNamespace, userId: string): Promise<Note[]> {
+  const data = await kv.get(KV_KEYS.notes(userId))
   return data ? JSON.parse(data) : []
 }
 
-async function setTodos(kv: KVNamespace, userId: string, todos: Todo[]): Promise<void> {
-  await kv.put(KV_KEYS.todos(userId), JSON.stringify(todos))
+async function setNotes(kv: KVNamespace, userId: string, notes: Note[]): Promise<void> {
+  await kv.put(KV_KEYS.notes(userId), JSON.stringify(notes))
 }
 
 async function moveToTrash(
   kv: KVNamespace,
   userId: string,
-  type: 'shortcuts' | 'todos',
+  type: 'shortcuts' | 'notes',
   id: string,
-  data: Shortcut | Todo
+  data: Shortcut | Note
 ): Promise<void> {
   await kv.put(KV_KEYS.trash(userId, type, id), JSON.stringify(data), {
     expirationTtl: 43200,
@@ -179,12 +179,12 @@ async function setSearchEngines(
 }
 
 async function getUserData(kv: KVNamespace, userId: string): Promise<UserData> {
-  const [shortcuts, todos, searchEngines] = await Promise.all([
+  const [shortcuts, notes, searchEngines] = await Promise.all([
     getShortcuts(kv, userId),
-    getTodos(kv, userId),
+    getNotes(kv, userId),
     getSearchEngines(kv, userId),
   ])
-  return { shortcuts, todos, searchEngines }
+  return { shortcuts, notes, searchEngines }
 }
 
 async function getTabsByMachine(
@@ -329,7 +329,7 @@ const authMiddleware: MiddlewareHandler<{ Bindings: Bindings; Variables: Variabl
 }
 
 app.use('/api/shortcuts/*', authMiddleware)
-app.use('/api/todos/*', authMiddleware)
+app.use('/api/notes/*', authMiddleware)
 app.use('/api/data', authMiddleware)
 app.use('/api/tabs', authMiddleware)
 app.use('/tabs', authMiddleware)
@@ -361,8 +361,8 @@ app.post(
       getShortcuts(kv, DEFAULT_USER_ID).then((s) => {
         if (s.length === 0) setShortcuts(kv, DEFAULT_USER_ID, [])
       }),
-      getTodos(kv, DEFAULT_USER_ID).then((t) => {
-        if (t.length === 0) setTodos(kv, DEFAULT_USER_ID, [])
+      getNotes(kv, DEFAULT_USER_ID).then((t) => {
+        if (t.length === 0) setNotes(kv, DEFAULT_USER_ID, [])
       }),
       getSearchEngines(kv, DEFAULT_USER_ID).then((e) => {
         if (e.length === 0) setSearchEngines(kv, DEFAULT_USER_ID, [])
@@ -492,48 +492,48 @@ app.delete('/api/shortcuts/:id', async (c) => {
   return c.json({ success: true })
 })
 
-app.post('/api/todos', async (c) => {
-  const todo: Todo = await c.req.json()
+app.post('/api/notes', async (c) => {
+  const note: Note = await c.req.json()
   const kv = c.env.KV_BINDING
   const userId = c.get('userId')
 
-  const todos = await getTodos(kv, userId)
-  todos.push(todo)
-  await setTodos(kv, userId, todos)
+  const notes = await getNotes(kv, userId)
+  notes.push(note)
+  await setNotes(kv, userId, notes)
 
-  return c.json({ success: true, todo })
+  return c.json({ success: true, note })
 })
 
-app.put('/api/todos/:id', async (c) => {
+app.put('/api/notes/:id', async (c) => {
   const id = c.req.param('id')
-  const updates: Partial<Todo> = await c.req.json()
+  const updates: Partial<Note> = await c.req.json()
   const kv = c.env.KV_BINDING
   const userId = c.get('userId')
 
-  const todos = await getTodos(kv, userId)
-  const index = todos.findIndex((t) => t.id === id)
+  const notes = await getNotes(kv, userId)
+  const index = notes.findIndex((t) => t.id === id)
   if (index === -1) {
-    return c.json({ error: 'Todo not found' }, 404)
+    return c.json({ error: 'Note not found' }, 404)
   }
 
-  todos[index] = { ...todos[index], ...updates }
-  await setTodos(kv, userId, todos)
+  notes[index] = { ...notes[index], ...updates }
+  await setNotes(kv, userId, notes)
 
-  return c.json({ success: true, todo: todos[index] })
+  return c.json({ success: true, note: notes[index] })
 })
 
-app.delete('/api/todos/:id', async (c) => {
+app.delete('/api/notes/:id', async (c) => {
   const id = c.req.param('id')
   const kv = c.env.KV_BINDING
   const userId = c.get('userId')
 
-  const todos = await getTodos(kv, userId)
-  const index = todos.findIndex((t) => t.id === id)
+  const notes = await getNotes(kv, userId)
+  const index = notes.findIndex((t) => t.id === id)
   if (index === -1) return c.json({ success: true })
 
-  const [deleted] = todos.splice(index, 1)
-  await setTodos(kv, userId, todos)
-  await moveToTrash(kv, userId, 'todos', id, deleted)
+  const [deleted] = notes.splice(index, 1)
+  await setNotes(kv, userId, notes)
+  await moveToTrash(kv, userId, 'notes', id, deleted)
 
   return c.json({ success: true })
 })

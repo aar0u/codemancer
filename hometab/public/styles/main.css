@@ -196,7 +196,7 @@ body {
   }
 }
 
-.top-section {
+.clock-section {
   position: relative;
   z-index: 10;
   flex: 1;
@@ -487,7 +487,7 @@ body {
   color: var(--text-secondary);
 }
 
-.middle-section {
+.shortcuts-section {
   position: relative;
   z-index: 10;
   width: 100%;
@@ -573,11 +573,7 @@ body {
   overflow: hidden;
 }
 
-.shortcut-icon img {
-  width: 2rem;
-  height: 2rem;
-}
-
+.shortcut-icon img,
 .shortcut-icon svg {
   width: 2rem;
   height: 2rem;
@@ -617,14 +613,12 @@ body {
   max-width: 100%;
 }
 
-.shortcut-menu-btn {
-  position: absolute;
-  top: 0.125rem;
-  right: 0.125rem;
+.shortcut-menu-btn,
+.note-item .note-menu-btn {
   width: 1.5rem;
   height: 1.5rem;
-  border-radius: var(--radius);
   border: none;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--text-muted);
   display: flex;
@@ -633,24 +627,37 @@ body {
   cursor: pointer;
   opacity: 0;
   transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.shortcut-menu-btn {
+  position: absolute;
+  top: 0.125rem;
+  right: 0.125rem;
   z-index: 10;
 }
 
-.shortcut:hover .shortcut-menu-btn {
+.shortcut:hover .shortcut-menu-btn,
+.shortcut-menu-btn:focus-visible,
+.note-item:hover .note-menu-btn,
+.note-item .note-menu-btn:focus-visible {
   opacity: 1;
 }
 
-.shortcut-menu-btn:hover {
+.shortcut-menu-btn:hover,
+.note-item .note-menu-btn:hover {
   color: white;
   background: var(--glass-bg);
 }
 
-.shortcut-menu-btn:active {
+.shortcut-menu-btn:active,
+.note-item .note-menu-btn:active {
   transform: scale(0.9);
   background: var(--glass-bg-subtle);
 }
 
-.shortcut-menu-btn svg {
+.shortcut-menu-btn svg,
+.note-item .note-menu-btn svg {
   width: 1rem;
   height: 1rem;
 }
@@ -685,17 +692,75 @@ body {
   background: var(--glass-bg-subtle);
 }
 
-.bottom-section {
-  position: relative;
-  z-index: 10;
-  width: 100%;
-  display: flex;
-  justify-content: center;
-  padding-bottom: 1rem;
+.note-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
 }
 
-.todo-list {
+body.note-open {
+  overflow: hidden;
+}
+
+.note-toggle {
+  position: fixed;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.note-toggle:hover {
+  background: var(--glass-bg-active);
+}
+
+.note-toggle:active {
+  transform: translateY(1px);
+}
+
+.note-toggle svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.note-toggle.has-notes svg {
+  display: none;
+}
+
+.note-toggle-count {
+  min-width: 1.25rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: var(--glass-bg-active);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.notes-panel {
+  position: fixed;
+  top: 4rem;
+  right: 0.75rem;
+  z-index: 20;
+  width: min(32rem, calc(100vw - 1.5rem));
+}
+
+.note-list {
   width: 100%;
+  max-height: calc(100dvh - 5rem);
+  display: flex;
+  flex-direction: column;
   max-width: 32rem;
   background: var(--glass-bg);
   backdrop-filter: blur(20px);
@@ -704,50 +769,21 @@ body {
   overflow: hidden;
 }
 
-.todo-header {
-  width: 100%;
+.note-content {
+  min-height: 0;
+  padding: 0.5rem 1rem 1rem;
+  overflow-y: auto;
+}
+
+.note-input-group {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 1rem;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.todo-header:hover {
-  background: var(--glass-bg-subtle);
-}
-
-.todo-header .icon {
-  width: 1.25rem;
-  height: 1.25rem;
-  color: white;
-}
-
-.todo-header span {
-  color: white;
-  font-weight: 500;
-}
-
-.todo-count {
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-}
-
-.todo-content {
-  padding: 1rem;
-  border-top: 1px solid var(--glass-bg);
-}
-
-.todo-input-group {
-  display: flex;
+  flex-shrink: 0;
   gap: 0.5rem;
-  margin-bottom: 1rem;
+  padding: 1rem;
+  border-bottom: 1px solid var(--glass-bg);
 }
 
-.todo-textarea {
+.note-textarea {
   width: 100%;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--glass-border);
@@ -762,29 +798,29 @@ body {
   line-height: 1.4;
 }
 
-.todo-textarea::placeholder {
+.note-textarea::placeholder {
   color: var(--text-muted);
 }
 
-.todo-textarea:focus {
+.note-textarea:focus {
   outline: none;
   border-color: var(--text-muted);
 }
 
-.todo-textarea::-webkit-scrollbar {
+.note-textarea::-webkit-scrollbar {
   width: 4px;
 }
 
-.todo-textarea::-webkit-scrollbar-track {
+.note-textarea::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.todo-textarea::-webkit-scrollbar-thumb {
+.note-textarea::-webkit-scrollbar-thumb {
   background: var(--glass-border);
   border-radius: 2px;
 }
 
-.todo-textarea::-webkit-scrollbar-thumb:hover {
+.note-textarea::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
 }
 
@@ -814,29 +850,36 @@ body {
   opacity: 0.9;
 }
 
-.todo-items {
-  overflow-y: auto;
-}
-
-.todo-item {
+.note-item {
   position: relative;
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.5rem;
+  padding: 0.625rem 0.5rem;
   border-radius: var(--radius);
   transition: background 0.2s;
 }
 
-.todo-item:hover {
+.note-item + .note-item::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 0.25rem;
+  height: 1px;
+  background: var(--glass-border-subtle);
+}
+
+.note-item:hover {
   background: var(--glass-bg-subtle);
 }
 
-.todo-item .checkbox {
+.note-item .checkbox {
   width: 1.25rem;
   height: 1.25rem;
   border-radius: 50%;
   border: 2px solid var(--text-muted);
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -845,40 +888,40 @@ body {
   flex-shrink: 0;
 }
 
-.todo-item .checkbox:hover {
+.note-item .checkbox:hover {
   border-color: white;
 }
 
-.todo-item .checkbox.checked {
+.note-item .checkbox.checked {
   background: white;
   border-color: white;
 }
 
-.todo-item .checkbox svg {
+.note-item .checkbox svg {
   width: 0.75rem;
   height: 0.75rem;
   color: var(--primary);
   opacity: 0;
 }
 
-.todo-item .checkbox.checked svg {
+.note-item .checkbox.checked svg {
   opacity: 1;
 }
 
-.todo-item .checkbox.loading {
+.note-item .checkbox.loading {
   opacity: 0.5;
   pointer-events: none;
   animation: pulse 1s ease-in-out infinite;
 }
 
+.note-item.loading {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 0.5; }
   50% { opacity: 0.3; }
-}
-
-.todo-item.loading {
-  opacity: 0.5;
-  pointer-events: none;
 }
 
 .shortcut.saving a {
@@ -897,7 +940,7 @@ body {
   animation: spin 1s linear infinite;
 }
 
-.todo-item .text {
+.note-item .text {
   flex: 1;
   font-size: 0.875rem;
   color: white;
@@ -907,18 +950,18 @@ body {
   white-space: pre-wrap;
 }
 
-.todo-item .text.completed {
+.note-item .text.completed {
   color: var(--text-muted);
   text-decoration: line-through;
 }
 
-.todo-item a.text {
+.note-item a.text {
   color: var(--text-secondary);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
-.todo-item .link-btn {
+.note-item .link-btn {
   width: 1.5rem;
   height: 1.5rem;
   border: none;
@@ -934,56 +977,22 @@ body {
   flex-shrink: 0;
 }
 
-.todo-item:hover .link-btn {
+.note-item:hover .link-btn,
+.note-item .link-btn:focus-visible {
   opacity: 1;
 }
 
-.todo-item .link-btn:hover {
+.note-item .link-btn:hover {
   color: var(--text-secondary);
 }
 
-.todo-item .link-btn svg {
-  width: 1rem;
-  height: 1rem;
-}
-
-.todo-item .todo-menu-btn {
-  width: 1.5rem;
-  height: 1.5rem;
-  border: none;
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--text-muted);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  opacity: 0;
-  transition: all 0.2s;
-  flex-shrink: 0;
-}
-
-.todo-item:hover .todo-menu-btn {
-  opacity: 1;
-}
-
-.todo-item .todo-menu-btn:hover {
-  color: white;
-  background: var(--glass-bg);
-}
-
-.todo-item .todo-menu-btn:active {
-  transform: scale(0.9);
-  background: var(--glass-bg-subtle);
-}
-
-.todo-item .todo-menu-btn svg {
+.note-item .link-btn svg {
   width: 1rem;
   height: 1rem;
 }
 
 @media (max-width: 767px) {
-  .todo-item .todo-menu-btn {
+  .note-item .note-menu-btn {
     opacity: 1;
   }
 }
