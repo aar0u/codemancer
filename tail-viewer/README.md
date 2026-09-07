@@ -65,10 +65,10 @@ gen-log.bat [logfile]  # Appends random log entries every 1 second
 - Auto-scroll to bottom
 - Update interval: 500ms
 
-### Java CLI Mode
-- Default mode; use `--gui` for the Swing viewer
+### CLI Mode
+- Default mode; use `--gui` for the GUI
 - Uses ANSI color codes for terminal highlighting
-- Same tailing logic as GUI mode
+- During a burst, keeps only the newest 200 lines per update and reports skipped stale lines; oversized batches are printed without color so it can catch up
 
 ## Key Implementation Details
 

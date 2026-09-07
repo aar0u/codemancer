@@ -44,7 +44,24 @@ RESET = "\033[0m"
 
 # Piped stdin has no "last N lines" concept (there's no file to seek back
 # into), so --gui shows everything it receives - capped here to bound memory.
-STDIN_GUI_MAX_LINES = 50_000
+STDIN_GUI_MAX_LINES = 5_000
+
+# CLI output must stay near the live end of a busy log. Keep a small newest-only
+# buffer and emit at most this many lines per update; terminal rendering is slow.
+CLI_PENDING_MAX_LINES = 1_000
+CLI_BATCH_MAX_LINES = 200
+MAX_INCREMENTAL_READ_BYTES = 64 * 1024
+SEARCH_DEBOUNCE_MS = 250
+# Full-buffer search rescans are chunked by wall-clock time (not match count)
+# so a common keyword on a large, tag-heavy buffer can't block the UI in one
+# long call; the inter-chunk delay leaves Tk room to service input.
+SEARCH_SCAN_CHUNK_BUDGET_S = 0.015
+SEARCH_SCAN_CHUNK_DELAY_MS = 10
+# Not just a scan-time bound: once search_hit tags number in the thousands,
+# Tk's Text widget gets dramatically slower at EVERYTHING (scroll measured at
+# ~1000x, not just search) for as long as those tags stay applied - so this
+# has to stay small, not just "large but finite".
+SEARCH_MAX_MATCHES = 200
 
 
 def _hex_to_ansi_truecolor(hex_color: str) -> str:
@@ -285,10 +302,36 @@ def read_marker(path: str, position: int) -> bytes:
         return f.read(min(64, position))
 
 
+def read_appended_lines(path: str, position: int, max_lines: int):
+    """Return bounded appended lines without making a busy tail catch up forever."""
+    file_size = os.path.getsize(path)
+    if file_size - position > MAX_INCREMENTAL_READ_BYTES:
+        lines, position = read_tail_lines(path, max_lines)
+        return lines, position, False, True
+    with open(path, "rb") as f:
+        f.seek(position - 1)
+        continues_previous_line = f.read(1) != b"\n"
+        f.seek(position)
+        lines = deque(maxlen=max_lines)
+        skipped = 0
+        for raw_line in f:
+            for line in raw_line.decode("utf-8", errors="replace").replace("\0", "").splitlines():
+                skipped += len(lines) == lines.maxlen
+                lines.append(line)
+        return list(lines), f.tell(), continues_previous_line and not skipped, skipped
+
+
+def _print_cli_lines(lines, skipped=0):
+    if skipped:
+        print(f"[tail-viewer skipped {skipped} stale lines]")
+    color = not skipped and len(lines) < CLI_BATCH_MAX_LINES
+    for line in lines:
+        print(highlight(line) if color else line)
+
+
 def follow(path: str, num_lines: int = 10):
     lines, position = read_tail_lines(path, num_lines)
-    for line in lines:
-        print(highlight(line))
+    _print_cli_lines(lines)
     stat = os.stat(path)
     file_id = stat.st_dev, stat.st_ino
     marker = read_marker(path, position)
@@ -300,15 +343,10 @@ def follow(path: str, num_lines: int = 10):
             if rotated:
                 lines, position = read_tail_lines(path, num_lines)
                 file_id = stat.st_dev, stat.st_ino
-                for line in lines:
-                    print(highlight(line))
+                _print_cli_lines(lines)
             elif stat.st_size > position:
-                with open(path, "rb") as f:
-                    f.seek(position)
-                    for raw_line in f:
-                        for line in raw_line.decode("utf-8", errors="replace").replace("\0", "").splitlines():
-                            print(highlight(line))
-                    position = f.tell()
+                lines, position, _continues, skipped = read_appended_lines(path, position, CLI_BATCH_MAX_LINES)
+                _print_cli_lines(lines, skipped)
             marker = read_marker(path, position)
         except OSError:
             pass
@@ -316,8 +354,37 @@ def follow(path: str, num_lines: int = 10):
 
 
 def read_stdin():
-    for line in sys.stdin:
-        print(highlight(line))
+    pending = deque(maxlen=CLI_PENDING_MAX_LINES)
+    condition = threading.Condition()
+    closed = False
+    skipped = 0
+
+    def reader():
+        nonlocal closed, skipped
+        for line in sys.stdin:
+            with condition:
+                if len(pending) == pending.maxlen:
+                    skipped += 1
+                pending.append(line.rstrip("\n"))
+                condition.notify()
+        with condition:
+            closed = True
+            condition.notify()
+
+    threading.Thread(target=reader, daemon=True).start()
+    while True:
+        with condition:
+            while not pending and not closed:
+                condition.wait()
+            if not pending and closed:
+                return
+            batch_skipped, skipped = skipped, 0
+            while len(pending) > CLI_BATCH_MAX_LINES:
+                pending.popleft()
+                batch_skipped += 1
+            lines = list(pending)
+            pending.clear()
+        _print_cli_lines(lines, batch_skipped)
 
 
 def parse_args(argv):
@@ -365,7 +432,11 @@ class TailGUI:
         self.last_file_id = None
         self.last_marker = None
         self.timer_id = None
-        self.search_matches = []
+        self.search_timer_id = None
+        self.search_scan_timer_id = None
+        self._search_scan_query = None
+        self._search_scan_on_complete = None
+        self._search_scan_match_count = 0
         self.search_match_idx = -1
 
         root.title("Tail GUI")
@@ -381,9 +452,7 @@ class TailGUI:
         self.line_count_input.insert(0, str(self.max_lines))
         self.line_count_input.pack(side=tk.LEFT, padx=(4, 12))
         if stdin_mode:
-            # Stdin is unseekable and already fully consumed by the reader
-            # thread, so re-reading a file or changing the buffer cap live
-            # doesn't apply here.
+            # Stdin is unseekable, so re-reading or changing the buffer cap doesn't apply.
             self.open_file_button.configure(state=tk.DISABLED)
             self.line_count_input.configure(state=tk.DISABLED)
 
@@ -399,6 +468,8 @@ class TailGUI:
         ttk.Button(controls, text="Next", command=self.find_next).pack(side=tk.LEFT, padx=2)
         self.search_status = ttk.Label(controls, text="")
         self.search_status.pack(side=tk.LEFT, padx=(4, 0))
+        self.resume_button = ttk.Button(controls, text="Resume", command=self.resume_tail, state=tk.DISABLED)
+        self.resume_button.pack(side=tk.LEFT, padx=(12, 0))
 
         text_frame = ttk.Frame(root)
         text_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 0))
@@ -424,7 +495,10 @@ class TailGUI:
         self.search_input.bind("<Shift-Return>", self.find_prev)
         self.search_input.bind("<KeyRelease>", self._on_search_text_changed)
         if stdin_mode:
-            self._stdin_queue = queue.Queue(maxsize=STDIN_GUI_MAX_LINES)
+            self._stdin_queue = queue.Queue(maxsize=CLI_PENDING_MAX_LINES)
+            self._stdin_dropped = 0
+            self._stdin_dropped_lock = threading.Lock()
+            self._stdin_closed = False
             threading.Thread(target=self._read_stdin, daemon=True).start()
             self._poll_stdin_queue()
         else:
@@ -432,19 +506,65 @@ class TailGUI:
 
     def _read_stdin(self):
         """Runs on a background thread; the Tk main loop can't block on stdin."""
+        drop_streak = 0
         for line in sys.stdin:
-            self._stdin_queue.put(line.rstrip("\n"))
-        self._stdin_queue.put(None)  # sentinel: stdin closed
+            try:
+                self._stdin_queue.put_nowait(line.rstrip("\n"))
+                drop_streak = 0
+            except queue.Full:
+                try:
+                    self._stdin_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                else:
+                    with self._stdin_dropped_lock:
+                        self._stdin_dropped += 1
+                self._stdin_queue.put_nowait(line.rstrip("\n"))
+                # A never-blocking loop this tight starves the Tk thread of the
+                # GIL under a heavy flood (worst on Windows); sleep() forces a
+                # real handoff.
+                drop_streak += 1
+                if drop_streak % 500 == 0:
+                    time.sleep(0.001)
+        # Independent of the sentinel below, which only surfaces once drained -
+        # doesn't happen while paused, but "closed" should still show then.
+        self._stdin_closed = True
+        while True:
+            try:
+                self._stdin_queue.put_nowait(None)  # sentinel: stdin closed
+                return
+            except queue.Full:
+                try:
+                    self._stdin_queue.get_nowait()
+                except queue.Empty:
+                    pass
+
+    def _base_title(self):
+        if not self.stdin_mode:
+            return "Tail GUI"
+        return "Tail GUI (stdin closed)" if self._stdin_closed else "Tail GUI (stdin)"
+
+    def _scrolled_away_from_bottom(self):
+        # bbox is exact; a yview() fraction threshold isn't (.see(tk.END) can land short of 1.0).
+        return self.log_display.bbox(f"{tk.END}-1c") is None
 
     def _poll_stdin_queue(self):
-        if self.log_display.tag_ranges("sel"):
-            self.root.title("Tail GUI [PAUSED]")
+        if self.log_display.tag_ranges("sel") or self._scrolled_away_from_bottom():
+            self.resume_button.configure(state=tk.NORMAL)
+            self.root.title(self._base_title())
             self.root.after(200, self._poll_stdin_queue)
             return
+        self.resume_button.configure(state=tk.DISABLED)
         lines = []
         closed = False
+        with self._stdin_dropped_lock:
+            dropped = self._stdin_dropped
+            self._stdin_dropped = 0
         try:
-            while True:
+            while self._stdin_queue.qsize() > CLI_BATCH_MAX_LINES:
+                self._stdin_queue.get_nowait()
+                dropped += 1
+            while len(lines) < CLI_BATCH_MAX_LINES:
                 item = self._stdin_queue.get_nowait()
                 if item is None:
                     closed = True
@@ -453,10 +573,19 @@ class TailGUI:
         except queue.Empty:
             pass
         if lines:
+            # Dropped lines were never shown, so the buffer isn't stale - keep appending, don't wipe it.
             self.append_lines(lines)
-        self.root.title("Tail GUI (stdin closed)" if closed else "Tail GUI (stdin)")
+        title = "Tail GUI (stdin closed)" if closed else "Tail GUI (stdin)"
+        if dropped:
+            title += f" [skipped {dropped}]"
+        self.root.title(title)
         if not closed:
             self.root.after(200, self._poll_stdin_queue)
+
+    def resume_tail(self):
+        """Snap back to the bottom and clear any selection, resuming tail-follow."""
+        self.log_display.tag_remove("sel", "1.0", tk.END)
+        self.log_display.see(tk.END)
 
     def toggle_wrap(self):
         if self.wrap_var.get():
@@ -466,60 +595,164 @@ class TailGUI:
             self.log_display.configure(wrap=tk.NONE)
             self.h_scroll.pack(fill=tk.X, padx=8, pady=(0, 8))
 
+    def _cancel_scheduled_search(self):
+        if self.search_timer_id is not None:
+            self.root.after_cancel(self.search_timer_id)
+            self.search_timer_id = None
+
     def _on_search_text_changed(self, event=None):
-        # Ignore Return here - find_next/find_prev already handle it, and
-        # KeyRelease also fires for Return, which would reset the position.
+        # Ignore Return here - find_next/find_prev already handle it.
         if event is not None and event.keysym == "Return":
             return
+        self._cancel_scheduled_search()
+        self.search_timer_id = self.root.after(SEARCH_DEBOUNCE_MS, self._run_scheduled_search)
+
+    def _run_scheduled_search(self):
+        self.search_timer_id = None
         self._update_search_matches()
 
-    def _update_search_matches(self, preserve_current=False):
-        previous_match_idx = self.search_match_idx if preserve_current else -1
+    def _search_hit_ranges(self):
+        """Live match list read straight from tags - no separate Python list to
+        keep in sync, and edits (inserts/trims) update tags for free."""
+        ranges = self.log_display.tag_ranges("search_hit")
+        return [(str(ranges[i]), str(ranges[i + 1])) for i in range(0, len(ranges), 2)]
+
+    def _find_and_tag_hits(self, start, end, query):
+        while True:
+            pos = self.log_display.search(query, start, end, nocase=True)
+            if not pos:
+                break
+            match_end = f"{pos}+{len(query)}c"
+            self.log_display.tag_add("search_hit", pos, match_end)
+            start = match_end
+
+    def _match_count_label(self, count):
+        return f"{SEARCH_MAX_MATCHES}+" if count >= SEARCH_MAX_MATCHES else str(count)
+
+    def _match_status_text(self, count):
+        return f"{self._match_count_label(count)} matches" if count else "no matches"
+
+    def _add_incremental_search_hits(self, start_index):
+        """Scan only newly-inserted text instead of rescanning the whole
+        buffer - keeps the search responsive while lines keep arriving."""
+        query = self.search_input.get()
+        if not query:
+            return
+        matches = self._search_hit_ranges()
+        if len(matches) < SEARCH_MAX_MATCHES:
+            self._find_and_tag_hits(start_index, tk.END, query)
+            matches = self._search_hit_ranges()
+        if self.search_match_idx >= 0 and not self.log_display.tag_ranges("search_current"):
+            self.search_match_idx = -1
+        if self.search_match_idx >= 0:
+            self.search_status.configure(text=f"{self.search_match_idx + 1}/{self._match_count_label(len(matches))} matches")
+        else:
+            self.search_status.configure(text=self._match_status_text(len(matches)))
+
+    def _cancel_search_scan(self):
+        if self.search_scan_timer_id is not None:
+            self.root.after_cancel(self.search_scan_timer_id)
+            self.search_scan_timer_id = None
+        if self._search_scan_query is not None:
+            self.log_display.mark_unset("_search_scan_pos")
+            self.log_display.mark_unset("_search_scan_end")
+            self._search_scan_query = None
+            self._search_scan_on_complete = None
+
+    def _start_full_search_scan(self, on_complete):
+        """Rebuilds search_hit tags for the whole buffer, a time-budgeted
+        chunk at a time (see SEARCH_SCAN_CHUNK_BUDGET_S) instead of in one
+        blocking call."""
+        self._cancel_search_scan()
         self.log_display.tag_remove("search_hit", "1.0", tk.END)
         self.log_display.tag_remove("search_current", "1.0", tk.END)
-        self.search_matches = []
         self.search_match_idx = -1
         query = self.search_input.get()
         if not query:
             self.search_status.configure(text="")
             return
-        start = "1.0"
-        while True:
-            pos = self.log_display.search(query, start, tk.END, nocase=True)
-            if not pos:
-                break
-            end = f"{pos}+{len(query)}c"
-            self.search_matches.append((pos, end))
-            self.log_display.tag_add("search_hit", pos, end)
-            start = end
-        if previous_match_idx >= 0 and self.search_matches:
-            self._goto_match(min(previous_match_idx, len(self.search_matches) - 1))
+        self.search_status.configure(text="searching…")
+        # Marks (not plain index strings) auto-adjust if lines get trimmed
+        # mid-scan. _search_scan_end snapshots the buffer's current end with
+        # left gravity, so it stays put as new lines keep arriving - unlike
+        # tk.END (re-evaluated live), which would let a busy incoming stream
+        # keep the scan chasing a moving target indefinitely.
+        self.log_display.mark_set("_search_scan_pos", "1.0")
+        self.log_display.mark_set("_search_scan_end", "end-1c")
+        self.log_display.mark_gravity("_search_scan_end", tk.LEFT)
+        self._search_scan_query = query
+        self._search_scan_on_complete = on_complete
+        self._search_scan_match_count = 0
+        self._run_search_scan_chunk()
+
+    def _finish_search_scan(self):
+        self.log_display.mark_unset("_search_scan_pos")
+        self.log_display.mark_unset("_search_scan_end")
+        self._search_scan_query = None
+        self.search_scan_timer_id = None
+        on_complete = self._search_scan_on_complete
+        self._search_scan_on_complete = None
+        on_complete()
+
+    def _run_search_scan_chunk(self):
+        query = self._search_scan_query
+        deadline = time.monotonic() + SEARCH_SCAN_CHUNK_BUDGET_S
+        while time.monotonic() < deadline:
+            if self._search_scan_match_count >= SEARCH_MAX_MATCHES:
+                self._finish_search_scan()
+                return
+            pos = self.log_display.index("_search_scan_pos")
+            end = self.log_display.index("_search_scan_end")
+            found = self.log_display.search(query, pos, end, nocase=True)
+            if not found:
+                self._finish_search_scan()
+                return
+            match_end = f"{found}+{len(query)}c"
+            self.log_display.tag_add("search_hit", found, match_end)
+            self.log_display.mark_set("_search_scan_pos", match_end)
+            self._search_scan_match_count += 1
+        self.search_scan_timer_id = self.root.after(SEARCH_SCAN_CHUNK_DELAY_MS, self._run_search_scan_chunk)
+
+    def _report_match_count(self, preserve_idx=-1):
+        matches = self._search_hit_ranges()
+        if preserve_idx >= 0 and matches:
+            self._goto_match(min(preserve_idx, len(matches) - 1))
         else:
-            self.search_status.configure(
-                text=f"{len(self.search_matches)} matches" if self.search_matches else "no matches"
-            )
+            self.search_status.configure(text=self._match_status_text(len(matches)))
+
+    def _update_search_matches(self, preserve_current=False):
+        previous_match_idx = self.search_match_idx if preserve_current else -1
+        self._start_full_search_scan(lambda: self._report_match_count(previous_match_idx))
 
     def _goto_match(self, idx):
-        if not self.search_matches:
+        matches = self._search_hit_ranges()
+        if not matches:
+            # Reached via find_next/find_prev after a scan that found nothing -
+            # without this, the status would stay stuck on "searching..." forever.
+            self.search_status.configure(text=self._match_status_text(0))
             return
-        idx = idx % len(self.search_matches)
+        idx = idx % len(matches)
         self.search_match_idx = idx
         self.log_display.tag_remove("search_current", "1.0", tk.END)
-        pos, end = self.search_matches[idx]
+        pos, end = matches[idx]
         self.log_display.tag_add("search_current", pos, end)
         self.log_display.see(pos)
-        self.search_status.configure(text=f"{idx + 1}/{len(self.search_matches)} matches")
+        self.search_status.configure(text=f"{idx + 1}/{self._match_count_label(len(matches))} matches")
 
     def find_next(self, _event=None):
-        if not self.search_matches:
-            self._update_search_matches()
-        if self.search_matches:
+        pending_search = self.search_timer_id is not None
+        self._cancel_scheduled_search()
+        if pending_search or self._search_scan_query is not None or not self._search_hit_ranges():
+            self._start_full_search_scan(lambda: self._goto_match(self.search_match_idx + 1))
+        else:
             self._goto_match(self.search_match_idx + 1)
 
     def find_prev(self, _event=None):
-        if not self.search_matches:
-            self._update_search_matches()
-        if self.search_matches:
+        pending_search = self.search_timer_id is not None
+        self._cancel_scheduled_search()
+        if pending_search or self._search_scan_query is not None or not self._search_hit_ranges():
+            self._start_full_search_scan(lambda: self._goto_match(self.search_match_idx - 1))
+        else:
             self._goto_match(self.search_match_idx - 1)
 
     def open_file(self):
@@ -563,26 +796,25 @@ class TailGUI:
         self.set_lines(lines)
 
     def _append_new_bytes(self):
-        with open(self.log_file_path, "rb") as f:
-            f.seek(self.last_position - 1)
-            continues_previous_line = f.read(1) != b"\n"
-            f.seek(self.last_position)
-            lines = deque(maxlen=self.max_lines)
-            dropped_lines = False
-            for raw_line in f:
-                for line in raw_line.decode("utf-8", errors="replace").replace("\0", "").splitlines():
-                    dropped_lines |= len(lines) == lines.maxlen
-                    lines.append(line)
-            self.last_position = f.tell()
-        if lines:
-            self.append_lines(list(lines), continues_previous_line and not dropped_lines)
+        lines, self.last_position, continues_previous_line, dropped = read_appended_lines(
+            self.log_file_path, self.last_position, CLI_BATCH_MAX_LINES
+        )
+        if dropped is True:
+            # Jumped far ahead - prior buffer is now a discontinuous gap, so start over.
+            self.set_lines(lines)
+        elif lines:
+            # A bounded in-window skip; history is still contiguous, so keep appending.
+            self.append_lines(lines, continues_previous_line)
 
     def update_log_content(self, force_reload=False):
-        if self.log_display.tag_ranges("sel"):
-            self.root.title("Tail GUI [PAUSED]")
+        # Selection always pauses; scrolled-away-from-bottom only pauses passive tail-follow.
+        if self.log_display.tag_ranges("sel") or (not force_reload and self._scrolled_away_from_bottom()):
+            self.resume_button.configure(state=tk.NORMAL)
+            self.root.title(self._base_title())
             self.schedule_update()
             return
-        self.root.title("Tail GUI")
+        self.resume_button.configure(state=tk.DISABLED)
+        self.root.title(self._base_title())
         try:
             stat = os.stat(self.log_file_path)
             file_id = stat.st_dev, stat.st_ino
@@ -607,44 +839,64 @@ class TailGUI:
         for start, end, color_key, _priority in compute_spans(raw_line):
             self.log_display.tag_add(color_key, f"{line_index}+{start}c", f"{line_index}+{end}c")
 
-    def _display_lines(self, lines, *, clear):
+    def render_lines(self, lines):
+        # Bulk-insert all lines in one Tcl call, then tag colors as a separate pass.
+        # With wrap=word, each individual insert() forces Tk to re-run line-wrap
+        # layout; N single-line inserts measured ~10x slower than one N-line insert.
+        if not lines:
+            return
+        start_line = int(self.log_display.index(f"{tk.END}-1c").split(".")[0])
+        self.log_display.insert(tk.END, "\n".join(lines) + "\n")
+        for offset, raw_line in enumerate(lines):
+            line_index = f"{start_line + offset}.0"
+            for start, end, color_key, _priority in compute_spans(raw_line):
+                self.log_display.tag_add(color_key, f"{line_index}+{start}c", f"{line_index}+{end}c")
+
+    def set_lines(self, lines):
         self.log_display.configure(state=tk.NORMAL)
-        if clear:
-            self.log_display.delete("1.0", tk.END)
-        for line in lines:
-            self.render_line(line)
-        if not clear:
-            total_lines = int(self.log_display.index(f"{tk.END}-1c").split(".")[0]) - 1
-            if total_lines > self.max_lines:
-                self.log_display.delete("1.0", f"{total_lines - self.max_lines + 1}.0")
+        self.log_display.delete("1.0", tk.END)
+        self.render_lines(lines)
         self.log_display.see(tk.END)
         self.log_display.configure(state=tk.DISABLED)
         self._update_search_matches(preserve_current=True)
 
-    def set_lines(self, lines):
-        self._display_lines(lines, clear=True)
-
     def append_lines(self, lines, continues_previous_line=False):
         self.log_display.configure(state=tk.NORMAL)
+        rendered_count = 0
         if continues_previous_line and lines:
             line_start = self.log_display.index(f"{tk.END}-2l linestart")
             previous_line = self.log_display.get(line_start, f"{tk.END}-1c")
             self.log_display.delete(line_start, tk.END)
             self.render_line(previous_line + lines[0])
+            rendered_count += 1
             lines = lines[1:]
-        for line in lines:
-            self.render_line(line)
+        self.render_lines(lines)
+        rendered_count += len(lines)
         total_lines = int(self.log_display.index(f"{tk.END}-1c").split(".")[0]) - 1
         if total_lines > self.max_lines:
             self.log_display.delete("1.0", f"{total_lines - self.max_lines + 1}.0")
+            total_lines = self.max_lines
         self.log_display.see(tk.END)
         self.log_display.configure(state=tk.DISABLED)
-        self._update_search_matches(preserve_current=True)
+        # Only newly (re-)rendered lines can contain new matches - rescan just that tail.
+        scan_start_line = max(1, total_lines - rendered_count + 1)
+        self._add_incremental_search_hits(f"{scan_start_line}.0")
 
 
 def run_gui(path, num_lines, stdin_mode=False):
     if tk is None:
         raise RuntimeError("tkinter is not available in this environment")
+    if sys.platform == "win32":
+        # Windows' default ~15.6ms timer tick means Tk's after()-based polling
+        # (search scan chunks, stdin drain) can silently double in latency
+        # whenever some other process on the system stops holding a
+        # higher-resolution timer. Request 1ms resolution for this process's
+        # own lifetime so our scheduling doesn't depend on ambient state.
+        try:
+            import ctypes
+            ctypes.windll.winmm.timeBeginPeriod(1)
+        except (AttributeError, OSError):
+            pass
     root = tk.Tk()
     TailGUI(root, path or "sample.log", num_lines, stdin_mode=stdin_mode)
     root.mainloop()

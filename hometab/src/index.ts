@@ -90,7 +90,7 @@ function generateToken(): string {
 
 async function createSession(kv: KVNamespace, userId: string): Promise<string> {
   const token = generateToken()
-  await kv.put(KV_KEYS.session(token), userId, { 
+  await kv.put(KV_KEYS.session(token), userId, {
     expirationTtl: SESSION_TTL,
     metadata: { lastRefresh: Date.now() }
   })
@@ -102,19 +102,19 @@ async function validateAndRefreshSession(
   token: string
 ): Promise<string | null> {
   const data = await kv.getWithMetadata<{ lastRefresh: number }>(KV_KEYS.session(token))
-  
+
   if (!data.value) {
     console.log('[Session] Not found:', token.slice(0, 8) + '...')
     return null
   }
-  
+
   const now = Date.now()
   const lastRefresh = data.metadata?.lastRefresh || 0
   const oneDayMs = 24 * 60 * 60 * 1000
-  
+
   if (now - lastRefresh > oneDayMs) {
     console.log('[Session] Refresh:', data.value, 'lastRefresh:', new Date(lastRefresh).toISOString())
-    await kv.put(KV_KEYS.session(token), data.value, { 
+    await kv.put(KV_KEYS.session(token), data.value, {
       expirationTtl: SESSION_TTL,
       metadata: { lastRefresh: now }
     })
@@ -207,6 +207,9 @@ async function upsertTabsByMachine(
   machineId: string,
   content: string
 ): Promise<TabsRecord> {
+  const existing = await getTabsByMachine(kv, userId, machineId)
+  if (existing?.content === content) return existing
+
   const record: TabsRecord = {
     machineId,
     content,
@@ -267,10 +270,14 @@ function linkifyUrls(input: string): string {
   })
 }
 
+function formatUpdatedAt(value: string): string {
+  return new Date(value).toLocaleString('en-SG', { timeZone: 'Asia/Singapore' })
+}
+
 function renderTabsHtml(record: TabsRecord): string {
   const content = linkifyUrls(escapeHtml(record.content))
   const template = TABS_TEMPLATE.match(/<template id="tabs-template">([\s\S]*?)<\/template>/)?.[1] || ''
-  const header = `${escapeHtml(record.machineId)} <a href="/tabs">< Back</a>`
+  const header = `${escapeHtml(record.machineId)} · ${escapeHtml(formatUpdatedAt(record.updatedAt))} <a href="/tabs">< Back</a>`
   const html = template.replace('{{HEADER}}', header).replace('{{CONTENT}}', content)
   return TABS_TEMPLATE.replace(/<template id="tabs-template">[\s\S]*?<\/template>/, html)
 }
@@ -284,7 +291,7 @@ function renderTabsOverviewHtml(records: TabsRecord[]): string {
       const isTruncated = allLines.length > 5
       const lines = allLines.slice(0, 5).join('\n')
       const summary = linkifyUrls(escapeHtml(lines)) + (isTruncated ? '\n...' : '')
-      const header = `<a href="/tabs?machine_id=${encodeURIComponent(record.machineId)}">${escapeHtml(record.machineId)}</a>`
+      const header = `<a href="/tabs?machine_id=${encodeURIComponent(record.machineId)}">${escapeHtml(record.machineId)}</a> · ${escapeHtml(formatUpdatedAt(record.updatedAt))}`
       return template.replace('{{HEADER}}', header).replace('{{CONTENT}}', summary)
     })
     .join('\n')
@@ -306,7 +313,7 @@ async function verifyAuth(
   }
 
   const userId = await validateAndRefreshSession(c.env.KV_BINDING, token)
-  
+
   if (userId) {
     setCookie(c, AUTH_COOKIE_NAME, token, {
       httpOnly: true,
@@ -355,7 +362,7 @@ app.post(
 
     const passwordHash = await hashPassword(password)
     const kv = c.env.KV_BINDING
-    
+
     await Promise.all([
       setAuthData(kv, DEFAULT_USER_ID, { passwordHash }),
       getShortcuts(kv, DEFAULT_USER_ID).then((s) => {
@@ -453,7 +460,11 @@ app.post('/api/shortcuts', async (c) => {
 })
 
 app.put('/api/shortcuts/reorder', async (c) => {
-  const { shortcuts } = await c.req.json()
+  const { shortcuts } = await c.req.json<{ shortcuts?: unknown }>()
+  if (!Array.isArray(shortcuts)) {
+    return c.json({ error: 'shortcuts must be an array' }, 400)
+  }
+
   await setShortcuts(c.env.KV_BINDING, c.get('userId'), shortcuts)
   return c.json({ success: true })
 })

@@ -4,6 +4,7 @@ import javax.swing.text.*;
 import java.awt.*;
 import java.awt.datatransfer.DataFlavor;
 import java.awt.dnd.*;
+import java.awt.geom.Rectangle2D;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -13,12 +14,19 @@ import java.util.*;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class TailViewer {
     private static final int DEFAULT_MAX_LINES = 10;
-    private static final int STDIN_GUI_MAX_LINES = 50_000;
+    private static final int STDIN_GUI_MAX_LINES = 5_000;
+    private static final int CLI_PENDING_MAX_LINES = 1_000;
+    private static final int CLI_BATCH_MAX_LINES = 200;
+    // Not just a scan-time bound: many highlights measurably slow down scrolling
+    // for as long as they stay applied, so this has to stay small.
+    private static final int SEARCH_MAX_MATCHES = 200;
+    private static final long MAX_INCREMENTAL_READ_BYTES = 64 * 1024;
     private static final int UPDATE_INTERVAL_MS = 500;
     private static final String DEFAULT_LOG_FILE = "sample.log";
     private static final String RESET = "\u001B[0m";
@@ -39,6 +47,9 @@ public class TailViewer {
     private static final Pattern ALERT = Pattern.compile("\\b(failed|failure|exception|timeout|retry|panic|could not)\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern TIMESTAMP = Pattern.compile("\\b(?:\\d{4}[-/]\\d{2}[-/]\\d{2}|\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}|\\d{1,2}[-/ ][A-Za-z]{3,9}[-/ ]\\d{2,4})[ T]\\d{2}:\\d{2}:\\d{2}(?:[.,:]\\d+)?(?:Z|[+-]\\d{2}:?\\d{2})?|\\b\\d{8} \\d{2}:\\d{2}:\\d{2}(?:[.,:]\\d+)?(?:Z|[+-]\\d{2}:?\\d{2})?");
     private static final Pattern STACK_TRACE = Pattern.compile("^\\s*(at |Caused by:|\\.\\.\\. \\d+ (more|common frames omitted)|Traceback \\(most recent call last\\)|File \\\"|panic:|goroutine )");
+    // Identity-compared: lets getHighlights() double as a live, auto-adjusting match list.
+    private static final Highlighter.HighlightPainter SEARCH_HIT_PAINTER = new DefaultHighlighter.DefaultHighlightPainter(Color.decode("#5a5a00"));
+    private static final Highlighter.HighlightPainter SEARCH_CURRENT_PAINTER = new DefaultHighlighter.DefaultHighlightPainter(Color.decode("#c07800"));
 
     static {
         for (Map.Entry<String, Color> entry : COLORS.entrySet()) {
@@ -52,13 +63,11 @@ public class TailViewer {
     private JTextField lineCountInput;
     private JTextField searchInput;
     private JLabel searchStatus;
+    private JButton resumeButton;
     private JCheckBox wrapBox;
     private JScrollPane scrollPane;
     private final List<String> displayLines = new ArrayList<>();
-    private final List<int[]> searchMatches = new ArrayList<>();
-    private final List<Object> searchHighlights = new ArrayList<>();
     private int searchMatchIndex = -1;
-    private int currentSearchNormalIndex = -1;
     private Object currentSearchHighlight;
     private int maxLines;
     private String logFilePath;
@@ -66,9 +75,11 @@ public class TailViewer {
     private Object lastFileKey;
     private byte[] lastMarker;
     private javax.swing.Timer timer;
+    private javax.swing.Timer searchTimer;
     private boolean needsFullRender;
     private boolean stdinMode;
-    private final BlockingQueue<String> stdinLines = new ArrayBlockingQueue<>(STDIN_GUI_MAX_LINES);
+    private final BlockingQueue<String> stdinLines = new ArrayBlockingQueue<>(CLI_PENDING_MAX_LINES);
+    private final AtomicLong stdinSkipped = new AtomicLong();
     private volatile boolean stdinClosed;
 
     private TailViewer(String logFilePath, int maxLines, boolean stdinMode) {
@@ -79,7 +90,10 @@ public class TailViewer {
 
     private record Options(String path, int lines, boolean gui) {}
     private record TailResult(List<String> lines, long position) {}
-    private record LogResult(List<String> lines, long position, boolean truncated, boolean continuesPreviousLine, Object fileKey, byte[] marker) {}
+    private record LogResult(List<String> lines, long position, boolean truncated, boolean continuesPreviousLine, boolean dropped, Object fileKey, byte[] marker) {}
+    private record AppendedLines(List<String> lines, long position, boolean continuesPreviousLine, long skipped, boolean truncatedCatchup) {
+        boolean dropped() { return skipped > 0; }
+    }
     private record Span(int start, int end, String color, int priority) {}
 
     private static Options parseArgs(String[] args) {
@@ -145,7 +159,29 @@ public class TailViewer {
         return rawLine == null ? null : new String(rawLine.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8).replace("\0", "");
     }
 
-    private LogResult readLog(boolean reload) throws IOException {
+    private static AppendedLines readAppendedLines(String path, long position, long length, int maxLines) throws IOException {
+        if (length - position > MAX_INCREMENTAL_READ_BYTES) {
+            // Far behind - a real discontinuity, not a bounded in-window skip.
+            TailResult tail = readTailLines(path, maxLines);
+            return new AppendedLines(tail.lines(), tail.position(), false, 0, true);
+        }
+        try (RandomAccessFile file = new RandomAccessFile(path, "r")) {
+            file.seek(position - 1);
+            boolean continuesPreviousLine = file.read() != '\n';
+            file.seek(position);
+            Deque<String> lines = new ArrayDeque<>();
+            long skipped = 0;
+            while (file.getFilePointer() < length) {
+                String line = readUtf8Line(file);
+                if (line == null) break;
+                if (lines.size() == maxLines) { lines.removeFirst(); skipped++; }
+                lines.addLast(line);
+            }
+            return new AppendedLines(new ArrayList<>(lines), file.getFilePointer(), continuesPreviousLine && skipped == 0, skipped, false);
+        }
+    }
+
+    private LogResult readLog(boolean reload, int maxAppendedLines) throws IOException {
         try (RandomAccessFile file = new RandomAccessFile(logFilePath, "r")) {
             BasicFileAttributes attributes = Files.readAttributes(Path.of(logFilePath), BasicFileAttributes.class);
             long length = file.length();
@@ -154,21 +190,11 @@ public class TailViewer {
             boolean truncated = lastPosition > length || replaced;
             if (reload || lastPosition == 0 || truncated) {
                 TailResult tail = readTailLines(logFilePath, maxLines);
-                return new LogResult(tail.lines(), tail.position(), truncated, false, attributes.fileKey(), readMarker(file, tail.position()));
+                return new LogResult(tail.lines(), tail.position(), truncated, false, false, attributes.fileKey(), readMarker(file, tail.position()));
             }
-            if (lastPosition == length) return new LogResult(List.of(), length, false, false, attributes.fileKey(), lastMarker);
-            file.seek(lastPosition - 1);
-            boolean continuesPreviousLine = file.read() != '\n';
-            file.seek(lastPosition);
-            Deque<String> lines = new ArrayDeque<>();
-            boolean droppedLines = false;
-            while (file.getFilePointer() < length) {
-                String line = readUtf8Line(file);
-                if (line == null) break;
-                if (lines.size() == maxLines) { lines.removeFirst(); droppedLines = true; }
-                lines.addLast(line);
-            }
-            return new LogResult(new ArrayList<>(lines), length, false, continuesPreviousLine && !droppedLines, attributes.fileKey(), readMarker(file, length));
+            if (lastPosition == length) return new LogResult(List.of(), length, false, false, false, attributes.fileKey(), lastMarker);
+            AppendedLines appended = readAppendedLines(logFilePath, lastPosition, length, maxAppendedLines);
+            return new LogResult(appended.lines(), appended.position(), appended.truncatedCatchup(), appended.continuesPreviousLine(), appended.dropped(), attributes.fileKey(), readMarker(file, length));
         }
     }
 
@@ -249,12 +275,51 @@ public class TailViewer {
         return current == null ? out.toString() : out.append(RESET).toString();
     }
 
-    private static void runCli(Options options) throws IOException, InterruptedException {
-        if (options.path() == null) {
+    private static void printCliLines(Collection<String> lines, long skipped) {
+        if (skipped > 0) System.out.println("[tail-viewer skipped " + skipped + " stale lines]");
+        boolean color = skipped == 0 && lines.size() < CLI_BATCH_MAX_LINES;
+        for (String line : lines) System.out.println(color ? highlightAnsi(line) : line);
+    }
+
+    private static void runCliStdin() throws InterruptedException {
+        Deque<String> pending = new ArrayDeque<>();
+        Object lock = new Object();
+        long[] skipped = {0};
+        boolean[] closed = {false};
+        Thread.ofVirtual().start(() -> {
             try (BufferedReader input = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
                 String line;
-                while ((line = input.readLine()) != null) System.out.println(highlightAnsi(line));
+                while ((line = input.readLine()) != null) {
+                    synchronized (lock) {
+                        if (pending.size() == CLI_PENDING_MAX_LINES) { pending.removeFirst(); skipped[0]++; }
+                        pending.addLast(line);
+                        lock.notify();
+                    }
+                }
+            } catch (IOException ignored) {
+            } finally {
+                synchronized (lock) { closed[0] = true; lock.notify(); }
             }
+        });
+        while (true) {
+            List<String> lines;
+            long batchSkipped;
+            synchronized (lock) {
+                while (pending.isEmpty() && !closed[0]) lock.wait();
+                if (pending.isEmpty()) return;
+                batchSkipped = skipped[0];
+                skipped[0] = 0;
+                while (pending.size() > CLI_BATCH_MAX_LINES) { pending.removeFirst(); batchSkipped++; }
+                lines = new ArrayList<>(pending);
+                pending.clear();
+            }
+            printCliLines(lines, batchSkipped);
+        }
+    }
+
+    private static void runCli(Options options) throws IOException, InterruptedException {
+        if (options.path() == null) {
+            runCliStdin();
             return;
         }
         long position = 0;
@@ -267,20 +332,14 @@ public class TailViewer {
                     || (marker != null && size >= position && !Arrays.equals(marker, readMarker(options.path(), position)));
             if (position == 0 || position > size || rotated) {
                 TailResult tail = readTailLines(options.path(), options.lines());
-                for (String line : tail.lines()) System.out.println(highlightAnsi(line));
+                printCliLines(tail.lines(), 0);
                 position = tail.position();
                 fileKey = attributes.fileKey();
                 marker = readMarker(options.path(), position);
             } else if (position < size) {
-                try (RandomAccessFile file = new RandomAccessFile(options.path(), "r")) {
-                    file.seek(position);
-                    while (file.getFilePointer() < size) {
-                        String line = readUtf8Line(file);
-                        if (line == null) break;
-                        System.out.println(highlightAnsi(line));
-                    }
-                }
-                position = size;
+                AppendedLines appended = readAppendedLines(options.path(), position, size, CLI_BATCH_MAX_LINES);
+                printCliLines(appended.lines(), appended.skipped());
+                position = appended.position();
                 marker = readMarker(options.path(), position);
             }
             Thread.sleep(300);
@@ -312,6 +371,7 @@ public class TailViewer {
         JButton previous = new JButton("Prev"); previous.addActionListener(e -> findPrevious()); controls.add(previous);
         JButton next = new JButton("Next"); next.addActionListener(e -> findNext()); controls.add(next);
         searchStatus = new JLabel(); controls.add(searchStatus);
+        resumeButton = new JButton("Resume"); resumeButton.addActionListener(e -> resumeTail()); resumeButton.setEnabled(false); controls.add(resumeButton);
         frame.add(controls, BorderLayout.NORTH);
 
         logDisplay = new JTextPane() {
@@ -322,13 +382,12 @@ public class TailViewer {
         logDisplay.setBackground(Color.decode("#1e1e1e"));
         logDisplay.setForeground(Color.decode("#d4d4d4"));
         logDisplay.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        logDisplay.addCaretListener(e -> frame.setTitle(logDisplay.getSelectionStart() == logDisplay.getSelectionEnd() ? "Tail GUI" : "Tail GUI [PAUSED]"));
         scrollPane = new JScrollPane(logDisplay);
         scrollPane.getViewport().setBackground(logDisplay.getBackground());
         frame.add(scrollPane, BorderLayout.CENTER);
         lineCountInput.addActionListener(e -> applySettings());
         searchInput.addActionListener(e -> findNext());
-        searchInput.getDocument().addDocumentListener(new SimpleDocumentListener() { @Override public void update() { updateSearch(false); } });
+        searchInput.getDocument().addDocumentListener(new SimpleDocumentListener() { @Override public void update() { scheduleSearch(); } });
         installDropTarget();
         if (stdinMode) { open.setEnabled(false); lineCountInput.setEnabled(false); startStdinReader(); }
         frame.setVisible(true);
@@ -356,7 +415,31 @@ public class TailViewer {
     }
 
     private void loadFile(String path) { logFilePath = path; lastPosition = 0; lastFileKey = null; lastMarker = null; updateLogContent(true); }
-    private boolean paused() { return logDisplay.getSelectionStart() != logDisplay.getSelectionEnd(); }
+
+    private boolean hasSelection() { return logDisplay.getSelectionStart() != logDisplay.getSelectionEnd(); }
+
+    // modelToView2D is exact; a scrollbar-fraction threshold was found to land a few pixels short.
+    private boolean scrolledAwayFromBottom() {
+        try {
+            Rectangle2D endRect = logDisplay.modelToView2D(logDisplay.getDocument().getLength());
+            return endRect != null && !logDisplay.getVisibleRect().contains(endRect.getX(), endRect.getY());
+        } catch (BadLocationException e) {
+            return false;
+        }
+    }
+
+    // Selection always pauses; scrolled-away-from-bottom only pauses passive tail-follow.
+    private boolean paused(boolean reload) { return hasSelection() || (!reload && scrolledAwayFromBottom()); }
+
+    private void resumeTail() {
+        // Collapses any selection too, so this alone clears both pause triggers.
+        logDisplay.setCaretPosition(logDisplay.getDocument().getLength());
+    }
+
+    private String baseTitle() {
+        if (!stdinMode) return "Tail GUI";
+        return stdinClosed ? "Tail GUI (stdin closed)" : "Tail GUI (stdin)";
+    }
 
     private void applySettings() {
         try { maxLines = Integer.parseInt(lineCountInput.getText().trim()); if (maxLines <= 0) throw new NumberFormatException(); updateLogContent(true); }
@@ -364,16 +447,19 @@ public class TailViewer {
     }
 
     private void updateLogContent(boolean reload) {
-        if (paused()) return;
+        if (paused(reload)) { resumeButton.setEnabled(true); frame.setTitle(baseTitle()); return; }
+        resumeButton.setEnabled(false);
         if (stdinMode) { pollStdin(); return; }
+        frame.setTitle(baseTitle());
         boolean renderAfterError = needsFullRender;
         try {
             needsFullRender = false;
-            LogResult result = readLog(reload);
+            LogResult result = readLog(reload, CLI_BATCH_MAX_LINES);
             lastPosition = result.position();
             lastFileKey = result.fileKey();
             lastMarker = result.marker();
             if (reload || result.truncated()) {
+                // Discontinuity (rotation or re-seek) - prior buffer doesn't line up, start over.
                 displayLines.clear();
                 displayLines.addAll(result.lines());
                 renderLines();
@@ -381,6 +467,7 @@ public class TailViewer {
                 if (!result.lines().isEmpty()) appendLines(result.lines(), result.continuesPreviousLine());
                 renderLines();
             } else if (!result.lines().isEmpty()) {
+                // A bounded in-window skip (result.dropped()); history is still contiguous, keep appending.
                 appendRenderedLines(result.lines(), result.continuesPreviousLine(), appendLines(result.lines(), result.continuesPreviousLine()));
             }
         } catch (IOException e) {
@@ -404,21 +491,31 @@ public class TailViewer {
         StyledDocument doc = logDisplay.getStyledDocument();
         try {
             int start = 0;
+            // Tracks what actually changed this call, so the search rescan below covers just that.
+            int changedRegionStart = doc.getLength();
             if (continuesPreviousLine && doc.getLength() > 0 && !displayLines.isEmpty()) {
                 Element root = doc.getDefaultRootElement();
                 int lastLine = root.getElementCount() - 2;
                 int lastLineStart = root.getElement(Math.max(0, lastLine)).getStartOffset();
+                changedRegionStart = lastLineStart;
+                removeHighlightsInRange(lastLineStart, doc.getLength());
                 doc.remove(lastLineStart, doc.getLength() - lastLineStart);
                 renderLine(doc, displayLines.get(displayLines.size() - lines.size()));
                 start = 1;
             }
             for (int i = start; i < lines.size(); i++) renderLine(doc, lines.get(i));
+            int changedRegionEnd = doc.getLength();
             if (trimmedLines > 0) {
                 Element root = doc.getDefaultRootElement();
-                doc.remove(0, root.getElement(trimmedLines).getStartOffset());
+                int trimOffset = root.getElement(trimmedLines).getStartOffset();
+                // Swing highlights don't auto-remove on delete like Tk tags - they'd leak, so clear first.
+                removeHighlightsInRange(0, trimOffset);
+                doc.remove(0, trimOffset);
+                changedRegionStart = Math.max(0, changedRegionStart - trimOffset);
+                changedRegionEnd -= trimOffset;
             }
             logDisplay.setCaretPosition(doc.getLength());
-            updateSearch(true);
+            addIncrementalSearchHits(changedRegionStart, changedRegionEnd);
         } catch (BadLocationException ignored) {
             needsFullRender = true;
         }
@@ -447,63 +544,134 @@ public class TailViewer {
         doc.insertString(doc.getLength(), "\n", null);
     }
 
-    private void updateSearch(boolean preserveCurrent) {
-        int previousMatchIndex = preserveCurrent ? searchMatchIndex : -1;
-        Highlighter highlighter = logDisplay.getHighlighter(); highlighter.removeAllHighlights(); currentSearchHighlight = null; currentSearchNormalIndex = -1; searchMatches.clear(); searchHighlights.clear(); searchMatchIndex = -1;
-        String query = searchInput == null ? "" : searchInput.getText();
-        if (query.isEmpty()) { searchStatus.setText(""); return; }
-        String text;
-        try { text = logDisplay.getDocument().getText(0, logDisplay.getDocument().getLength()); }
-        catch (BadLocationException ignored) { return; }
-        String lower = text.toLowerCase(Locale.ROOT), needle = query.toLowerCase(Locale.ROOT);
-        for (int index = lower.indexOf(needle); index >= 0; index = lower.indexOf(needle, index + needle.length())) {
-            searchMatches.add(new int[]{index, index + needle.length()});
-            try { searchHighlights.add(highlighter.addHighlight(index, index + needle.length(), new DefaultHighlighter.DefaultHighlightPainter(Color.decode("#5a5a00")))); }
-            catch (BadLocationException ignored) { searchHighlights.add(null); }
+    private void scheduleSearch() {
+        if (searchTimer == null) {
+            searchTimer = new javax.swing.Timer(250, event -> updateSearch(false));
+            searchTimer.setRepeats(false);
         }
-        if (previousMatchIndex >= 0 && !searchMatches.isEmpty()) goToMatch(Math.min(previousMatchIndex, searchMatches.size() - 1));
-        else searchStatus.setText(searchMatches.isEmpty() ? "no matches" : searchMatches.size() + " matches");
+        searchTimer.restart();
     }
 
-    private void findNext() { if (searchMatches.isEmpty()) updateSearch(false); goToMatch(searchMatchIndex + 1); }
-    private void findPrevious() { if (searchMatches.isEmpty()) updateSearch(false); goToMatch(searchMatchIndex - 1); }
+    private void cancelScheduledSearch() {
+        if (searchTimer != null) searchTimer.stop();
+    }
+
+    // Reads matches straight from the Highlighter - offsets stay correct across edits for free.
+    private List<int[]> liveSearchHits() {
+        List<int[]> hits = new ArrayList<>();
+        for (Highlighter.Highlight h : logDisplay.getHighlighter().getHighlights()) {
+            if (h.getPainter() == SEARCH_HIT_PAINTER) hits.add(new int[]{h.getStartOffset(), h.getEndOffset()});
+        }
+        hits.sort(Comparator.comparingInt(a -> a[0]));
+        return hits;
+    }
+
+    // Swing highlights don't auto-remove on delete like Tk tags do - call before deleting a range.
+    private void removeHighlightsInRange(int start, int end) {
+        if (end <= start) return;
+        Highlighter highlighter = logDisplay.getHighlighter();
+        List<Highlighter.Highlight> toRemove = new ArrayList<>();
+        for (Highlighter.Highlight h : highlighter.getHighlights()) {
+            if ((h.getPainter() == SEARCH_HIT_PAINTER || h.getPainter() == SEARCH_CURRENT_PAINTER)
+                    && h.getStartOffset() >= start && h.getEndOffset() <= end) {
+                toRemove.add(h);
+            }
+        }
+        for (Highlighter.Highlight h : toRemove) {
+            highlighter.removeHighlight(h);
+            if (h.getPainter() == SEARCH_CURRENT_PAINTER) { currentSearchHighlight = null; searchMatchIndex = -1; }
+        }
+    }
+
+    private void tagHitsInRegion(int regionStart, int regionEnd, String query) {
+        if (query.isEmpty() || regionEnd <= regionStart) return;
+        int remaining = SEARCH_MAX_MATCHES - liveSearchHits().size();
+        if (remaining <= 0) return;
+        String text;
+        try { text = logDisplay.getDocument().getText(regionStart, regionEnd - regionStart); }
+        catch (BadLocationException ignored) { return; }
+        String lower = text.toLowerCase(Locale.ROOT), needle = query.toLowerCase(Locale.ROOT);
+        Highlighter highlighter = logDisplay.getHighlighter();
+        for (int index = lower.indexOf(needle); index >= 0 && remaining > 0; index = lower.indexOf(needle, index + needle.length())) {
+            try {
+                highlighter.addHighlight(regionStart + index, regionStart + index + needle.length(), SEARCH_HIT_PAINTER);
+                remaining--;
+            } catch (BadLocationException ignored) { }
+        }
+    }
+
+    private String matchCountLabel(int count) { return count >= SEARCH_MAX_MATCHES ? SEARCH_MAX_MATCHES + "+" : String.valueOf(count); }
+    private String matchStatusText(int count) { return count == 0 ? "no matches" : matchCountLabel(count) + " matches"; }
+
+    /** Only scans the newly-changed region instead of rescanning the whole
+     * buffer, so a busy incoming stream stays responsive with search active. */
+    private void addIncrementalSearchHits(int regionStart, int regionEnd) {
+        String query = searchInput == null ? "" : searchInput.getText();
+        if (query.isEmpty()) return;
+        tagHitsInRegion(regionStart, regionEnd, query);
+        searchStatus.setText(matchStatusText(liveSearchHits().size()));
+    }
+
+    private void updateSearch(boolean preserveCurrent) {
+        int previousMatchIndex = preserveCurrent ? searchMatchIndex : -1;
+        Highlighter highlighter = logDisplay.getHighlighter(); highlighter.removeAllHighlights(); currentSearchHighlight = null; searchMatchIndex = -1;
+        String query = searchInput == null ? "" : searchInput.getText();
+        if (query.isEmpty()) { searchStatus.setText(""); return; }
+        tagHitsInRegion(0, logDisplay.getDocument().getLength(), query);
+        List<int[]> matches = liveSearchHits();
+        if (previousMatchIndex >= 0 && !matches.isEmpty()) goToMatch(Math.min(previousMatchIndex, matches.size() - 1));
+        else searchStatus.setText(matchStatusText(matches.size()));
+    }
+
+    private void findNext() {
+        boolean pending = searchTimer != null && searchTimer.isRunning(); cancelScheduledSearch();
+        if (pending || liveSearchHits().isEmpty()) updateSearch(false);
+        if (!liveSearchHits().isEmpty()) goToMatch(searchMatchIndex + 1);
+    }
+    private void findPrevious() {
+        boolean pending = searchTimer != null && searchTimer.isRunning(); cancelScheduledSearch();
+        if (pending || liveSearchHits().isEmpty()) updateSearch(false);
+        if (!liveSearchHits().isEmpty()) goToMatch(searchMatchIndex - 1);
+    }
     private void goToMatch(int index) {
-        if (searchMatches.isEmpty()) return;
+        List<int[]> matches = liveSearchHits();
+        if (matches.isEmpty()) { searchStatus.setText(matchStatusText(0)); return; }
         Highlighter highlighter = logDisplay.getHighlighter();
         if (currentSearchHighlight != null) highlighter.removeHighlight(currentSearchHighlight);
-        if (currentSearchNormalIndex >= 0) {
-            int[] previous = searchMatches.get(currentSearchNormalIndex);
-            try { searchHighlights.set(currentSearchNormalIndex, highlighter.addHighlight(previous[0], previous[1], new DefaultHighlighter.DefaultHighlightPainter(Color.decode("#5a5a00")))); }
-            catch (BadLocationException ignored) { }
-        }
-        searchMatchIndex = Math.floorMod(index, searchMatches.size()); int[] match = searchMatches.get(searchMatchIndex);
-        Object normalHighlight = searchHighlights.get(searchMatchIndex);
-        if (normalHighlight != null) highlighter.removeHighlight(normalHighlight);
-        currentSearchNormalIndex = searchMatchIndex;
+        searchMatchIndex = Math.floorMod(index, matches.size());
+        int[] match = matches.get(searchMatchIndex);
         try {
-            currentSearchHighlight = highlighter.addHighlight(match[0], match[1], new DefaultHighlighter.DefaultHighlightPainter(Color.decode("#c07800")));
+            currentSearchHighlight = highlighter.addHighlight(match[0], match[1], SEARCH_CURRENT_PAINTER);
             logDisplay.setCaretPosition(match[0]);
             logDisplay.scrollRectToVisible(logDisplay.modelToView2D(match[0]).getBounds());
         } catch (BadLocationException ignored) { }
-        searchStatus.setText((searchMatchIndex + 1) + "/" + searchMatches.size() + " matches");
+        searchStatus.setText((searchMatchIndex + 1) + "/" + matchCountLabel(matches.size()) + " matches");
     }
 
     private void startStdinReader() {
         Thread.ofVirtual().start(() -> {
             try (BufferedReader input = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
                 String line;
-                while ((line = input.readLine()) != null) stdinLines.put(line);
-            } catch (IOException ignored) { } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            } finally { stdinClosed = true; }
+                while ((line = input.readLine()) != null) {
+                    if (!stdinLines.offer(line)) {
+                        stdinLines.poll();
+                        stdinSkipped.incrementAndGet();
+                        stdinLines.offer(line);
+                    }
+                }
+            } catch (IOException ignored) { } finally { stdinClosed = true; }
         });
     }
 
     private void pollStdin() {
+        long skipped = stdinSkipped.getAndSet(0);
+        while (stdinLines.size() > CLI_BATCH_MAX_LINES && stdinLines.poll() != null) skipped++;
         List<String> lines = new ArrayList<>();
-        stdinLines.drainTo(lines);
+        stdinLines.drainTo(lines, CLI_BATCH_MAX_LINES);
+        // Dropped lines were never shown, so the buffer isn't stale - keep appending, don't wipe it.
         if (!lines.isEmpty()) appendRenderedLines(lines, false, appendLines(lines, false));
-        frame.setTitle(stdinClosed ? "Tail GUI (stdin closed)" : "Tail GUI (stdin)");
+        String title = stdinClosed ? "Tail GUI (stdin closed)" : "Tail GUI (stdin)";
+        frame.setTitle(skipped > 0 ? title + " [skipped " + skipped + "]" : title);
     }
 
     private static class NoWrapEditorKit extends StyledEditorKit {

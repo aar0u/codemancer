@@ -1032,7 +1032,7 @@ async function showMainContent() {
   }
   
   loadCachedData()
-  
+
   await Promise.all([loadData(), setDynamicBackground()])
 }
 
@@ -1048,20 +1048,22 @@ async function loadData() {
 }
 
 async function init() {
+  let hasPassword: boolean | undefined
   try {
     const res = await fetch(`${API_BASE}/api/auth/check`, { credentials: 'include' })
     if (res.ok) {
-      const data = await res.json()
-      if ((data as { isValid?: boolean }).isValid) {
+      const data = await res.json() as { hasPassword?: boolean; isValid?: boolean }
+      if (data.isValid) {
         showMainContent()
         return
       }
+      hasPassword = data.hasPassword
     }
   } catch (error) {
     console.error('Auth check failed:', error)
   }
-  
-  const hasPassword = await checkPasswordExists()
+
+  hasPassword ??= await checkPasswordExists()
   
   if (!hasPassword) {
     modalTitle.textContent = 'Welcome'
