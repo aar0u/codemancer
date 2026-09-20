@@ -1,11 +1,13 @@
+#!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["soundcard", "numpy"]
+# dependencies = ["soundcard", "numpy", "raylib"]
 # ///
 """
 audio_source.py — Real-time system-audio visualization source for Campfire.
 
-Captures whatever is currently playing on the system (WASAPI loopback via
-`soundcard`, no microphone involved) and maps it onto SourceSnapshot:
+Captures whatever is currently playing on the system via `soundcard` (WASAPI
+loopback on Windows; on macOS via a BlackHole virtual device instead, see
+README — no microphone involved) and maps it onto SourceSnapshot:
   • RMS energy (asymmetric smoothing: rises fast, falls slow) -> intensity/tier.
   • Bass/mid/treble spectral split (FFT) -> color_weights (3-way column blend).
   • A bass-energy transient ("kick") -> spark_burst + a brief pin to TIER_BLAZE.
@@ -19,6 +21,7 @@ loopback-capable output device is found, constructing AudioSource raises —
 callers (CampfireApp) should catch that and fall back to RandomSource.
 """
 
+import sys
 import threading
 import time
 
@@ -101,10 +104,24 @@ class AudioSource(BaseSource):
 
     # ── audio thread ──────────────────────────────────────────────────────
 
+    def _open_capture_device(self):
+        # macOS has no native loopback device (see README) — BlackHole shows up
+        # as an ordinary input device instead, so no include_loopback here.
+        if sys.platform == "darwin":
+            for m in sc.all_microphones(include_loopback=True):
+                if "blackhole" in m.name.lower():
+                    return m
+            raise RuntimeError(
+                "no BlackHole device found. Install it (brew install blackhole-2ch), "
+                "then in Audio MIDI Setup create a Multi-Output Device combining your "
+                "speakers + BlackHole 2ch and set it as your output"
+            )
+        speaker = sc.default_speaker()
+        return sc.get_microphone(speaker.name, include_loopback=True)
+
     def _run(self) -> None:
         try:
-            speaker = sc.default_speaker()
-            mic = sc.get_microphone(speaker.name, include_loopback=True)
+            mic = self._open_capture_device()
         except Exception as exc:
             self._publish(SourceSnapshot(status_text=f"Audio unavailable: {exc}"))
             return
@@ -207,19 +224,11 @@ def main() -> None:
             "uv run --with soundcard --with numpy audio_source.py"
         )
 
-    import tkinter as tk
     import campfire
 
-    root = tk.Tk()
-    app = campfire.CampfireApp(root, source=AudioSource())
+    app = campfire.CampfireApp(source=AudioSource())
     app.engine.set_colors(AudioSource.preferred_colors)  # bass/mid/treble palette
-
-    def on_close():
-        app.source.stop()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", on_close)
-    root.mainloop()
+    app.run()
 
 
 if __name__ == "__main__":
