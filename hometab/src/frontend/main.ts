@@ -391,6 +391,10 @@ function setupShortcutsEventDelegation() {
     
     const link = target.closest('.shortcut a') as HTMLElement
     if (link) {
+      const opensInNewTab = (e as MouseEvent).ctrlKey || (e as MouseEvent).metaKey ||
+        (e as MouseEvent).shiftKey || (e as MouseEvent).button === 1
+      if (opensInNewTab) return
+
       const shortcut = link.closest('.shortcut')
       const icon = shortcut?.querySelector('.shortcut-icon')
       const img = icon?.querySelector('img')
@@ -1243,8 +1247,14 @@ searchInput.addEventListener('keydown', (e) => {
   const items = document.querySelectorAll('.shortcut-search-item')
   
   if (e.key === 'Enter') {
-    if (state.shortcutSearchIndex >= 0 && items.length > 0) {
-      const selectedItem = items[state.shortcutSearchIndex] as HTMLElement
+    if (items.length > 0) {
+      const effectiveIndex = state.shortcutSearchIndex >= 0 ? state.shortcutSearchIndex : (items.length === 1 ? 0 : -1)
+      if (effectiveIndex < 0) {
+        if (state.searchDebounceTimer) clearTimeout(state.searchDebounceTimer)
+        state.searchDebounceTimer = setTimeout(performSearch, 150)
+        return
+      }
+      const selectedItem = items[effectiveIndex] as HTMLElement
       const shortcutId = selectedItem.dataset.shortcutId
       if (shortcutId) {
         getShortcutLink(shortcutId)?.click()
