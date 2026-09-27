@@ -40,7 +40,7 @@ numpy, evdev) AND the SenseVoice-Small int8 model (~230MB, to
 before testing. Ctrl+C to stop it.
 
 Push-to-talk, no shortcut binding needed:
-  - Keyboard: hold Scroll Lock, speak, release.
+  - Keyboard: hold Right Ctrl, speak, release.
   - Mouse: hold the side button, speak, release.
 Watch its terminal output for lines starting with '[hotkey] watching' to
 confirm both devices were found. If a device wasn't found (wrong name

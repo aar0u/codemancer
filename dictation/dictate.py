@@ -34,8 +34,10 @@ SAMPLE_RATE = 16000
 SILENCE_RMS_THRESHOLD = 0.01  # below this, treat the recording as silence (mic bump, accidental press)
 MIN_SPEECH_DURATION = 0.15  # seconds; shorter is almost certainly a key-click, not real speech
 SOCK_PATH = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "dictate.sock"
+# Must outlast the target app's clipboard read, or the restore clobbers the paste.
+CLIPBOARD_RESTORE_DELAY = float(os.environ.get("DICTATE_CLIPBOARD_RESTORE_DELAY", "0.6"))
 
-KEYBOARD_KEY = os.environ.get("DICTATE_KEYBOARD_KEY", "KEY_RIGHTALT")
+KEYBOARD_KEY = os.environ.get("DICTATE_KEYBOARD_KEY", "KEY_RIGHTCTRL")
 MOUSE_BUTTON = os.environ.get("DICTATE_MOUSE_BUTTON", "BTN_EXTRA")
 KEYBOARD_DEVICE = os.environ.get("DICTATE_KEYBOARD_DEVICE")
 MOUSE_DEVICE = os.environ.get("DICTATE_MOUSE_DEVICE")
@@ -56,43 +58,59 @@ def _timed_run(label: str, *args, **kwargs) -> subprocess.CompletedProcess:
     return result
 
 
-_TEXT_MIME_TYPES = {"text/plain", "text/plain;charset=utf-8", "UTF8_STRING", "STRING", "TEXT"}
+def _wl_copy(data: bytes, *, primary: bool, mime: str | None = None) -> subprocess.CompletedProcess:
+    args = ["wl-copy"]
+    if primary:
+        args.append("--primary")
+    if mime:
+        args += ["--type", mime]
+    # wl-copy stays running in the background to serve the selection; piping
+    # its stdout/stderr makes subprocess.run() hang waiting for a pipe EOF
+    # that only comes when that background process exits. -> /dev/null.
+    return _timed_run(
+        " ".join(args), args, input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+    )
 
 
-def _warn_if_clipboard_has_non_text() -> None:
-    """We only back up/restore the clipboard as plain text, so anything
-    else there (an image, rich text) gets clobbered — just warn, don't
-    block, since fixing this properly means preserving every MIME type."""
-    result = subprocess.run(["wl-paste", "--list-types"], capture_output=True, check=False)
-    types = {t.strip() for t in result.stdout.decode(errors="replace").splitlines() if t.strip()}
-    if types and not types.issubset(_TEXT_MIME_TYPES):
-        notify("⚠️ 剪贴板里的非文本内容可能会被覆盖丢失")
-        log(f"[clipboard] non-text content detected before paste: {types}")
+def _wl_paste(*, primary: bool, mime: str | None = None) -> bytes | None:
+    args = ["wl-paste"]
+    if primary:
+        args.append("--primary")
+    if mime:
+        args += ["--type", mime]
+    args.append("-n")
+    result = _timed_run(" ".join(args), args, capture_output=True, check=False)
+    return result.stdout if result.returncode == 0 else None
+
+
+def _backup_selection(*, primary: bool) -> tuple[bytes, str] | None:
+    """Snapshot a selection as whatever MIME type it actually holds (not
+    just text/plain), so restoring afterward doesn't clobber e.g. a copied
+    image with an empty string."""
+    args = ["wl-paste", "--list-types"]
+    if primary:
+        args.insert(1, "--primary")
+    result = subprocess.run(args, capture_output=True, check=False)
+    types = [t.strip() for t in result.stdout.decode(errors="replace").splitlines() if t.strip()]
+    if not types:
+        return None
+    mime = types[0]
+    data = _wl_paste(primary=primary, mime=mime)
+    return (data, mime) if data is not None else None
 
 
 def type_text(text: str) -> None:
-    """Paste via clipboard + Shift+Insert (not Ctrl+V — see README)."""
-    _warn_if_clipboard_has_non_text()
+    """Paste via clipboard + Shift+Insert (not Ctrl+V — see README).
 
-    old_clip_result = _timed_run(
-        "wl-paste (read old clipboard)", ["wl-paste", "-n"], capture_output=True, check=False
-    )
-    # A failed capture (e.g. clipboard has no text/plain representation) means
-    # there's nothing valid to restore — restoring anyway would overwrite
-    # whatever's there with an empty string. Skip the restore step below.
-    old_clip = old_clip_result.stdout if old_clip_result.returncode == 0 else None
+    Sets both CLIPBOARD and PRIMARY selection: some terminals (WezTerm)
+    bind Shift+Insert to PRIMARY (the mouse-selection buffer) rather than
+    CLIPBOARD, a separate buffer wl-copy doesn't touch by default.
+    """
+    old_clip = _backup_selection(primary=False)
+    old_primary = _backup_selection(primary=True)
 
-    # wl-copy stays running in the background to serve the clipboard; piping
-    # its stdout/stderr makes subprocess.run() hang waiting for a pipe EOF
-    # that only comes when that background process exits. -> /dev/null.
-    copy = _timed_run(
-        "wl-copy (write new text)",
-        ["wl-copy"],
-        input=text.encode(),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    copy = _wl_copy(text.encode(), primary=False)
+    _wl_copy(text.encode(), primary=True)
     if copy.returncode != 0:
         log(f"[wl-copy] exited {copy.returncode}")
         return
@@ -110,11 +128,12 @@ def type_text(text: str) -> None:
     else:
         log("[type] pasted via ydotool (Shift+Insert)")
 
-    if old_clip is not None:
-        time.sleep(0.3)
-        _timed_run(
-            "wl-copy (restore old clipboard)", ["wl-copy"], input=old_clip, check=False
-        )
+    if old_clip is not None or old_primary is not None:
+        time.sleep(CLIPBOARD_RESTORE_DELAY)
+        if old_clip is not None:
+            _wl_copy(old_clip[0], primary=False, mime=old_clip[1])
+        if old_primary is not None:
+            _wl_copy(old_primary[0], primary=True, mime=old_primary[1])
 
 
 def ensure_model() -> None:
@@ -394,4 +413,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

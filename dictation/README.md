@@ -1,7 +1,7 @@
 # Dictation (SenseVoice-Small + sherpa-onnx)
 
 本地离线的 Push-to-Talk 语音输入，适用于 Linux (CachyOS + KDE Plasma / Wayland)。
-按住键盘按键（默认 Keychron C1 麦克风键 / `KEY_RIGHTALT`）或鼠标侧键（`BTN_EXTRA`）说话，松开即打字上屏。
+按住键盘按键（默认 `KEY_RIGHTCTRL`，即右 Ctrl）或鼠标侧键（`BTN_EXTRA`）说话，松开即打字上屏。
 
 ## 架构
 
@@ -24,16 +24,20 @@ bash uninstall.sh
 
 ## 按键与设备配置
 
-默认监听所有支持 `KEY_RIGHTALT`（键盘）和 `BTN_EXTRA`（鼠标侧键）的物理设备。如果需要指定设备或修改按键，跑之前设环境变量就行（自定义按键码可用 `./sniff_key.py` 探测）：
+默认监听所有支持 `KEY_RIGHTCTRL`（键盘）和 `BTN_EXTRA`（鼠标侧键）的物理设备。如果需要指定设备或修改按键，跑之前设环境变量就行（自定义按键码可用 `./sniff_key.py` 探测）：
 
 ```bash
-DICTATE_KEYBOARD_KEY=KEY_RIGHTALT DICTATE_MOUSE_BUTTON=BTN_EXTRA ./dictate.py
+DICTATE_KEYBOARD_KEY=KEY_CAPSLOCK DICTATE_MOUSE_BUTTON=BTN_EXTRA ./dictate.py
 
 # 限制仅监听特定物理路径（默认留空自动监听全部匹配设备）
 DICTATE_KEYBOARD_DEVICE=/dev/input/by-id/xxx-event-kbd ./dictate.py
 ```
 
+选键要避开任何应用/DE 会响应"单独按下再松开"这个动作的键：`dictate.py` 监听设备是非独占的（不做 `grab()`），按键会同时正常传给桌面环境。`KEY_RIGHTALT`（以及左 Alt）尤其不能用——GTK/Firefox 等工具包把"单独按下再松开 Alt、中间不按其他键"固定解释为"切换菜单栏显示"，这正好是 push-to-talk 的标准触发方式，结构性冲突，换哪个 Alt 都一样。换个没有这种全局单键语义的物理键（`KEY_RIGHTCTRL`、`KEY_PAUSE`、`KEY_SCROLLLOCK`、`KEY_CAPSLOCK` 之类，用 `./sniff_key.py` 探测键码）即可，不是代码 bug，也不需要靠独占 grab 来"抢"——独占会连累整个键盘所有按键都进不了系统。
+
 如需在桌面环境绑定点击切换（Toggle 模式），先用 `./dictate.py --toggle` 启动，快捷键设置里执行 `python3 /path/to/dictation/toggle.py` 即可。
+
+某些终端（如 WezTerm）的 Shift+Insert 走的是 PRIMARY selection（鼠标选中那份缓冲区），不是 CLIPBOARD（Ctrl+C/V 那份）——两块独立缓冲区，`type_text()` 两份都写、都恢复（`wl-copy --primary`）。如果某个终端读取剪贴板特别慢，赶不上粘贴后自动恢复旧内容的时机，可以调大延迟：`DICTATE_CLIPBOARD_RESTORE_DELAY=1.0 ./dictate.py`。
 
 ## 关键技术选型依据
 
