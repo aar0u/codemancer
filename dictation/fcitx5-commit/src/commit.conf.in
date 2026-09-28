@@ -1,0 +1,14 @@
+[Addon]
+Name=Commit String over D-Bus
+Name[zh_CN]=通过 D-Bus 提交文字
+Comment=Lets other programs insert text into the focused input field over D-Bus
+Comment[zh_CN]=允许其他程序通过 D-Bus 向当前有焦点的输入框插入文本
+Type=@FCITX_ADDON_TYPE@
+Library=libcommit
+Category=Module
+Version=@PROJECT_VERSION@
+OnDemand=False
+
+[Addon/Dependencies]
+0=core:@REQUIRED_FCITX_VERSION@
+1=dbus

@@ -50,5 +50,7 @@ Push-to-Talk 按键本身就是最精准的语音起止边界。早期尝试过 
 - **1.5B** 纠错能力虽有提升，但出现新的恶性缺陷——极易将中英混说整句误翻成纯英文；
 - CPU 延迟由 70ms 激增至 0.8~1.6s，彻底破坏听写“即说即出”的流畅度。因此维持纯 ASR 直出。
 
-### 3. 为什么用剪贴板 + Shift+Insert 注入
-`ydotool key` 模拟真实的内核级 Shift+Insert 按键，避开 Wayland 合成器协议限制与按键映射表，对终端（如 Konsole）和 GUI 软件兼容性极佳，注入后自动恢复原始剪贴板内容。
+### 3. 文字注入方式：Fcitx5 原生提交优先，剪贴板保底
+- **Fcitx5 原生提交（推荐，彻底告别剪贴板）**：仓库内自带源码，执行 `./fcitx5-commit/build.sh` 即可一键编译安装到系统。`dictate.py` 会直接通过系统 D-Bus (`busctl`) 将文字交给 Fcitx5 的 `commitString` 在光标处微秒级原子上屏，完全不触碰系统剪贴板、零竞态。
+- **剪贴板 + Shift+Insert（无感保底）**：若未检测到 Fcitx5 commit 接口，自动回退到 `wl-copy` + `ydotool` 模拟内核 Shift+Insert，并在粘贴后自动还原剪贴板内容。
+- 可通过环境变量强行指定方式：`DICTATE_INJECT_METHOD=fcitx` 或 `DICTATE_INJECT_METHOD=clipboard`（默认 `auto`）。

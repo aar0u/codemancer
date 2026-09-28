@@ -11,6 +11,7 @@ to also open a Unix socket for `toggle.py` (manual testing / an optional
 extra DE shortcut) — off by default so no socket file is left behind.
 """
 import argparse
+import fcntl
 import os
 import socket
 import subprocess
@@ -99,7 +100,39 @@ def _backup_selection(*, primary: bool) -> tuple[bytes, str] | None:
     return (data, mime) if data is not None else None
 
 
-def type_text(text: str) -> None:
+INJECT_METHOD = os.environ.get("DICTATE_INJECT_METHOD", "auto").lower()
+
+
+def _commit_fcitx(text: str) -> bool:
+    """Commit text natively via fcitx5-commit D-Bus addon (Vendetta1871/fcitx5-commit)."""
+    try:
+        res = subprocess.run(
+            [
+                "busctl",
+                "--user",
+                "--timeout=1",
+                "call",
+                "org.fcitx.Fcitx5",
+                "/commit",
+                "io.github.vendetta1871.Commit1",
+                "CommitString",
+                "s",
+                text,
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=1.0,
+        )
+        if res.returncode == 0 and "true" in res.stdout:
+            log("[type] committed via fcitx5 D-Bus")
+            return True
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return False
+
+
+def _type_text_clipboard(text: str) -> None:
     """Paste via clipboard + Shift+Insert (not Ctrl+V — see README).
 
     Sets both CLIPBOARD and PRIMARY selection: some terminals (WezTerm)
@@ -134,6 +167,21 @@ def type_text(text: str) -> None:
             _wl_copy(old_clip[0], primary=False, mime=old_clip[1])
         if old_primary is not None:
             _wl_copy(old_primary[0], primary=True, mime=old_primary[1])
+
+
+def type_text(text: str) -> None:
+    """Inject text into the active window.
+
+    Tries native Fcitx5 commit (zero clipboard contamination) when INJECT_METHOD
+    is 'auto' or 'fcitx'; falls back to clipboard + Shift+Insert.
+    """
+    if INJECT_METHOD in ("auto", "fcitx"):
+        if _commit_fcitx(text):
+            return
+        if INJECT_METHOD == "fcitx":
+            log("[type] fcitx commit unavailable, falling back to clipboard")
+
+    _type_text_clipboard(text)
 
 
 def ensure_model() -> None:
@@ -381,6 +429,15 @@ def _run_toggle_server(dictation: Dictation) -> None:
 
 
 def main() -> None:
+    # Single-instance mutual exclusion: prevent running two instances simultaneously
+    lock_file = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "dictate.lock"
+    lock_fd = open(lock_file, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        log(f"[lock] 另一个 dictate 实例已经在运行中 (锁定文件: {lock_file})，退出。")
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--toggle",
