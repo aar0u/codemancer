@@ -12,6 +12,8 @@ extra DE shortcut) — off by default so no socket file is left behind.
 """
 import argparse
 import fcntl
+import io
+import json
 import os
 import socket
 import subprocess
@@ -19,7 +21,9 @@ import sys
 import tarfile
 import threading
 import time
+import urllib.parse
 import urllib.request
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -35,21 +39,23 @@ SAMPLE_RATE = 16000
 SILENCE_RMS_THRESHOLD = 0.01  # below this, treat the recording as silence (mic bump, accidental press)
 MIN_SPEECH_DURATION = 0.15  # seconds; shorter is almost certainly a key-click, not real speech
 SOCK_PATH = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "dictate.sock"
-# Must outlast the target app's clipboard read, or the restore clobbers the paste.
-CLIPBOARD_RESTORE_DELAY = float(os.environ.get("DICTATE_CLIPBOARD_RESTORE_DELAY", "0.6"))
-
+CLIPBOARD_RESTORE_DELAY = 0.5  # seconds
 KEYBOARD_KEY = os.environ.get("DICTATE_KEYBOARD_KEY", "KEY_RIGHTCTRL")
 MOUSE_BUTTON = os.environ.get("DICTATE_MOUSE_BUTTON", "BTN_EXTRA")
-KEYBOARD_DEVICE = os.environ.get("DICTATE_KEYBOARD_DEVICE")
-MOUSE_DEVICE = os.environ.get("DICTATE_MOUSE_DEVICE")
+DEFAULT_API_BASE = "https://api.groq.com/openai/v1"
+DEFAULT_API_MODEL = "whisper-large-v3-turbo"
+DEFAULT_API_LANGUAGE = "auto"
 
 
 def log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-def notify(msg: str) -> None:
-    subprocess.run(["notify-send", "-t", "2000", "Dictate", msg], check=False)
+def notify(msg: str, title: str = "Dictate", timeout_ms: int = 2000, tag: str | None = None) -> None:
+    args = ["notify-send", "-t", str(timeout_ms), title, msg]
+    if tag:
+        args += ["-h", f"string:x-canonical-private-synchronous:{tag}"]
+    subprocess.run(args, check=False)
 
 
 def _timed_run(label: str, *args, **kwargs) -> subprocess.CompletedProcess:
@@ -98,9 +104,6 @@ def _backup_selection(*, primary: bool) -> tuple[bytes, str] | None:
     mime = types[0]
     data = _wl_paste(primary=primary, mime=mime)
     return (data, mime) if data is not None else None
-
-
-INJECT_METHOD = os.environ.get("DICTATE_INJECT_METHOD", "auto").lower()
 
 
 def _commit_fcitx(text: str) -> bool:
@@ -172,14 +175,11 @@ def _type_text_clipboard(text: str) -> None:
 def type_text(text: str) -> None:
     """Inject text into the active window.
 
-    Tries native Fcitx5 commit (zero clipboard contamination) when INJECT_METHOD
-    is 'auto' or 'fcitx'; falls back to clipboard + Shift+Insert.
+    Tries native Fcitx5 commit (zero clipboard contamination) first;
+    falls back to clipboard + Shift+Insert if unavailable or inactive.
     """
-    if INJECT_METHOD in ("auto", "fcitx"):
-        if _commit_fcitx(text):
-            return
-        if INJECT_METHOD == "fcitx":
-            log("[type] fcitx commit unavailable, falling back to clipboard")
+    if _commit_fcitx(text):
+        return
 
     _type_text_clipboard(text)
 
@@ -208,8 +208,77 @@ def build_recognizer() -> sherpa_onnx.OfflineRecognizer:
     )
 
 
-def transcribe(recognizer: sherpa_onnx.OfflineRecognizer, samples: np.ndarray) -> str:
-    """Decode the whole recording in one shot — no VAD segmentation (tried, dropped; see README)."""
+def transcribe_api(
+    samples: np.ndarray,
+    api_key: str,
+    api_base: str = DEFAULT_API_BASE,
+    model: str = DEFAULT_API_MODEL,
+    language: str = DEFAULT_API_LANGUAGE,
+) -> str:
+    """Send audio to any OpenAI-compatible transcription endpoint (Groq, SiliconFlow, OpenAI, etc.).
+    Does NOT fallback to local on failure — reports errors explicitly so the user is immediately aware."""
+    # Prevent int16 overflow / wraparound distortion if volume exceeds 1.0
+    peak = float(np.abs(samples).max()) if len(samples) else 0.0
+    if peak > 1.0:
+        samples = samples / peak * 0.95
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(pcm.tobytes())
+
+    boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+    parts = [
+        (f"--{boundary}\r\n"
+         f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
+         f"Content-Type: audio/wav\r\n\r\n").encode() + buf.getvalue(),
+        (f"\r\n--{boundary}\r\n"
+         f'Content-Disposition: form-data; name="model"\r\n\r\n'
+         f"{model}\r\n").encode(),
+    ]
+    if language and language != "auto":
+        parts.append(
+            (f"--{boundary}\r\n"
+             f'Content-Disposition: form-data; name="language"\r\n\r\n'
+             f"{language}\r\n").encode()
+        )
+    parts.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+
+    url = f"{api_base}/audio/transcriptions"
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": "curl/8.7.1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("text", "").strip()
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode(errors="replace").strip()
+        log(f"[api] HTTP {e.code}: {err_msg}")
+        notify(f"API 错误 ({e.code}): {err_msg[:60]}")
+        return ""
+    except urllib.error.URLError as e:
+        log(f"[api] network error: {e.reason}")
+        notify(f"API 网络连接失败: {e.reason}")
+        return ""
+    except Exception as e:
+        log(f"[api] error: {e}")
+        notify(f"API 异常: {e}")
+        return ""
+
+
+def transcribe_local(recognizer: sherpa_onnx.OfflineRecognizer, samples: np.ndarray) -> str:
+    """Decode audio locally via sherpa-onnx SenseVoice-Small int8."""
     stream = recognizer.create_stream()
     stream.accept_waveform(SAMPLE_RATE, samples)
     recognizer.decode_stream(stream)
@@ -218,12 +287,25 @@ def transcribe(recognizer: sherpa_onnx.OfflineRecognizer, samples: np.ndarray) -
 
 class Dictation:
     def __init__(self) -> None:
-        self.recognizer = build_recognizer()
+        self.api_key = (
+            os.environ.get("DICTATE_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("GROQ_API_KEY")
+        )
+        self.api_base = os.environ.get("DICTATE_API_BASE", DEFAULT_API_BASE).rstrip("/")
+        self.api_model = os.environ.get("DICTATE_API_MODEL", DEFAULT_API_MODEL)
+        self.api_language = os.environ.get("DICTATE_API_LANGUAGE", DEFAULT_API_LANGUAGE)
+        self.recognizer = None if self.api_key else build_recognizer()
         self.frames: list[np.ndarray] = []
         self.stream: sd.InputStream | None = None
         self.lock = threading.Lock()
         self.finish_lock = threading.Lock()  # serializes _finish() across overlapping sessions
         self.active_source: str | None = None
+
+        if self.api_key:
+            log(f"[asr] mode=cloud API endpoint={self.api_base} model={self.api_model} lang={self.api_language}")
+        else:
+            log("[asr] mode=local SenseVoice-Small int8")
 
     def _callback(self, indata, frames, time_info, status) -> None:
         self.frames.append(indata.copy())
@@ -241,7 +323,7 @@ class Dictation:
                 callback=self._callback,
             )
             self.stream.start()
-            notify("录音中…")
+            notify("🎙️ 正在聆听…", tag="dictate_status", timeout_ms=5000)
 
     def stop(self, source: str = "socket") -> None:
         # Only the source that started a recording may stop it — otherwise
@@ -257,7 +339,6 @@ class Dictation:
             frames = self.frames
             self.frames = []
 
-        # notify("转写中…")
         # Runs off the caller's thread (a DeviceWatcher) so it can get back
         # to read_loop() immediately instead of blocking on ASR/paste.
         threading.Thread(target=self._finish, args=(frames,), daemon=True).start()
@@ -267,39 +348,55 @@ class Dictation:
         # never interleave; only ever held by background _finish threads,
         # never by a DeviceWatcher, so hotkeys keep responding immediately.
         with self.finish_lock:
-            if not frames:
-                notify("没识别到内容")
-                return
-
-            samples = np.concatenate(frames)[:, 0]
+            samples = np.concatenate(frames)[:, 0] if frames else np.empty(0, dtype=np.float32)
             duration = len(samples) / SAMPLE_RATE
             peak = float(np.abs(samples).max()) if len(samples) else 0.0
             rms = float(np.sqrt(np.mean(np.square(samples)))) if len(samples) else 0.0
             log(f"[audio] captured {duration:.2f}s ({len(samples)} samples) peak={peak:.4f} rms={rms:.4f}")
 
-            # Exact zero means PortAudio's device table went stale (real
-            # silence still has a noise floor) — reinit for the next start().
-            if peak == 0.0:
+            if len(samples) > 0 and peak == 0.0:
                 log("[audio] pure silence (all-zero) — reinitializing PortAudio device table")
                 sd._terminate()
                 sd._initialize()
-                notify("麦克风好像失效了，已重置，请重试一次")
+                notify("音频设备已重置", tag="dictate_status", timeout_ms=2000)
                 return
 
             if duration < MIN_SPEECH_DURATION or rms < SILENCE_RMS_THRESHOLD:
                 log("[audio] too short or below silence threshold, skipping decode")
-                notify("没识别到内容")
+                notify("未检测到语音", tag="dictate_status", timeout_ms=1200)
                 return
 
-            text = transcribe(self.recognizer, samples)
-            log(f"[asr] text={text!r}")
+            progress_timer = threading.Timer(
+                0.4,
+                lambda: notify("正在识别…", timeout_ms=1000, tag="dictate_status"),
+            )
+            progress_timer.start()
+
+            text = ""
+            start = time.monotonic()
+            try:
+                if self.api_key:
+                    text = transcribe_api(
+                        samples,
+                        self.api_key,
+                        self.api_base,
+                        self.api_model,
+                        language=self.api_language,
+                    )
+                    if text:
+                        log(f"[asr] cloud API took {time.monotonic() - start:.3f}s: {text!r}")
+                else:
+                    text = transcribe_local(self.recognizer, samples)
+                    if text:
+                        log(f"[asr] local sensevoice took {time.monotonic() - start:.3f}s: {text!r}")
+            finally:
+                progress_timer.cancel()
 
             if not text:
-                notify("没识别到内容")
                 return
 
             type_text(text)
-            notify(text[:40])
+            notify(" ", timeout_ms=1, tag="dictate_status")
 
     def toggle(self) -> None:
         if self.stream is None:
@@ -403,8 +500,8 @@ def start_hotkey_manager(dictation: Dictation) -> None:
     manager = HotkeyManager(
         dictation,
         [
-            (KEYBOARD_KEY, KEYBOARD_DEVICE),
-            (MOUSE_BUTTON, MOUSE_DEVICE),
+            (KEYBOARD_KEY, None),
+            (MOUSE_BUTTON, None),
         ],
     )
     manager.start()
@@ -453,6 +550,17 @@ def main() -> None:
 
     dictation = Dictation()
     start_hotkey_manager(dictation)
+
+    key_label = KEYBOARD_KEY.replace("KEY_", "").replace("RIGHTCTRL", "右 Ctrl").replace("LEFTCTRL", "左 Ctrl")
+    btn_label = MOUSE_BUTTON.replace("BTN_", "").replace("EXTRA", "鼠标侧键").replace("SIDE", "鼠标侧键")
+    triggers_str = f"{key_label} / {btn_label}"
+
+    if dictation.api_key:
+        host = urllib.parse.urlsplit(dictation.api_base).hostname or dictation.api_base
+        status_msg = f"模式: 云端 API ({host} / {dictation.api_model})\n触发: {triggers_str}"
+    else:
+        status_msg = f"模式: 本地离线 SenseVoice-Small\n触发: {triggers_str}"
+    notify(status_msg, title="Dictate 语音输入已就绪", timeout_ms=3000)
 
     log("ready" + (f", toggle socket at {SOCK_PATH}" if args.toggle else " (evdev hotkeys only)"))
     log(

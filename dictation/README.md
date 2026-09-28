@@ -9,35 +9,80 @@
 - `toggle.py` —— 纯 stdlib 的轻量客户端，向 `$XDG_RUNTIME_DIR/dictate.sock` 发送信号，给用 `--toggle` 启动的 `dictate.py` 做手动 toggle 触发。
 - `sniff_key.py` —— 辅助脚本，用于探测新键盘或鼠标按键的 evdev 键码。
 
-## 安装与使用
+## 使用方式
+
+### 方式一：Ad-hoc 独立运行（前台调试 / 免安装）
+
+直接在终端前台启动，实时打印录音、推理耗时与文字结果，`Ctrl+C` 随时退出：
 
 ```bash
-bash install.sh
+# 1. 基础本地离线运行（初次运行自动拉取模型并就绪）
 ./dictate.py
+# 或使用 uv：
+uv run dictate.py
+
+# 2. 临时搭配云端 API 测试
+DICTATE_API_KEY="gsk_xxxxxxxxxxxx" uv run dictate.py
+
+# 3. 开启 Unix socket 供手动 toggle 测试
+uv run dictate.py --toggle
+# 另开终端触发一次录音/停止：
+python3 toggle.py
 ```
 
-卸载（删除下载的模型；系统包和 `input` 组成员身份保留，脚本会打印可选命令）：
+> **提示**：直接运行需要当前用户具备 `/dev/input/*` 读取权限（`sudo usermod -aG input $USER`），或由 `install.sh` 完成配置。
+
+---
+
+### 方式二：常驻后台（Systemd 用户服务）
+
+适合日常长期使用，开机随桌面环境自启：
 
 ```bash
+# 一键安装依赖、udev 规则并注册启动 systemd 服务
+bash install.sh
+
+# 查看实时运行日志
+journalctl --user -u dictate -f
+
+# 重启服务
+systemctl --user restart dictate
+
+# 完全卸载（清理模型、移除 service 与 udev 规则）
 bash uninstall.sh
 ```
 
-## 按键与设备配置
-
-默认监听所有支持 `KEY_RIGHTCTRL`（键盘）和 `BTN_EXTRA`（鼠标侧键）的物理设备。如果需要指定设备或修改按键，跑之前设环境变量就行（自定义按键码可用 `./sniff_key.py` 探测）：
+长期常驻使用时，推荐直接写入用户配置环境文件 `~/.config/dictate/env`（权限已锁 600，不进 git 仓库，安全省心）：
 
 ```bash
-DICTATE_KEYBOARD_KEY=KEY_CAPSLOCK DICTATE_MOUSE_BUTTON=BTN_EXTRA ./dictate.py
-
-# 限制仅监听特定物理路径（默认留空自动监听全部匹配设备）
-DICTATE_KEYBOARD_DEVICE=/dev/input/by-id/xxx-event-kbd ./dictate.py
+mkdir -p ~/.config/dictate
+cat > ~/.config/dictate/env << 'EOF'
+DICTATE_API_KEY=gsk_xxxxxxxxxxxx
+# 可选覆盖以下项（默认即为 Groq whisper-large-v3-turbo）：
+# DICTATE_API_BASE=https://api.groq.com/openai/v1
+# DICTATE_API_MODEL=whisper-large-v3-turbo
+EOF
+chmod 600 ~/.config/dictate/env
+systemctl --user restart dictate
 ```
 
-选键要避开任何应用/DE 会响应"单独按下再松开"这个动作的键：`dictate.py` 监听设备是非独占的（不做 `grab()`），按键会同时正常传给桌面环境。`KEY_RIGHTALT`（以及左 Alt）尤其不能用——GTK/Firefox 等工具包把"单独按下再松开 Alt、中间不按其他键"固定解释为"切换菜单栏显示"，这正好是 push-to-talk 的标准触发方式，结构性冲突，换哪个 Alt 都一样。换个没有这种全局单键语义的物理键（`KEY_RIGHTCTRL`、`KEY_PAUSE`、`KEY_SCROLLLOCK`、`KEY_CAPSLOCK` 之类，用 `./sniff_key.py` 探测键码）即可，不是代码 bug，也不需要靠独占 grab 来"抢"——独占会连累整个键盘所有按键都进不了系统。
+所有可用配置项及默认值：
 
-如需在桌面环境绑定点击切换（Toggle 模式），先用 `./dictate.py --toggle` 启动，快捷键设置里执行 `python3 /path/to/dictation/toggle.py` 即可。
+```bash
+# 1. 硬件按键自定义（可选，默认已为右 Ctrl 与鼠标侧键）
+DICTATE_KEYBOARD_KEY=KEY_RIGHTCTRL
+DICTATE_MOUSE_BUTTON=BTN_EXTRA
 
-某些终端（如 WezTerm）的 Shift+Insert 走的是 PRIMARY selection（鼠标选中那份缓冲区），不是 CLIPBOARD（Ctrl+C/V 那份）——两块独立缓冲区，`type_text()` 两份都写、都恢复（`wl-copy --primary`）。如果某个终端读取剪贴板特别慢，赶不上粘贴后自动恢复旧内容的时机，可以调大延迟：`DICTATE_CLIPBOARD_RESTORE_DELAY=1.0 ./dictate.py`。
+# 2. 云端 ASR API 配置（可选，标准 OpenAI 协议，配置 API Key 即自动启用）
+DICTATE_API_KEY=gsk_xxxxxxxxxxxx                 # 或标准 OPENAI_API_KEY / GROQ_API_KEY
+DICTATE_API_BASE=https://api.groq.com/openai/v1   # 默认 Groq；可换硅基流动、官方 OpenAI 或自建服务
+DICTATE_API_MODEL=whisper-large-v3-turbo          # 默认模型
+```
+
+- **引擎工作模式**：
+  - **云端模式**（配置了 API Key）：每次说话请求云端 GPU/LPU，~150ms 极速返回满血 Whisper 识别结果。**若网络故障或 API 报错，直接弹窗报错提示，不隐式回退**，确保异常被明确感知。
+  - **离线模式**（未配置 API Key）：启动时自动加载本地 SenseVoice-Small int8 模型，断网也能 70ms 瞬出。
+- **文字注入自适应**：优先走 `fcitx5-commit` 原生 D-Bus 直出（零剪贴板污染）；若输入框无焦点或插件未就绪，自动回退到 `wl-copy` + `ydotool` (Shift+Insert)。
 
 ## 关键技术选型依据
 
@@ -53,4 +98,3 @@ Push-to-Talk 按键本身就是最精准的语音起止边界。早期尝试过 
 ### 3. 文字注入方式：Fcitx5 原生提交优先，剪贴板保底
 - **Fcitx5 原生提交（推荐，彻底告别剪贴板）**：仓库内自带源码，执行 `./fcitx5-commit/build.sh` 即可一键编译安装到系统。`dictate.py` 会直接通过系统 D-Bus (`busctl`) 将文字交给 Fcitx5 的 `commitString` 在光标处微秒级原子上屏，完全不触碰系统剪贴板、零竞态。
 - **剪贴板 + Shift+Insert（无感保底）**：若未检测到 Fcitx5 commit 接口，自动回退到 `wl-copy` + `ydotool` 模拟内核 Shift+Insert，并在粘贴后自动还原剪贴板内容。
-- 可通过环境变量强行指定方式：`DICTATE_INJECT_METHOD=fcitx` 或 `DICTATE_INJECT_METHOD=clipboard`（默认 `auto`）。

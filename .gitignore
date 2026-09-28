@@ -6,3 +6,4 @@ py.sh
 py.bat
 build/
 dist/
+*.pyc
