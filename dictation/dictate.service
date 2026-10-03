@@ -1,13 +1,11 @@
 [Unit]
-Description=Dictation daemon (SenseVoice + evdev PTT)
+Description=Dictation daemon (SenseVoice, push-to-talk via Hyprland binds)
 After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
 EnvironmentFile=-%h/.config/dictate/env
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/bin
-# Environment=DICTATE_MOUSE_BUTTON=BTN_SIDE
-Environment=DICTATE_MOUSE_BUTTON=BTN_EXTRA
 ExecStart=/usr/bin/env uv run --script /mnt/storage/dev/codemancer/dictation/dictate.py
 Restart=on-failure
 RestartSec=3

@@ -1,16 +1,13 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["sherpa-onnx", "sounddevice", "numpy", "evdev"]
+# dependencies = ["sherpa-onnx", "sounddevice", "numpy"]
 # ///
 """SenseVoice dictation — run ad-hoc in a terminal. See README.md for the why.
 
-Push-to-talk via evdev (bypasses the DE's global-shortcut system, which
-on KDE only fires on key-down) drives start()/stop() below. Pass --toggle
-to also open a Unix socket for `toggle.py` (manual testing / an optional
-extra DE shortcut) — off by default so no socket file is left behind.
+Push-to-talk is driven by the compositor: Hyprland binds run `toggle.py start|stop <source>`,
+which talks to the Unix socket below. No /dev/input or /dev/uinput access is needed.
 """
-import argparse
 import fcntl
 import io
 import json
@@ -29,7 +26,6 @@ from pathlib import Path
 import numpy as np
 import sherpa_onnx
 import sounddevice as sd
-from evdev import InputDevice, ecodes, list_devices
 
 MODEL_ROOT = Path(os.environ.get("SENSEVOICE_MODEL_DIR", str(Path.home() / ".local/share/sensevoice")))
 MODEL_NAME = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
@@ -40,8 +36,6 @@ SILENCE_RMS_THRESHOLD = 0.01  # below this, treat the recording as silence (mic 
 MIN_SPEECH_DURATION = 0.15  # seconds; shorter is almost certainly a key-click, not real speech
 SOCK_PATH = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "dictate.sock"
 CLIPBOARD_RESTORE_DELAY = 0.5  # seconds
-KEYBOARD_KEY = os.environ.get("DICTATE_KEYBOARD_KEY", "KEY_RIGHTCTRL")
-MOUSE_BUTTON = os.environ.get("DICTATE_MOUSE_BUTTON", "BTN_EXTRA")
 DEFAULT_API_BASE = "https://api.groq.com/openai/v1"
 DEFAULT_API_MODEL = "whisper-large-v3-turbo"
 DEFAULT_API_LANGUAGE = "auto"
@@ -152,17 +146,16 @@ def _type_text_clipboard(text: str) -> None:
         return
     time.sleep(0.05)
 
-    # KEY_LEFTSHIFT=42, KEY_INSERT=110 (Linux evdev keycodes)
     paste = _timed_run(
-        "ydotool key (Shift+Insert)",
-        ["ydotool", "key", "42:1", "110:1", "110:0", "42:0"],
+        "wtype (Shift+Insert)",
+        ["wtype", "-M", "shift", "-k", "Insert", "-m", "shift"],
         capture_output=True,
         check=False,
     )
     if paste.returncode != 0:
-        log(f"[ydotool key] exited {paste.returncode}: {paste.stderr.decode(errors='replace').strip()}")
+        log(f"[wtype] exited {paste.returncode}: {paste.stderr.decode(errors='replace').strip()}")
     else:
-        log("[type] pasted via ydotool (Shift+Insert)")
+        log("[type] pasted via wtype (Shift+Insert)")
 
     if old_clip is not None or old_primary is not None:
         time.sleep(CLIPBOARD_RESTORE_DELAY)
@@ -339,14 +332,14 @@ class Dictation:
             frames = self.frames
             self.frames = []
 
-        # Runs off the caller's thread (a DeviceWatcher) so it can get back
-        # to read_loop() immediately instead of blocking on ASR/paste.
+        # Runs off the socket thread so it can accept the next hotkey immediately
+        # instead of blocking on ASR/paste.
         threading.Thread(target=self._finish, args=(frames,), daemon=True).start()
 
     def _finish(self, frames: list[np.ndarray]) -> None:
         # Serializes overlapping sessions so two clipboard/paste operations
         # never interleave; only ever held by background _finish threads,
-        # never by a DeviceWatcher, so hotkeys keep responding immediately.
+        # never by the socket thread, so hotkeys keep responding immediately.
         with self.finish_lock:
             samples = np.concatenate(frames)[:, 0] if frames else np.empty(0, dtype=np.float32)
             duration = len(samples) / SAMPLE_RATE
@@ -405,122 +398,31 @@ class Dictation:
             self.stop(self.active_source)
 
 
-def _is_virtual_device(name: str) -> bool:
-    lowered = name.lower()
-    return "ydotool" in lowered or "virtual" in lowered
-
-
-class DeviceWatcher(threading.Thread):
-    """Watches one evdev device node for press/release events."""
-
-    def __init__(self, dictation: Dictation, path: str, code: int, code_name: str) -> None:
-        super().__init__(daemon=True)
-        self.dictation = dictation
-        self.path = path
-        self.code = code
-        self.code_name = code_name
-
-    def run(self) -> None:
-        try:
-            device = InputDevice(self.path)
-        except OSError:
-            return
-
-        log(f"[hotkey] watching {self.code_name!r} on {device.path} ({device.name!r})")
-        try:
-            for event in device.read_loop():
-                if event.type != ecodes.EV_KEY or event.code != self.code:
-                    continue
-                if event.value == 1:
-                    self.dictation.start(self.code_name)
-                elif event.value == 0:
-                    self.dictation.stop(self.code_name)
-        except OSError as e:
-            self.dictation.stop(self.code_name)
-            log(f"[hotkey] {device.path} ({device.name!r}) disconnected: {e}")
-        finally:
-            device.close()
-
-
-class HotkeyManager(threading.Thread):
-    """Dynamically monitors all physical input devices and spawns watchers
-    for any device advertising the registered hotkey codes (Plan B: pool all devices)."""
-
-    def __init__(self, dictation: Dictation, bindings: list[tuple[str, str | None]]) -> None:
-        super().__init__(daemon=True)
-        self.dictation = dictation
-        self.bindings = []
-        for code_name, explicit_path in bindings:
-            code = getattr(ecodes, code_name, None)
-            if code is None:
-                log(f"[hotkey] unknown event code {code_name!r}")
-                continue
-            self.bindings.append((code_name, code, explicit_path))
-        self.active_watchers: dict[tuple[str, int], DeviceWatcher] = {}
-
-    def run(self) -> None:
-        while True:
-            # Clean up watchers whose threads have exited (e.g. device unplugged)
-            self.active_watchers = {
-                k: w for k, w in self.active_watchers.items() if w.is_alive()
-            }
-
-            for code_name, code, explicit_path in self.bindings:
-                if explicit_path:
-                    # User specified an exact device path
-                    key = (explicit_path, code)
-                    if key not in self.active_watchers:
-                        watcher = DeviceWatcher(self.dictation, explicit_path, code, code_name)
-                        watcher.start()
-                        self.active_watchers[key] = watcher
-                    continue
-
-                # Scan all physical devices advertising this code
-                for path in list_devices():
-                    key = (path, code)
-                    if key in self.active_watchers:
-                        continue
-                    try:
-                        dev = InputDevice(path)
-                    except OSError:
-                        continue
-                    if _is_virtual_device(dev.name):
-                        dev.close()
-                        continue
-                    if code in dev.capabilities().get(ecodes.EV_KEY, []):
-                        watcher = DeviceWatcher(self.dictation, path, code, code_name)
-                        watcher.start()
-                        self.active_watchers[key] = watcher
-                    dev.close()
-
-            time.sleep(3)
-
-
-def start_hotkey_manager(dictation: Dictation) -> None:
-    manager = HotkeyManager(
-        dictation,
-        [
-            (KEYBOARD_KEY, None),
-            (MOUSE_BUTTON, None),
-        ],
-    )
-    manager.start()
-
-
-def _run_toggle_server(dictation: Dictation) -> None:
-    """Only bound when --toggle is passed — otherwise no socket file is left
-    behind for the common case where evdev hotkeys are the only trigger."""
+def _run_socket_server(dictation: Dictation) -> None:
+    """Accepts `start <source>`, `stop <source>` or `toggle` from toggle.py."""
     SOCK_PATH.unlink(missing_ok=True)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(SOCK_PATH))
-    server.listen(1)
-    log(f"[toggle] listening on {SOCK_PATH}")
+    os.chmod(SOCK_PATH, 0o600)  # the /tmp fallback is world-traversable
+    server.listen(4)
+    log(f"[socket] listening on {SOCK_PATH}")
     try:
         while True:
             conn, _ = server.accept()
             with conn:
-                conn.recv(16)
-            dictation.toggle()
+                parts = conn.recv(64).decode(errors="replace").split()
+            if not parts:  # a probe that connected and hung up must not toggle recording
+                continue
+            action = parts[0]
+            source = parts[1] if len(parts) > 1 else "socket"
+            if action == "start":
+                dictation.start(source)
+            elif action == "stop":
+                dictation.stop(source)
+            elif action == "toggle":
+                dictation.toggle()
+            else:
+                log(f"[socket] unknown action {action!r}")
     finally:
         SOCK_PATH.unlink(missing_ok=True)
 
@@ -535,34 +437,21 @@ def main() -> None:
         log(f"[lock] 另一个 dictate 实例已经在运行中 (锁定文件: {lock_file})，退出。")
         sys.exit(1)
 
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--toggle",
-        action="store_true",
-        help="also listen on a Unix socket for toggle.py (default: evdev hotkeys only, no socket file)",
-    )
-    args = parser.parse_args()
-
     try:
         log(f"[audio] default input device: {sd.query_devices(kind='input')}")
     except Exception as e:  # PortAudio raises its own exception types
         log(f"[audio] failed to query default input device: {e}")
 
     dictation = Dictation()
-    start_hotkey_manager(dictation)
-
-    key_label = KEYBOARD_KEY.replace("KEY_", "").replace("RIGHTCTRL", "右 Ctrl").replace("LEFTCTRL", "左 Ctrl")
-    btn_label = MOUSE_BUTTON.replace("BTN_", "").replace("EXTRA", "鼠标侧键").replace("SIDE", "鼠标侧键")
-    triggers_str = f"{key_label} / {btn_label}"
 
     if dictation.api_key:
         host = urllib.parse.urlsplit(dictation.api_base).hostname or dictation.api_base
-        status_msg = f"模式: 云端 API ({host} / {dictation.api_model})\n触发: {triggers_str}"
+        status_msg = f"模式: 云端 API ({host} / {dictation.api_model})\n触发: Hyprland 快捷键"
     else:
-        status_msg = f"模式: 本地离线 SenseVoice-Small\n触发: {triggers_str}"
+        status_msg = "模式: 本地离线 SenseVoice-Small\n触发: Hyprland 快捷键"
     notify(status_msg, title="Dictate 语音输入已就绪", timeout_ms=3000)
 
-    log("ready" + (f", toggle socket at {SOCK_PATH}" if args.toggle else " (evdev hotkeys only)"))
+    log(f"ready, socket at {SOCK_PATH}")
     log(
         "env: WAYLAND_DISPLAY={!r} XDG_RUNTIME_DIR={!r} XDG_SESSION_TYPE={!r}".format(
             os.environ.get("WAYLAND_DISPLAY"),
@@ -571,10 +460,7 @@ def main() -> None:
         )
     )
 
-    if args.toggle:
-        _run_toggle_server(dictation)
-    else:
-        threading.Event().wait()  # evdev hotkeys already run in background threads; just block
+    _run_socket_server(dictation)
 
 
 if __name__ == "__main__":

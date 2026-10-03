@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup: SenseVoice-Small (sherpa-onnx) local dictation for CachyOS + KDE Plasma.
+# One-time setup: SenseVoice-Small (sherpa-onnx) local dictation for CachyOS + Hyprland.
 # Run manually on the CachyOS host (not in a container): bash install.sh
 set -euo pipefail
 
@@ -8,20 +8,8 @@ DICT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "==> Installing system packages (pacman)"
 sudo pacman -S --needed --noconfirm \
   pipewire pipewire-pulse pipewire-alsa \
-  ydotool wl-clipboard \
+  wtype wl-clipboard \
   portaudio
-
-echo "==> Enabling ydotoold (kernel-level /dev/uinput text injection; works regardless"
-echo "    of which Wayland protocols the compositor implements)"
-sudo systemctl enable --now ydotool.service 2>/dev/null || {
-  echo "    ydotool.service not found, enabling user unit instead"
-  systemctl --user enable --now ydotool 2>/dev/null || true
-}
-# ydotool talks to /dev/uinput; make sure the current user can reach it without sudo each time.
-if ! groups "$USER" | grep -qw input; then
-  echo "==> Adding $USER to the 'input' group (log out/in required once)"
-  sudo usermod -aG input "$USER"
-fi
 
 if command -v fcitx5 &>/dev/null && [ -d "$DICT_DIR/fcitx5-commit" ]; then
   echo "==> Building and installing fcitx5-commit addon (native D-Bus text injection)"
@@ -44,7 +32,7 @@ if [ ! -f "$HOME/.config/dictate/env" ]; then
 EOF
   chmod 600 "$HOME/.config/dictate/env"
 fi
-chmod +x "$DICT_DIR/dictate.py" "$DICT_DIR/toggle.py" "$DICT_DIR/sniff_key.py"
+chmod +x "$DICT_DIR/dictate.py" "$DICT_DIR/toggle.py"
 ln -sf "$DICT_DIR/dictate.service" "$HOME/.config/systemd/user/dictate.service"
 systemctl --user daemon-reload
 systemctl --user enable --now dictate.service
@@ -59,24 +47,10 @@ Daemon is managed via systemd user service:
   - Restart      : systemctl --user restart dictate
 
 First run resolves/downloads its uv dependencies (sherpa-onnx, sounddevice,
-numpy, evdev) AND the SenseVoice-Small int8 model (~230MB, to
+numpy) AND the SenseVoice-Small int8 model (~230MB, to
 \${SENSEVOICE_MODEL_DIR:-~/.local/share/sensevoice}) — give it a minute
-before testing. Ctrl+C to stop it.
+before testing.
 
-Push-to-talk, no shortcut binding needed:
-  - Keyboard: hold Right Ctrl, speak, release.
-  - Mouse: hold the side button, speak, release.
-Watch its terminal output for lines starting with '[hotkey] watching' to
-confirm both devices were found. If a device wasn't found (wrong name
-match), set DICTATE_KEYBOARD_DEVICE / DICTATE_MOUSE_DEVICE env vars before
-running it — see README.md.
-
-Want a manual toggle trigger too (e.g. a one-off DE shortcut)? Start with
-'--toggle' instead so it opens a socket for './toggle.py':
-
-  $DICT_DIR/dictate.py --toggle
-
-If you were just added to the 'input' group, log out and back in once
-before the first use, otherwise ydotool/evdev will fail with a permission
-error.
+Push-to-talk needs Hyprland binds that call toggle.py (no input-group
+access involved); see README.md for the hypr/hyprland.lua snippet.
 EOF

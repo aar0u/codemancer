@@ -1,13 +1,24 @@
 # Dictation (SenseVoice-Small + sherpa-onnx)
 
-本地离线的 Push-to-Talk 语音输入，适用于 Linux (CachyOS + KDE Plasma / Wayland)。
-按住键盘按键（默认 `KEY_RIGHTCTRL`，即右 Ctrl）或鼠标侧键（`BTN_EXTRA`）说话，松开即打字上屏。
+本地离线的 Push-to-Talk 语音输入，适用于 Linux (CachyOS + Hyprland / Wayland)。
+按住快捷键（右 Ctrl 或鼠标侧键）说话，松开即打字上屏。快捷键由 Hyprland 的 bind 触发，守护进程不读 `/dev/input`，也不写 `/dev/uinput`，用户不需要加入 `input` 组。
 
 ## 架构
 
-- `dictate.py` —— 核心脚本，adhoc 手动运行（前台跑，`Ctrl+C` 停）。首次运行自动下载 SenseVoice-Small int8 ONNX 模型（到 `$SENSEVOICE_MODEL_DIR`，默认 `~/.local/share/sensevoice`）；动态扫描并监听所有包含目标热键的物理输入设备（evdev 设备池，即插即用）；松开按键后整段音频一次性送入解码（CPU 推理仅 ~75ms）；通过 `wl-copy` + `ydotool` (Shift+Insert) 模拟按键注入焦点窗口。默认只用 evdev 热键，不开 socket；加 `--toggle` 才会监听 `$XDG_RUNTIME_DIR/dictate.sock`，用完随进程退出自动清理，不会留垃圾文件。
-- `toggle.py` —— 纯 stdlib 的轻量客户端，向 `$XDG_RUNTIME_DIR/dictate.sock` 发送信号，给用 `--toggle` 启动的 `dictate.py` 做手动 toggle 触发。
-- `sniff_key.py` —— 辅助脚本，用于探测新键盘或鼠标按键的 evdev 键码。
+- `dictate.py` —— 核心脚本。首次运行自动下载 SenseVoice-Small int8 ONNX 模型（到 `$SENSEVOICE_MODEL_DIR`，默认 `~/.local/share/sensevoice`）；监听 `$XDG_RUNTIME_DIR/dictate.sock`（权限 600），接收 `start <source>`、`stop <source>`、`toggle`；松开后整段音频一次性送入解码（CPU 推理仅 ~75ms）；文字优先走 fcitx5 D-Bus 提交，回退到 `wl-copy` + `wtype` (Shift+Insert)。
+- `toggle.py` —— 纯 stdlib 的轻量客户端，向 socket 发送上述指令，由 Hyprland bind 调用。
+
+## 快捷键（`hypr/hyprland.lua`）
+
+按下发 `start`，松开发 `stop`。`source` 区分来源，只有启动录音的来源才能停止它。`non_consuming` 让右 Ctrl 仍可正常用作 Ctrl；右 Ctrl 的松开事件需要 `ignore_mods`，否则不触发。
+
+```lua
+local dictate = "python3 /mnt/storage/dev/codemancer/dictation/toggle.py"
+hl.bind("Control_R", hl.dsp.exec_cmd(dictate .. " start kbd"),  { non_consuming = true })
+hl.bind("Control_R", hl.dsp.exec_cmd(dictate .. " stop kbd"),   { non_consuming = true, release = true, ignore_mods = true })
+hl.bind("mouse:276", hl.dsp.exec_cmd(dictate .. " start mouse"), { non_consuming = true })  -- BTN_EXTRA
+hl.bind("mouse:276", hl.dsp.exec_cmd(dictate .. " stop mouse"),  { non_consuming = true, release = true })
+```
 
 ## 使用方式
 
@@ -24,13 +35,9 @@ uv run dictate.py
 # 2. 临时搭配云端 API 测试
 DICTATE_API_KEY="gsk_xxxxxxxxxxxx" uv run dictate.py
 
-# 3. 开启 Unix socket 供手动 toggle 测试
-uv run dictate.py --toggle
-# 另开终端触发一次录音/停止：
+# 3. 另开终端手动触发一次录音/停止
 python3 toggle.py
 ```
-
-> **提示**：直接运行需要当前用户具备 `/dev/input/*` 读取权限（`sudo usermod -aG input $USER`），或由 `install.sh` 完成配置。
 
 ---
 
@@ -39,7 +46,7 @@ python3 toggle.py
 适合日常长期使用，开机随桌面环境自启：
 
 ```bash
-# 一键安装依赖、udev 规则并注册启动 systemd 服务
+# 一键安装依赖并注册启动 systemd 服务
 bash install.sh
 
 # 查看实时运行日志
@@ -48,7 +55,7 @@ journalctl --user -u dictate -f
 # 重启服务
 systemctl --user restart dictate
 
-# 完全卸载（清理模型、移除 service 与 udev 规则）
+# 完全卸载（清理模型、移除 service）
 bash uninstall.sh
 ```
 
@@ -69,11 +76,7 @@ systemctl --user restart dictate
 所有可用配置项及默认值：
 
 ```bash
-# 1. 硬件按键自定义（可选，默认已为右 Ctrl 与鼠标侧键）
-DICTATE_KEYBOARD_KEY=KEY_RIGHTCTRL
-DICTATE_MOUSE_BUTTON=BTN_EXTRA
-
-# 2. 云端 ASR API 配置（可选，标准 OpenAI 协议，配置 API Key 即自动启用）
+# 云端 ASR API 配置（可选，标准 OpenAI 协议，配置 API Key 即自动启用）
 DICTATE_API_KEY=gsk_xxxxxxxxxxxx                 # 或标准 OPENAI_API_KEY / GROQ_API_KEY
 DICTATE_API_BASE=https://api.groq.com/openai/v1   # 默认 Groq；可换硅基流动、官方 OpenAI 或自建服务
 DICTATE_API_MODEL=whisper-large-v3-turbo          # 默认模型
@@ -82,7 +85,7 @@ DICTATE_API_MODEL=whisper-large-v3-turbo          # 默认模型
 - **引擎工作模式**：
   - **云端模式**（配置了 API Key）：每次说话请求云端 GPU/LPU，~150ms 极速返回满血 Whisper 识别结果。**若网络故障或 API 报错，直接弹窗报错提示，不隐式回退**，确保异常被明确感知。
   - **离线模式**（未配置 API Key）：启动时自动加载本地 SenseVoice-Small int8 模型，断网也能 70ms 瞬出。
-- **文字注入自适应**：优先走 `fcitx5-commit` 原生 D-Bus 直出（零剪贴板污染）；若输入框无焦点或插件未就绪，自动回退到 `wl-copy` + `ydotool` (Shift+Insert)。
+- **文字注入自适应**：优先走 `fcitx5-commit` 原生 D-Bus 直出（零剪贴板污染）；若输入框无焦点或插件未就绪，自动回退到 `wl-copy` + `wtype` (Shift+Insert)。
 
 ## 关键技术选型依据
 
@@ -97,4 +100,4 @@ Push-to-Talk 按键本身就是最精准的语音起止边界。早期尝试过 
 
 ### 3. 文字注入方式：Fcitx5 原生提交优先，剪贴板保底
 - **Fcitx5 原生提交（推荐，彻底告别剪贴板）**：仓库内自带源码，执行 `./fcitx5-commit/build.sh` 即可一键编译安装到系统。`dictate.py` 会直接通过系统 D-Bus (`busctl`) 将文字交给 Fcitx5 的 `commitString` 在光标处微秒级原子上屏，完全不触碰系统剪贴板、零竞态。
-- **剪贴板 + Shift+Insert（无感保底）**：若未检测到 Fcitx5 commit 接口，自动回退到 `wl-copy` + `ydotool` 模拟内核 Shift+Insert，并在粘贴后自动还原剪贴板内容。
+- **剪贴板 + Shift+Insert（无感保底）**：若未检测到 Fcitx5 commit 接口，自动回退到 `wl-copy` + `wtype`（Wayland virtual-keyboard 协议）模拟 Shift+Insert，并在粘贴后自动还原剪贴板内容。不用 `ydotool`：它写 `/dev/uinput`，需要 `input` 组权限，而且沙箱里的程序拿到同样权限就能往系统里注入按键。
