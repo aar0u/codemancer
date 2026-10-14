@@ -414,6 +414,12 @@ def set_macos_overlay_level(widget: QWidget):
     )
 
 
+# Qt.Tool keeps frameless top-levels out of the Windows taskbar; on macOS it would hide them on app deactivate.
+OVERLAY_WINDOW_FLAGS = Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint
+if sys.platform != "darwin":
+    OVERLAY_WINDOW_FLAGS |= Qt.WindowType.Tool
+
+
 def get_virtual_desktop_bounds(screens) -> Tuple[int, int, int, int]:
     """Calculate the virtual desktop bounds from multiple screens."""
     if not screens:
@@ -1208,7 +1214,7 @@ class ActionBar(QWidget):
     def __init__(self, controller: "AppController"):
         super().__init__()
         self.controller = controller
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        self.setWindowFlags(OVERLAY_WINDOW_FLAGS)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1543,7 +1549,7 @@ class OverlayBase(QWidget):
         super().__init__()
         self.controller = controller
         self.actionbar = actionbar
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        self.setWindowFlags(OVERLAY_WINDOW_FLAGS)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFocus()
         self.setMouseTracking(True)
@@ -2296,7 +2302,7 @@ class CaptureOverlay(OverlayBase):
                 self.controller,
                 self.actionbar,
                 content,
-                position=selection_rect.topLeft(),
+                position=self.mapToGlobal(selection_rect.topLeft()),
                 annotation_states=self.annotation_states,
                 undo_redo_index=self.undo_redo_index
             )

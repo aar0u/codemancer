@@ -5,6 +5,8 @@ import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.KeyEvent;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -212,9 +214,17 @@ public class JvaScheduler extends JPanel {
                     Duration duration = Duration.between(now, clickTime);
                     label.setText(format(duration));
                     if (duration.isNegative()) {
-                        // Options: NUMLOCK, SCROLL_LOCK, CAPS_LOCK, SPACE, ENTER
-                        robot.keyPress(KeyEvent.VK_NUM_LOCK);
-                        robot.keyRelease(KeyEvent.VK_NUM_LOCK);
+                        if (System.getProperty("os.name").toLowerCase().contains("mac")) {
+                            if (macIdleSeconds() >= MAC_IDLE_THRESHOLD_SECONDS) {
+                                // macOS has no Num Lock; nudge the cursor 1px and back (sent only while idle).
+                                Point p = MouseInfo.getPointerInfo().getLocation();
+                                robot.mouseMove(p.x + 1, p.y);
+                                robot.mouseMove(p.x, p.y);
+                            }
+                        } else {
+                            robot.keyPress(KeyEvent.VK_NUM_LOCK);
+                            robot.keyRelease(KeyEvent.VK_NUM_LOCK);
+                        }
                         clickTime = LocalDateTime.now()
                                 .plusMinutes(3)
                                 .plusSeconds(ThreadLocalRandom.current().nextLong(30));
@@ -224,6 +234,26 @@ public class JvaScheduler extends JPanel {
         otpTimer = new Timer(1000, e -> updateOTPDisplays());
         otpTimer.start();
         updateOTPDisplays();
+    }
+
+    private static final double MAC_IDLE_THRESHOLD_SECONDS = 60;
+
+    /** Seconds since the last real HID input; Double.MAX_VALUE (treated as idle) if it cannot be read. */
+    private static double macIdleSeconds() {
+        try {
+            Process p = new ProcessBuilder("ioreg", "-c", "IOHIDSystem", "-d", "4").redirectErrorStream(true).start();
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    if (line.contains("HIDIdleTime")) {
+                        return Long.parseLong(line.substring(line.indexOf('=') + 1).trim()) / 1e9;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // fall through to the unreadable case below
+        }
+        return Double.MAX_VALUE;
     }
 
     private void stopTimer() {
