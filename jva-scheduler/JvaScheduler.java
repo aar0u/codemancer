@@ -33,7 +33,36 @@ public class JvaScheduler extends JPanel {
     private List<OTPConfig> otpConfigs;
     private List<JLabel> otpLabels;
     private List<JLabel> countdownLabels;
-    private List<JProgressBar> progressBars;
+    private List<CountdownBar> progressBars;
+
+    /** Plain-painted bar; avoids the Aqua JProgressBar painter. */
+    private static final class CountdownBar extends JComponent {
+        private static final Color TRACK = new Color(225, 225, 225);
+        private static final Color FILL = new Color(70, 130, 220);
+        private final int max;
+        private int value;
+
+        CountdownBar(int max) {
+            this.max = max;
+            this.value = max;
+            setOpaque(false);
+        }
+
+        void setValue(int v) {
+            if (v != value) {
+                value = v;
+                repaint();
+            }
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            g.setColor(TRACK);
+            g.fillRect(0, 0, getWidth(), getHeight());
+            g.setColor(FILL);
+            g.fillRect(0, 0, getWidth() * value / max, getHeight());
+        }
+    }
 
     public JvaScheduler() {
         setLayout(new BorderLayout());
@@ -173,9 +202,7 @@ public class JvaScheduler extends JPanel {
             bottomPanel.add(countdownLabel, BorderLayout.WEST);
             countdownLabels.add(countdownLabel);
 
-            JProgressBar progressBar = new JProgressBar(0, config.getPeriod());
-            progressBar.setValue(config.getPeriod());
-            progressBar.setStringPainted(false);
+            CountdownBar progressBar = new CountdownBar(config.getPeriod());
             progressBar.setPreferredSize(new Dimension(200, 15));
             JPanel progressPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
             progressPanel.add(progressBar);
